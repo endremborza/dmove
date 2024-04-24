@@ -18,3 +18,6 @@ fix-atts:
 
 var-atts:
 	cargo run --release -- var-atts $(OA_ROOT) 
+
+serve:
+	python pysrc/serve.py
