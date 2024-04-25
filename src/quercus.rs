@@ -1,50 +1,60 @@
-use core::f32;
 use hashbrown::HashMap;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::{self, BufReader, Read};
-use std::marker::PhantomData;
-use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
-use tqdm::tqdm;
+use serde::{Deserialize, Serialize};
+use std::io;
+use tqdm::*;
 
-use crate::common::{Stowage, COUNTRIES, INSTS, MAIN_CONCEPTS, QS, SOURCES, SUB_CONCEPTS};
+use crate::common::{Stowage, COUNTRIES, INSTS, MAIN_CONCEPTS, SOURCES, SUB_CONCEPTS};
 use crate::ingest_entity::get_idmap;
+use crate::oa_var_atts::{
+    get_attribute_resolver_map, iter_ref_paths, AttributeResolverMap, MappedAttributes, MidId,
+};
 
-// use std::sync::{mpsc, Arc};
-// use std::thread;
-// const MAX_DEPTH: u8 = 6;
-// TODO: define Quercus with macros
-// Optimizations:
-// - replace GraphPath and QuercusPath with Arrays from Vector
-// - don't add to quercus set_paths on all levels, only after last breakdown
-//   - merge them to n_unique at export
+type GraphPath = Vec<MidId>;
+type AttributeStaticMap = HashMap<String, HashMap<MidId, AttributeStatic>>;
 
-type EntityInd = u32;
-type QuercusLevelInd = usize;
-type QuercusBranch = Vec<QuercusLevelInd>;
-type GraphPath = Vec<EntityInd>;
+struct AttributeResolver {
+    entity_types: Vec<String>,
+}
 
-type SMap<T> = HashMap<String, T>;
+impl AttributeResolver {
+    fn name(&self) -> String {
+        return self.entity_types.join("_");
+    }
+}
 
-type AttributeResolverMap<T: AttributeResolver> = SMap<T>;
-type AttributeStaticMap = SMap<HashMap<QuercusLevelInd, AttributeStatic>>;
+struct BreakdownHierarchy {
+    levels: Vec<usize>,
+    side: usize,
+    resolver_id: String,
+}
 
+impl BreakdownHierarchy {
+    fn new(resolver_id: &str, levels: Vec<usize>, side: usize) -> Self {
+        Self {
+            levels,
+            side,
+            resolver_id: resolver_id.to_owned(),
+        }
+    }
+
+    fn entity_types(&self) -> Vec<&str> {
+        self.resolver_id.split("_").collect()
+    }
+}
 #[derive(Debug, Serialize)]
 pub struct Quercus {
     //TODO: at one point include "stats" or "meta"
     weight: u32,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
-    children: HashMap<QuercusLevelInd, Quercus>,
+    children: HashMap<MidId, Quercus>,
 }
 
-struct QuercusRoller<'a, T: AttributeResolver> {
-    aresolver_map: &'a AttributeResolverMap<T>,
-    all_bifhs: &'a [BreakdownHierarchy<T>],
+struct QuercusRoller<'a> {
+    aresolver_map: &'a AttributeResolverMap,
+    all_bifhs: &'a [BreakdownHierarchy],
     current_entity_indices: GraphPath,
     current_hier_index: usize,
-    current_setup_index: usize,
+    current_index_within_hier_levels: usize,
     current_hier_depth: usize,
 }
 
@@ -81,7 +91,14 @@ trait Absorbable {
 }
 
 impl Quercus {
-    fn get_and_add(&mut self, k: &usize) -> &mut Quercus {
+    fn new() -> Self {
+        Self {
+            weight: 0,
+            children: HashMap::new(),
+        }
+    }
+
+    fn get_and_add(&mut self, k: &MidId) -> &mut Quercus {
         let entry = self.children.entry(*k);
         let child = entry.or_insert_with(|| Quercus::new());
         child.weight += 1;
@@ -89,20 +106,31 @@ impl Quercus {
     }
 }
 
-impl QuercusRoller<'_, T> {
+impl<'a> QuercusRoller<'a> {
+    fn new(all_bifhs: &'a [BreakdownHierarchy], aresolver_map: &'a AttributeResolverMap) -> Self {
+        Self {
+            aresolver_map,
+            all_bifhs,
+            current_entity_indices: vec![0; all_bifhs.len()],
+            current_hier_index: 0,
+            current_index_within_hier_levels: 0,
+            current_hier_depth: 0,
+        }
+    }
+
     fn set(&mut self, graph_path: GraphPath) {
         for (i, v) in self.all_bifhs.iter().enumerate() {
-            self.current_entity_indices[i] = graph_path[v.entity_col_ind];
+            self.current_entity_indices[i] = graph_path[v.side];
         }
     }
 
     fn roll_hier(&mut self, current_quercus: &mut Quercus) -> Option<()> {
         let bifh = self.all_bifhs.get(self.current_hier_index)?;
-        self.current_setup_index = 0;
+        self.current_index_within_hier_levels = 0;
         self.current_hier_depth = 0;
         let resolver = &self.aresolver_map[&bifh.resolver_id];
         let entity_ind = self.current_entity_indices[self.current_hier_index];
-        let mapped_attributes = resolver.att_map.get(&entity_ind)?;
+        let mapped_attributes = resolver.get(&entity_ind)?;
         self.roll_setup(Some(mapped_attributes), current_quercus);
         None
     }
@@ -112,11 +140,13 @@ impl QuercusRoller<'_, T> {
         mapped_attributes: Option<&MappedAttributes>,
         current_quercus: &mut Quercus,
     ) {
+        use MappedAttributes::{List, Map};
         if let Some(si) = self.all_bifhs[self.current_hier_index]
             .levels
-            .get(self.current_setup_index)
+            .get(self.current_index_within_hier_levels)
         {
             if self.current_hier_depth < *si {
+                // not really using this level, move on to next
                 // <= and not < because of the += 1
                 match mapped_attributes.unwrap() {
                     List(_) => {
@@ -136,17 +166,15 @@ impl QuercusRoller<'_, T> {
                 match mapped_attributes.unwrap() {
                     List(vec_data) => {
                         for v in vec_data {
-                            //resets setup index and hier depth here
                             self.hierarchy_ender(cq.get_and_add(v));
                         }
                     }
                     Map(map_data) => {
                         for (k, v) in map_data {
-                            self.current_setup_index += 1;
+                            self.current_index_within_hier_levels += 1;
                             self.current_hier_depth += 1;
                             self.roll_setup(Some(v), cq.get_and_add(k));
-                            //this rolls over and resets in roll_hier :(
-                            self.current_setup_index -= 1;
+                            self.current_index_within_hier_levels -= 1;
                             self.current_hier_depth -= 1;
                         }
                     }
@@ -158,11 +186,17 @@ impl QuercusRoller<'_, T> {
     }
 
     fn hierarchy_ender(&mut self, qc: &mut Quercus) {
-        let old_ends = (self.current_hier_depth, self.current_setup_index);
+        let old_ends = (
+            self.current_hier_depth,
+            self.current_index_within_hier_levels,
+        );
         self.current_hier_index += 1;
         self.roll_hier(qc);
         self.current_hier_index -= 1;
-        (self.current_hier_depth, self.current_setup_index) = old_ends;
+        (
+            self.current_hier_depth,
+            self.current_index_within_hier_levels,
+        ) = old_ends;
     }
 }
 
@@ -171,13 +205,18 @@ fn default_meta() -> String {
 }
 
 pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
+    let ares_map = get_attribute_resolver_map(stowage);
+
     let mut js_qc_specs = HashMap::new();
 
-    for bd_hiers in get_qc_spec_bases() {
+    for (i, bd_hiers) in get_qc_spec_bases().iter().enumerate() {
+        let entity_type = INSTS;
+        let id_map = get_idmap(stowage, entity_type);
+
         let mut bifurcations = Vec::new();
-        for bdh in &bd_hiers {
+        for bdh in bd_hiers {
             let res_id: Vec<&str> = bdh.entity_types();
-            let resolver_id = bdh.resolver_name();
+            let resolver_id = &bdh.resolver_id;
 
             for i in &bdh.levels {
                 bifurcations.push(JsBifurcation {
@@ -187,28 +226,38 @@ pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
                 })
             }
         }
-        let qc_key = "xy";
+        let qc_key = format!("qc-{}", i + 1);
         js_qc_specs.insert(
-            qc_key,
+            qc_key.clone(),
             JsQcSpec {
                 bifurcations,
                 root_entity_type: INSTS.to_string(),
             },
         );
+        for iid in id_map.iter_ids().tqdm().desc(Some(&qc_key)) {
+            let mut qc = Quercus::new();
+            let mut qcr = QuercusRoller::new(bd_hiers, &ares_map);
+            for ref_path in iter_ref_paths(stowage, iid.try_into().unwrap()) {
+                qcr.set(ref_path);
+                qcr.roll_hier(&mut qc);
+            }
+            stowage.write_cache(&qc, &format!("qc-builds/{}/{}", qc_key, iid))?;
+        }
     }
 
-    let mut attribute_statics = HashMap::new();
+    let mut attribute_statics: AttributeStaticMap = HashMap::new();
     for entity in [INSTS, MAIN_CONCEPTS, SUB_CONCEPTS, COUNTRIES, SOURCES] {
         let mut entity_statics = HashMap::new();
         for eid in get_idmap(stowage, entity).iter_ids() {
             let e_map = AttributeStatic {
-                name: "Name".to_string(),
-                spec_baseline: 0.5,
+                name: "Name".to_string(), //TODO
+                spec_baseline: 0.5,       //TODO
                 meta: default_meta(),
             };
-            entity_statics.insert(eid, e_map);
+            entity_statics.insert(eid as MidId, e_map);
+            todo!();
         }
-        attribute_statics.insert(entity, entity_statics);
+        attribute_statics.insert(entity.to_string(), entity_statics);
     }
     stowage.write_cache(&attribute_statics, "attribute-statics")?;
     stowage.write_cache(&js_qc_specs, "qc-specs")?;
@@ -216,99 +265,39 @@ pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
     Ok(())
 }
 
-trait AttributeResolver {
-    fn entity_types() -> Vec<String>;
-    fn name() -> String {
-        return Self::entity_types().join("-");
-    }
-}
-
-struct BreakdownHierarchy<T: AttributeResolver> {
-    levels: Vec<usize>,
-    side: usize,
-    phantom: PhantomData<T>,
-}
-
-impl<T: AttributeResolver> BreakdownHierarchy<T> {
-    fn new(levels: Vec<usize>, side: usize) -> Self {
-        Self {
-            levels,
-            side,
-            phantom: PhantomData::<T>,
-        }
-    }
-
-    fn entities() -> Vec<String> {
-        T::entity_types()
-    }
-
-    fn resolver_name() -> Vec<String> {
-        T::name()
-    }
-}
-
-struct CountryInst;
-struct ConceptHier;
-struct PaperSource;
-struct QedSource;
-
-impl AttributeResolver for CountryInst {
-    fn entity_types() -> Vec<String> {
-        vec![COUNTRIES.to_string(), INSTS.to_string()]
-    }
-}
-
-impl AttributeResolver for ConceptHier {
-    fn entity_types() -> Vec<String> {
-        vec![MAIN_CONCEPTS.to_string(), SUB_CONCEPTS.to_string()]
-    }
-}
-
-impl AttributeResolver for PaperSource {
-    fn entity_types() -> Vec<String> {
-        vec![SOURCES.to_string()]
-    }
-}
-
-impl AttributeResolver for QedSource {
-    fn entity_types() -> Vec<String> {
-        vec![QS.to_string(), SOURCES.to_string()]
-    }
-}
-
-pub fn get_qc_spec_bases() -> Vec<Vec<BreakdownHierarchy<dyn AttributeResolver>>> {
+fn get_qc_spec_bases() -> Vec<Vec<BreakdownHierarchy>> {
     vec![
         vec![
-            BreakdownHierarchy::<CountryInst>::new(vec![0, 1], 1),
-            BreakdownHierarchy::<ConceptHier>::new(vec![0, 1], 1),
+            BreakdownHierarchy::new("country-inst", vec![0, 1], 1),
+            BreakdownHierarchy::new("concept-hier", vec![0, 1], 1),
         ],
         vec![
-            BreakdownHierarchy::<ConceptHier>::new(vec![0], 0),
-            BreakdownHierarchy::<CountryInst>::new(vec![0, 1], 1),
-            BreakdownHierarchy::<ConceptHier>::new(vec![0], 1),
+            BreakdownHierarchy::new("concept-hier", vec![0], 0),
+            BreakdownHierarchy::new("country-inst", vec![0, 1], 1),
+            BreakdownHierarchy::new("concept-hier", vec![0], 1),
         ],
         vec![
-            BreakdownHierarchy::<CountryInst>::new(vec![0], 0),
-            BreakdownHierarchy::<ConceptHier>::new(vec![0, 1], 1),
+            BreakdownHierarchy::new("country-inst", vec![0], 0),
+            BreakdownHierarchy::new("concept-hier", vec![0, 1], 1),
         ],
         vec![
-            BreakdownHierarchy::<CountryInst>::new(vec![0], 0),
-            BreakdownHierarchy::<ConceptHier>::new(vec![0, 1], 0),
-            BreakdownHierarchy::<CountryInst>::new(vec![1], 0), //TODO tricky!!!
+            BreakdownHierarchy::new("country-inst", vec![0], 0),
+            BreakdownHierarchy::new("concept-hier", vec![0, 1], 0),
+            BreakdownHierarchy::new("country-inst", vec![1], 0), //TODO tricky!!!
         ],
         vec![
-            BreakdownHierarchy::<PaperSource>::new(vec![0], 1),
-            BreakdownHierarchy::<CountryInst>::new(vec![0], 1),
-            BreakdownHierarchy::<ConceptHier>::new(vec![0], 1),
+            BreakdownHierarchy::new("paper-source", vec![0], 1),
+            BreakdownHierarchy::new("country-inst", vec![0], 1),
+            BreakdownHierarchy::new("concept-hier", vec![0], 1),
         ],
         vec![
-            BreakdownHierarchy::<ConceptHier>::new(vec![0, 1], 1),
-            BreakdownHierarchy::<PaperSource>::new(vec![0], 1),
+            BreakdownHierarchy::new("concept-hier", vec![0, 1], 1),
+            BreakdownHierarchy::new("paper-source", vec![0], 1),
         ],
         vec![
-            BreakdownHierarchy::<QedSource>::new(vec![0, 1], 0),
-            BreakdownHierarchy::<CountryInst>::new(vec![0], 1),
-            BreakdownHierarchy::<ConceptHier>::new(vec![0], 1),
+            BreakdownHierarchy::new("qed-source", vec![0, 1], 0),
+            BreakdownHierarchy::new("country-inst", vec![0], 1),
+            BreakdownHierarchy::new("concept-hier", vec![0], 1),
         ],
     ]
 }

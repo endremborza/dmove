@@ -5,7 +5,7 @@ use crate::{
     oa_filters::SConcept,
 };
 use serde::Deserialize;
-use std::{io, io::Write};
+use std::io::{self, Read, Write};
 use tqdm::Iter;
 
 #[derive(Deserialize, Debug)]
@@ -58,15 +58,15 @@ pub fn write_fix_atts(stowage: &Stowage) -> io::Result<()> {
     let iid_map_arg = &mut iid_map;
     let cid_map_arg = &mut cid_map;
     let cfatt_name = "inst-country";
-    // by_size!(
-    //     run_fatt,
-    //     SInstitution,
-    //     ct,
-    //     stowage,
-    //     cfatt_name,
-    //     INSTS,
-    //     cid_map_arg,
-    // );
+    by_size!(
+        run_fatt,
+        SInstitution,
+        ct,
+        stowage,
+        cfatt_name,
+        INSTS,
+        cid_map_arg,
+    );
     let fatt_name = "concept-levels";
     let max_level = 3;
     by_size!(
@@ -130,4 +130,19 @@ where
     for att in attribute_arr {
         out_file.write(&att.barr()).unwrap();
     }
+}
+
+pub fn read_fix_att(stowage: &Stowage, name: &str) -> Vec<u8> {
+    const s: usize = 1; //TODO absolute shambles
+    let mut out = Vec::new();
+    let mut buf: [u8; s] = [0; s];
+    let mut br = stowage.get_fix_reader(name);
+    loop {
+        if let Ok(_) = br.read_exact(&mut buf) {
+            out.push(buf[0])
+        } else {
+            break;
+        }
+    }
+    out
 }

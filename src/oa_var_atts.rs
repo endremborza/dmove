@@ -1,7 +1,7 @@
 use std::{
     fs::{create_dir_all, File},
     io::{self, Read, Seek, SeekFrom, Write},
-    str, usize,
+    usize,
 };
 
 use hashbrown::HashMap;
@@ -10,11 +10,54 @@ use tqdm::Iter;
 
 use crate::{
     add_strict_parsed_id_traits,
-    common::{oa_id_parse, BigId, ParsedId, Stowage, CONCEPTS, INSTS, SOURCES, WORKS},
+    common::{
+        oa_id_parse, BigId, ParsedId, Stowage, CONCEPTS, COUNTRIES, INSTS, MAIN_CONCEPTS, QS,
+        SOURCES, SUB_CONCEPTS, WORKS,
+    },
     ingest_entity::get_idmap,
     oa_filters::InstAuthorship,
-    oa_structs::{Ancestor, Location, ReferencedWork},
+    oa_fix_atts::read_fix_att,
+    oa_structs::{Ancestor, Location, ReferencedWork, WorkConcept},
 };
+
+pub type MidId = u32;
+type CountryId = u8;
+type InstId = u16; // TODO figure this shit out to be dynamic properly
+type ConceptId = u16;
+type SourceId = u16;
+type WorkId = u32;
+pub type AttributeResolverMap = HashMap<String, HashMap<MidId, MappedAttributes>>;
+
+pub enum MappedAttributes {
+    List(Vec<MidId>),
+    Map(HashMap<MidId, MappedAttributes>),
+}
+
+struct WeightedEdge<T> {
+    id: T,
+    rate: f32,
+}
+
+struct HierEdge<T1, T2> {
+    id: T1,
+    subs: Vec<T2>,
+}
+
+struct InstToWorkPrep {
+    total_authors: u16,
+    inst_specs: Vec<InstPrepInner>,
+}
+
+struct InstPrepInner {
+    inst_id: InstId,
+    authors: u16,
+}
+
+#[derive(Deserialize)]
+struct NamedEntity {
+    id: String,
+    display_name: String,
+}
 
 trait ByteConvert {
     fn to_bytes(&self) -> Vec<u8>;
@@ -37,33 +80,6 @@ macro_rules! id_impl {
 }
 
 id_impl!(u8, u16, u32, u64,);
-
-type InstId = u16; // TODO figure this shit out to be dynamic properly
-type ConceptId = u16;
-type SourceId = u16;
-type WorkId = u32;
-
-struct WeightedEdge<T> {
-    id: T,
-    rate: f32,
-}
-
-struct InstToWorkPrep {
-    total_authors: u16,
-    inst_specs: Vec<InstPrepInner>,
-}
-
-struct InstPrepInner {
-    inst_id: InstId,
-    authors: u16,
-}
-
-#[derive(Deserialize)]
-struct NamedEntity {
-    id: String,
-    display_name: String,
-}
-
 add_strict_parsed_id_traits!(NamedEntity);
 
 impl WeightedEdge<InstId> {
@@ -79,29 +95,13 @@ impl WeightedEdge<InstId> {
     }
 }
 
-fn int_div<T>(dividend: T, divisor: T) -> f32
-where
-    f32: From<T>,
-{
-    f32::from(dividend) / f32::from(divisor)
-}
-
-impl<T: ByteConvert> ByteConvert for WeightedEdge<T> {
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend(self.id.to_bytes());
-        out.extend(self.rate.to_be_bytes());
-        out
-    }
-
-    fn from_bytes(buf: &[u8]) -> Self {
-        let mut i = 0;
-        let mut i2 = i + std::mem::size_of::<T>();
-        let id = T::from_bytes(&buf[i..i2]);
-        i = i2;
-        i2 = i + std::mem::size_of::<f32>();
-        let rate = f32::from_be_bytes(buf[i..i2].try_into().unwrap());
-        Self { id, rate }
+impl<T1, T2> HierEdge<T1, T2> {
+    fn new(id: T1, sub_id: Option<T2>) -> Self {
+        let subs = match sub_id {
+            Some(sid) => vec![sid],
+            None => vec![],
+        };
+        Self { id, subs }
     }
 }
 
@@ -111,7 +111,7 @@ impl ByteConvert for String {
     }
 
     fn from_bytes(buf: &[u8]) -> Self {
-        str::from_utf8(buf).unwrap().to_string()
+        std::str::from_utf8(buf).unwrap().to_string()
     }
 }
 
@@ -137,6 +137,39 @@ impl<T: ByteConvert> ByteConvert for Vec<T> {
             };
         }
         out
+    }
+}
+
+//TODO look into how to do this properly
+impl<T: ByteConvert> ByteConvert for WeightedEdge<T> {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend(self.id.to_bytes());
+        out.extend(self.rate.to_be_bytes());
+        out
+    }
+
+    fn from_bytes(buf: &[u8]) -> Self {
+        let i2 = std::mem::size_of::<T>();
+        let id = T::from_bytes(&buf[..i2]);
+        let rate = f32::from_be_bytes(buf[i2..].try_into().unwrap());
+        Self { id, rate }
+    }
+}
+
+impl<T1: ByteConvert, T2: ByteConvert> ByteConvert for HierEdge<T1, T2> {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend(self.id.to_bytes());
+        out.extend(Vec::<T2>::to_bytes(&self.subs));
+        out
+    }
+
+    fn from_bytes(buf: &[u8]) -> Self {
+        let i2 = std::mem::size_of::<T1>();
+        let id = T1::from_bytes(&buf[..i2]);
+        let subs = Vec::<T2>::from_bytes(buf[i2..].try_into().unwrap());
+        Self { id, subs }
     }
 }
 
@@ -167,10 +200,10 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
     // concept parents
     //
     println!("getting maps");
-    let mut conc_id_map = get_idmap(stowage, CONCEPTS).to_map();
-    let mut inst_id_map = get_idmap(stowage, INSTS).to_map();
-    let mut work_id_map = get_idmap(stowage, WORKS).to_map();
-    let mut source_id_map = get_idmap(stowage, SOURCES).to_map();
+    let conc_id_map = get_idmap(stowage, CONCEPTS).to_map();
+    let inst_id_map = get_idmap(stowage, INSTS).to_map();
+    let work_id_map = get_idmap(stowage, WORKS).to_map();
+    let source_id_map = get_idmap(stowage, SOURCES).to_map();
     println!("got maps");
 
     let mut concept_rdr = stowage.get_sub_reader(CONCEPTS, "ancestors");
@@ -204,16 +237,72 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
     let mut source_rdr = stowage.get_sub_reader(WORKS, "locations");
 
     let mut rel_preps: Vec<InstToWorkPrep> = Vec::new();
+    let mut country_hiers: Vec<HEdgeSet<CountryId, InstId>> = Vec::new();
+    let mut concept_hiers: Vec<HEdgeSet<ConceptId, ConceptId>> = Vec::new();
     let mut to_source: Vec<Vec<SourceId>> = Vec::new();
     let mut to_cited: Vec<Vec<WorkId>> = Vec::new();
     let mut to_citing: Vec<Vec<WorkId>> = Vec::new();
+
+    let inst_countries = read_fix_att(stowage, "inst-country");
+    let concept_levels = read_fix_att(stowage, "concept-levels");
 
     for _ in 0..(work_id_map.len() + 1) {
         rel_preps.push(InstToWorkPrep::new());
         to_cited.push(Vec::new());
         to_citing.push(Vec::new());
         to_source.push(Vec::new());
+        country_hiers.push(HEdgeSet::new());
+        concept_hiers.push(HEdgeSet::new());
     }
+
+    for w_conc_r in conc_rdr
+        .deserialize::<WorkConcept>()
+        .tqdm()
+        .desc(Some("work-concepts"))
+    {
+        let w_conc = w_conc_r?;
+        if w_conc.score.unwrap() < 0.6 {
+            continue;
+        };
+        if let (Some(work_id), Some(cid)) = (
+            work_id_map.get(&oa_id_parse(&w_conc.parent_id.unwrap())),
+            conc_id_map.get(&oa_id_parse(&w_conc.concept_id.unwrap())),
+        ) {
+            let ch_set = &mut concept_hiers[*work_id as usize];
+            if concept_levels[*cid as usize] == 0 {
+                ch_set.add(*cid as ConceptId, None);
+            } else {
+                for anc in &ancestors[*cid as usize] {
+                    ch_set.add(*anc, Some(*cid as ConceptId))
+                }
+            }
+        }
+    }
+
+    //inst - work relationships
+    for a_ship_r in rdr
+        .deserialize::<InstAuthorship>()
+        .tqdm()
+        .desc(Some("authorships"))
+    {
+        let a_ship = a_ship_r?;
+        if let Some(work_id) = work_id_map.get(&oa_id_parse(&a_ship.parent_id)) {
+            let rel_prep = &mut rel_preps[*work_id as usize];
+            rel_prep.total_authors += 1;
+            add_to_prep(&a_ship.iter_insts(), &inst_id_map, rel_prep);
+
+            let ch_set = &mut country_hiers[*work_id as usize];
+            for iid_str in &a_ship.iter_insts() {
+                if let Some(iid) = inst_id_map.get(&oa_id_parse(&iid_str)) {
+                    let country_id = inst_countries[*iid as usize];
+                    ch_set.add(country_id, Some(*iid as InstId));
+                }
+            }
+        };
+    }
+
+    write_var_att(stowage, "work-country-inst", country_hiers.iter())?;
+    write_var_att(stowage, "work-concept-hier", concept_hiers.iter())?;
 
     for source_r in source_rdr
         .deserialize::<Location>()
@@ -247,19 +336,6 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
         }
     }
 
-    //inst - work relationships
-    for a_ship_r in rdr
-        .deserialize::<InstAuthorship>()
-        .tqdm()
-        .desc(Some("authorships"))
-    {
-        let a_ship = a_ship_r?;
-        if let Some(work_id) = work_id_map.get(&oa_id_parse(&a_ship.parent_id)) {
-            let rel_prep = &mut rel_preps[*work_id as usize];
-            rel_prep.total_authors += 1;
-            add_to_prep(&a_ship.iter_insts(), &inst_id_map, rel_prep);
-        };
-    }
     let mut i2w: Vec<Vec<WeightedEdge<WorkId>>> = Vec::new();
     for _ in 0..(inst_id_map.len() + 1) {
         i2w.push(Vec::new());
@@ -347,6 +423,14 @@ where
     Ok(())
 }
 
+pub fn get_attribute_resolver_map(stowage: &Stowage) -> AttributeResolverMap {
+    HashMap::new()
+}
+
+pub fn iter_ref_paths(stowage: &Stowage, iid: InstId) -> Vec<Vec<MidId>> {
+    Vec::new()
+}
+
 fn read_var_att<T: ByteConvert>(stowage: &Stowage, att_name: &str) -> Vec<T> {
     let mut out = Vec::new();
     let att_dir = stowage.var_atts.join(att_name);
@@ -410,4 +494,61 @@ pub fn read_from_sizes<T: Read + Seek>(reader: &mut T, idx: u32) -> io::Result<F
         offset: u64::from_be_bytes(obuf),
         count: u32::from_be_bytes(cbuf),
     })
+}
+
+fn get_mapped_atts() {
+    let v = vec![
+        (
+            "country-inst",
+            vec![COUNTRIES.to_string(), INSTS.to_string()],
+        ),
+        (
+            "concept-hier",
+            vec![MAIN_CONCEPTS.to_string(), SUB_CONCEPTS.to_string()],
+        ),
+        ("paper-source", vec![SOURCES.to_string()]),
+        ("qed-source", vec![QS.to_string(), SOURCES.to_string()]),
+    ];
+}
+
+struct HEdgeSet<T1, T2>(Vec<HierEdge<T1, T2>>);
+
+impl<T1: Eq, T2: Eq> HEdgeSet<T1, T2> {
+    fn new() -> Self {
+        Self(vec![])
+    }
+
+    fn add(&mut self, main_id: T1, sub_id: Option<T2>) {
+        for ch in &mut self.0 {
+            if ch.id == main_id {
+                if let Some(sid) = sub_id {
+                    for presid in &ch.subs {
+                        if sid == *presid {
+                            return;
+                        }
+                    }
+                    ch.subs.push(sid);
+                }
+                return;
+            }
+        }
+        self.0.push(HierEdge::new(main_id, sub_id))
+    }
+}
+
+impl<T1: ByteConvert, T2: ByteConvert> ByteConvert for HEdgeSet<T1, T2> {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.0.to_bytes()
+    }
+
+    fn from_bytes(buf: &[u8]) -> Self {
+        Self(Vec::<HierEdge<T1, T2>>::from_bytes(buf))
+    }
+}
+
+fn int_div<T>(dividend: T, divisor: T) -> f32
+where
+    f32: From<T>,
+{
+    f32::from(dividend) / f32::from(divisor)
 }

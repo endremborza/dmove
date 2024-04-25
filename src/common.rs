@@ -134,6 +134,10 @@ impl Stowage {
         File::create(self.fix_atts.join(att_name)).unwrap()
     }
 
+    pub fn get_fix_reader(&self, att_name: &str) -> BufReader<File> {
+        BufReader::new(File::open(self.fix_atts.join(att_name)).unwrap())
+    }
+
     pub fn write_cache<T: Serialize>(&self, obj: &T, path: &str) -> io::Result<()> {
         let out_path = self.cache.join(path);
         write_gz(&out_path, obj)
