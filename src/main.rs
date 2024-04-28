@@ -43,7 +43,7 @@ fn main() -> io::Result<()> {
         } else if comm == "var-atts" {
             write_var_atts(&stowage)?;
         } else if comm == "build-qcs" {
-            dump_all_cache(&stowage);
+            dump_all_cache(&stowage)?;
         }
     }
     Ok(())

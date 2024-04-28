@@ -146,8 +146,8 @@ pub struct Geo {
     city: Option<String>,
     geonames_city_id: Option<String>,
     region: Option<String>,
-    country_code: Option<String>,
-    country: Option<String>,
+    pub country_code: Option<String>,
+    pub country: Option<String>,
     latitude: Option<f64>,
     longitude: Option<f64>,
 }

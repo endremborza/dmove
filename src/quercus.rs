@@ -1,44 +1,35 @@
 use hashbrown::HashMap;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::io;
 use tqdm::*;
 
-use crate::common::{Stowage, COUNTRIES, INSTS, MAIN_CONCEPTS, SOURCES, SUB_CONCEPTS};
+use crate::common::{Stowage, CONCEPTS, COUNTRIES, INSTS, MAIN_CONCEPTS, SOURCES, SUB_CONCEPTS};
 use crate::ingest_entity::get_idmap;
+use crate::oa_fix_atts::{names, read_fix_att};
 use crate::oa_var_atts::{
-    get_attribute_resolver_map, iter_ref_paths, AttributeResolverMap, MappedAttributes, MidId,
+    get_attribute_resolver_map, get_mapped_atts, get_name_name, read_var_att, vnames,
+    AttributeResolverMap, MappedAttributes, MidId, WeightedEdge, WorkId,
 };
 
 type GraphPath = Vec<MidId>;
 type AttributeStaticMap = HashMap<String, HashMap<MidId, AttributeStatic>>;
 
-struct AttributeResolver {
-    entity_types: Vec<String>,
-}
-
-impl AttributeResolver {
-    fn name(&self) -> String {
-        return self.entity_types.join("_");
-    }
-}
-
 struct BreakdownHierarchy {
     levels: Vec<usize>,
     side: usize,
     resolver_id: String,
+    entity_types: Vec<String>,
 }
 
 impl BreakdownHierarchy {
     fn new(resolver_id: &str, levels: Vec<usize>, side: usize) -> Self {
+        let entity_types: Vec<String> = get_mapped_atts(resolver_id);
         Self {
             levels,
             side,
             resolver_id: resolver_id.to_owned(),
+            entity_types,
         }
-    }
-
-    fn entity_types(&self) -> Vec<&str> {
-        self.resolver_id.split("_").collect()
     }
 }
 #[derive(Debug, Serialize)]
@@ -71,18 +62,12 @@ struct JsQcSpec {
     root_entity_type: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct PathCollectionSpec {
-    col_num: usize,
-    root_type_id: String,
-}
-
 #[derive(Serialize)]
 struct AttributeStatic {
     name: String,
-    spec_baseline: f32,
+    spec_baseline: f64,
     #[serde(default = "default_meta")]
-    meta: String,
+    meta: HashMap<String, u32>,
 }
 
 trait Absorbable {
@@ -200,65 +185,145 @@ impl<'a> QuercusRoller<'a> {
     }
 }
 
-fn default_meta() -> String {
-    "{}".to_string()
-}
-
 pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
+    let mut attribute_statics: AttributeStaticMap = HashMap::new();
+    attribute_statics.insert(MAIN_CONCEPTS.to_string(), HashMap::new());
+    attribute_statics.insert(SUB_CONCEPTS.to_string(), HashMap::new());
+
+    let clevels = read_fix_att(stowage, names::CLEVEL);
+    let cnames: Vec<String> = read_var_att(stowage, &get_name_name(CONCEPTS));
+    for cid in get_idmap(stowage, CONCEPTS).iter_ids() {
+        let k = {
+            if clevels[cid as usize] == 0 {
+                MAIN_CONCEPTS
+            } else {
+                SUB_CONCEPTS
+            }
+        };
+        attribute_statics.get_mut(k).unwrap().insert(
+            cid.try_into().unwrap(),
+            AttributeStatic {
+                name: cnames[cid as usize].clone(),
+                spec_baseline: 0.742,
+                meta: HashMap::new(),
+            },
+        );
+    }
+
+    println!("getting ares map");
     let ares_map = get_attribute_resolver_map(stowage);
 
-    let mut js_qc_specs = HashMap::new();
+    println!("getting var atts");
+    let full_clist: Vec<Vec<WorkId>> = read_var_att(stowage, vnames::TO_CITING);
+    let works_of_inst: Vec<Vec<WeightedEdge<WorkId>>> = read_var_att(stowage, vnames::I2W);
+    println!("got var atts");
 
+    //preps for specs and metas
+    let mut inst_cite_counts = vec![0; works_of_inst.len()];
+
+    let mut spec_bases_vecs: HashMap<String, HashMap<MidId, Vec<f64>>> = HashMap::new();
+    for ename in [INSTS, SOURCES, COUNTRIES, SUB_CONCEPTS, MAIN_CONCEPTS] {
+        spec_bases_vecs.insert(ename.to_owned(), HashMap::new());
+    }
+
+    let mut js_qc_specs = HashMap::new();
     for (i, bd_hiers) in get_qc_spec_bases().iter().enumerate() {
         let entity_type = INSTS;
         let id_map = get_idmap(stowage, entity_type);
 
         let mut bifurcations = Vec::new();
         for bdh in bd_hiers {
-            let res_id: Vec<&str> = bdh.entity_types();
             let resolver_id = &bdh.resolver_id;
 
             for i in &bdh.levels {
                 bifurcations.push(JsBifurcation {
-                    attribute_kind: res_id[i + 1].to_owned(),
+                    attribute_kind: bdh.entity_types[*i].clone(),
                     description: format!("{}-{}-{}", bdh.side, resolver_id, i).clone(),
                     resolver_id: resolver_id.clone(),
                 })
             }
         }
         let qc_key = format!("qc-{}", i + 1);
+
+        for iid in id_map.iter_ids().tqdm().desc(Some(&qc_key)) {
+            let mut qc = Quercus::new();
+            let mut qcr = QuercusRoller::new(bd_hiers, &ares_map);
+            for wid in works_of_inst[iid as usize].iter() {
+                for citing_wid in full_clist[wid.id as usize].iter() {
+                    let ref_path = vec![wid.id, *citing_wid];
+                    qcr.set(ref_path);
+                    qc.weight += 1;
+                    qcr.current_hier_index = 0;
+                    qcr.roll_hier(&mut qc);
+                }
+            }
+            stowage.write_cache(&qc, &format!("qc-builds/{}/{}", qc_key, iid))?;
+            inst_cite_counts[iid as usize] = qc.weight;
+            //calc spec bases for first 2 levels only
+            let root_denom = f64::from(qc.weight);
+            for (child_id, child_qc) in qc.children {
+                let rate = f64::from(child_qc.weight) / root_denom;
+                spec_bases_vecs
+                    .get_mut(&bifurcations[0].attribute_kind)
+                    .unwrap()
+                    .entry(child_id)
+                    .or_insert_with(|| Vec::new())
+                    .push(rate);
+
+                if bifurcations[0].resolver_id == bifurcations[1].resolver_id {
+                    for (sub_child_id, sub_child_qc) in child_qc.children {
+                        let rate = f64::from(sub_child_qc.weight) / root_denom;
+                        spec_bases_vecs
+                            .get_mut(&bifurcations[1].attribute_kind)
+                            .unwrap()
+                            .entry(sub_child_id)
+                            .or_insert_with(|| Vec::new())
+                            .push(rate);
+                    }
+                }
+            }
+        }
         js_qc_specs.insert(
             qc_key.clone(),
             JsQcSpec {
                 bifurcations,
-                root_entity_type: INSTS.to_string(),
+                root_entity_type: entity_type.to_string(),
             },
         );
-        for iid in id_map.iter_ids().tqdm().desc(Some(&qc_key)) {
-            let mut qc = Quercus::new();
-            let mut qcr = QuercusRoller::new(bd_hiers, &ares_map);
-            for ref_path in iter_ref_paths(stowage, iid.try_into().unwrap()) {
-                qcr.set(ref_path);
-                qcr.roll_hier(&mut qc);
-            }
-            stowage.write_cache(&qc, &format!("qc-builds/{}/{}", qc_key, iid))?;
-        }
     }
 
-    let mut attribute_statics: AttributeStaticMap = HashMap::new();
-    for entity in [INSTS, MAIN_CONCEPTS, SUB_CONCEPTS, COUNTRIES, SOURCES] {
+    for entity in [INSTS, COUNTRIES, SOURCES] {
         let mut entity_statics = HashMap::new();
+        let names: Vec<String> = read_var_att(stowage, &get_name_name(entity));
         for eid in get_idmap(stowage, entity).iter_ids() {
+            let mut meta = HashMap::new();
+            if entity == INSTS {
+                meta.insert(
+                    "papers".to_string(),
+                    works_of_inst[eid as usize].len().try_into().unwrap(),
+                );
+                meta.insert("citations".to_string(), inst_cite_counts[eid as usize]);
+            }
+
             let e_map = AttributeStatic {
-                name: "Name".to_string(), //TODO
-                spec_baseline: 0.5,       //TODO
-                meta: default_meta(),
+                name: names[eid as usize].clone(),
+                spec_baseline: 0.742,
+                meta,
             };
             entity_statics.insert(eid as MidId, e_map);
-            todo!();
         }
         attribute_statics.insert(entity.to_string(), entity_statics);
     }
+
+    for (ek, recs) in spec_bases_vecs {
+        for (k, sb_v) in recs {
+            println!("query {:?}, {:?}", ek, k);
+            let astats_p = attribute_statics.get_mut(&ek).unwrap();
+            let astats = astats_p.get_mut(&k).unwrap();
+            astats.spec_baseline = sb_v.iter().sum::<f64>() / f64::from(sb_v.len() as u32);
+        }
+    }
+
     stowage.write_cache(&attribute_statics, "attribute-statics")?;
     stowage.write_cache(&js_qc_specs, "qc-specs")?;
 
@@ -268,36 +333,36 @@ pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
 fn get_qc_spec_bases() -> Vec<Vec<BreakdownHierarchy>> {
     vec![
         vec![
-            BreakdownHierarchy::new("country-inst", vec![0, 1], 1),
-            BreakdownHierarchy::new("concept-hier", vec![0, 1], 1),
+            BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0, 1], 1),
+            BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0, 1], 1),
         ],
-        vec![
-            BreakdownHierarchy::new("concept-hier", vec![0], 0),
-            BreakdownHierarchy::new("country-inst", vec![0, 1], 1),
-            BreakdownHierarchy::new("concept-hier", vec![0], 1),
-        ],
-        vec![
-            BreakdownHierarchy::new("country-inst", vec![0], 0),
-            BreakdownHierarchy::new("concept-hier", vec![0, 1], 1),
-        ],
-        vec![
-            BreakdownHierarchy::new("country-inst", vec![0], 0),
-            BreakdownHierarchy::new("concept-hier", vec![0, 1], 0),
-            BreakdownHierarchy::new("country-inst", vec![1], 0), //TODO tricky!!!
-        ],
-        vec![
-            BreakdownHierarchy::new("paper-source", vec![0], 1),
-            BreakdownHierarchy::new("country-inst", vec![0], 1),
-            BreakdownHierarchy::new("concept-hier", vec![0], 1),
-        ],
-        vec![
-            BreakdownHierarchy::new("concept-hier", vec![0, 1], 1),
-            BreakdownHierarchy::new("paper-source", vec![0], 1),
-        ],
-        vec![
-            BreakdownHierarchy::new("qed-source", vec![0, 1], 0),
-            BreakdownHierarchy::new("country-inst", vec![0], 1),
-            BreakdownHierarchy::new("concept-hier", vec![0], 1),
-        ],
+        // vec![
+        //     BreakdownHierarchy::new("concept-hier", vec![0], 0),
+        //     BreakdownHierarchy::new("country-inst", vec![0, 1], 1),
+        //     BreakdownHierarchy::new("concept-hier", vec![0], 1),
+        // ],
+        // vec![
+        //     BreakdownHierarchy::new("country-inst", vec![0], 0),
+        //     BreakdownHierarchy::new("concept-hier", vec![0, 1], 1),
+        // ],
+        // vec![
+        //     BreakdownHierarchy::new("concept-hier", vec![0, 1], 1),
+        //     BreakdownHierarchy::new("paper-source", vec![0], 1),
+        // ],
+        // vec![
+        //     BreakdownHierarchy::new("paper-source", vec![0], 1),
+        //     BreakdownHierarchy::new("country-inst", vec![0], 1),
+        //     BreakdownHierarchy::new("concept-hier", vec![0], 1),
+        // ],
+        // vec![
+        //     BreakdownHierarchy::new("country-inst", vec![0], 0),
+        //     BreakdownHierarchy::new("concept-hier", vec![0, 1], 0),
+        //     BreakdownHierarchy::new("country-inst", vec![1], 0), //TODO tricky!!!
+        // ],
+        // vec![
+        //     BreakdownHierarchy::new("qed-source", vec![0, 1], 0),
+        //     BreakdownHierarchy::new("country-inst", vec![0], 1),
+        //     BreakdownHierarchy::new("concept-hier", vec![0], 1),
+        // ],
     ]
 }

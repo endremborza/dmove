@@ -8,6 +8,11 @@ use serde::Deserialize;
 use std::io::{self, Read, Write};
 use tqdm::Iter;
 
+pub mod names {
+    pub const I2C: &str = "inst-countries";
+    pub const CLEVEL: &str = "concept-levels";
+}
+
 #[derive(Deserialize, Debug)]
 struct SWork {
     _id: Option<String>,
@@ -57,7 +62,7 @@ pub fn write_fix_atts(stowage: &Stowage) -> io::Result<()> {
     let ct = cid_map.current_total;
     let iid_map_arg = &mut iid_map;
     let cid_map_arg = &mut cid_map;
-    let cfatt_name = "inst-country";
+    let cfatt_name = names::I2C;
     by_size!(
         run_fatt,
         SInstitution,
@@ -67,7 +72,7 @@ pub fn write_fix_atts(stowage: &Stowage) -> io::Result<()> {
         INSTS,
         cid_map_arg,
     );
-    let fatt_name = "concept-levels";
+    let fatt_name = names::CLEVEL;
     let max_level = 3;
     by_size!(
         run_fatt,
@@ -133,9 +138,9 @@ where
 }
 
 pub fn read_fix_att(stowage: &Stowage, name: &str) -> Vec<u8> {
-    const s: usize = 1; //TODO absolute shambles
+    const S: usize = 1; //TODO absolute shambles
     let mut out = Vec::new();
-    let mut buf: [u8; s] = [0; s];
+    let mut buf: [u8; S] = [0; S];
     let mut br = stowage.get_fix_reader(name);
     loop {
         if let Ok(_) = br.read_exact(&mut buf) {

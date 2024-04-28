@@ -1,16 +1,14 @@
 use std::{
     fs::{create_dir_all, File},
     io::{self, BufReader, Write},
-    marker::PhantomData,
     path::{Path, PathBuf},
 };
 
-use csv::{Reader, ReaderBuilder};
+use csv::{DeserializeRecordsIntoIter, Reader, ReaderBuilder};
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tqdm::*;
 
-type IdType = u32;
 pub type BigId = u64;
 pub type StowReader = Reader<BufReader<GzDecoder<File>>>;
 
@@ -61,10 +59,6 @@ pub struct IdStruct {
 
 pub trait ParsedId {
     fn get_parsed_id(&self) -> BigId;
-}
-
-pub trait IdGetter {
-    fn get_by_str(&mut self, id: &str) -> Option<IdType>;
 }
 
 pub trait ParentGetter {
@@ -140,63 +134,53 @@ impl Stowage {
 
     pub fn write_cache<T: Serialize>(&self, obj: &T, path: &str) -> io::Result<()> {
         let out_path = self.cache.join(path);
+        create_dir_all(out_path.parent().unwrap())?;
         write_gz(&out_path, obj)
     }
-}
 
-pub trait EdgeContext<Item, R>
-where
-    Item: DeserializeOwned + ParentGetter,
-    R: IdGetter,
-{
-    fn integrate_item(&mut self, o: Item, parent_id: &IdType);
-    fn id_getter(&mut self) -> &mut R;
-}
-
-pub struct EdgeIter<C, T, R>
-where
-    R: IdGetter,
-    T: DeserializeOwned + ParentGetter,
-    C: EdgeContext<T, R>,
-{
-    current_main: String,
-    pub current_main_id: Option<IdType>,
-    rdr: StowReader,
-    pub ctx: C,
-    pr: PhantomData<R>,
-    pt: PhantomData<T>,
-}
-
-impl<C, T, R> EdgeIter<C, T, R>
-where
-    R: IdGetter,
-    T: DeserializeOwned + ParentGetter,
-    C: EdgeContext<T, R>,
-{
-    pub fn new(stowage: &Stowage, edge_path: &str, ctx: C) -> Self {
-        Self {
-            current_main: "".to_string(),
-            current_main_id: None,
-            rdr: stowage.get_reader(edge_path),
-            ctx,
-            pt: PhantomData::<T>,
-            pr: PhantomData::<R>,
-        }
+    pub fn read_csv_objs<T: DeserializeOwned>(
+        &self,
+        main_path: &str,
+        sub_path: &str,
+    ) -> ObjIter<T> {
+        ObjIter::new(self, main_path, sub_path)
     }
+}
 
-    pub fn consume(&mut self) -> io::Result<()> {
-        for line in self.rdr.deserialize::<T>().tqdm().desc(Some("edges")) {
-            let cobj = line?;
-            let current_parent = cobj.parent();
-            if current_parent != self.current_main {
-                self.current_main = current_parent.to_string();
-                self.current_main_id = self.ctx.id_getter().get_by_str(&self.current_main);
-            }
-            if let Some(parent_id) = self.current_main_id {
-                self.ctx.integrate_item(cobj, &parent_id);
-            }
+type InIterator<T> = Tqdm<
+    Result<T, csv::Error>,
+    DeserializeRecordsIntoIter<BufReader<flate2::read::GzDecoder<File>>, T>,
+>;
+
+pub struct ObjIter<T>
+where
+    T: DeserializeOwned,
+{
+    iterable: InIterator<T>,
+}
+
+impl<T> ObjIter<T>
+where
+    T: DeserializeOwned,
+{
+    pub fn new(stowage: &Stowage, main: &str, sub: &str) -> Self {
+        let reader = stowage.get_sub_reader(main, sub);
+        let iterable = reader
+            .into_deserialize::<T>()
+            .tqdm()
+            .desc(Some(format!("reading {} / {}", main, sub)));
+        Self { iterable }
+    }
+}
+
+impl<T: DeserializeOwned> Iterator for ObjIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(obj) = self.iterable.next() {
+            return Some(obj.unwrap());
+        } else {
+            return None;
         }
-        Ok(())
     }
 }
 
