@@ -13,11 +13,15 @@ load_dotenv()
 
 oa_root = Path(os.environ["OA_ROOT"])
 
-insts = np.frombuffer(
-    Path(oa_root, "filter-steps/13/institutions").read_bytes(),
-    dtype=np.dtype(np.uint64).newbyteorder(">"),
-)
 
+def get_filter(sub):
+    return np.frombuffer(
+        Path(oa_root, "filter-steps", sub).read_bytes(),
+        dtype=np.dtype(np.uint64).newbyteorder(">"),
+    )
+
+
+insts = get_filter("13/institutions")
 
 df = (
     pd.read_csv(oa_root / "entity-csvs/institutions/main.csv.gz")
