@@ -317,10 +317,11 @@ pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
 
     for (ek, recs) in spec_bases_vecs {
         for (k, sb_v) in recs {
-            println!("query {:?}, {:?}", ek, k);
-            let astats_p = attribute_statics.get_mut(&ek).unwrap();
-            let astats = astats_p.get_mut(&k).unwrap();
-            astats.spec_baseline = sb_v.iter().sum::<f64>() / f64::from(sb_v.len() as u32);
+            if let Some(astats) = attribute_statics.get_mut(&ek).unwrap().get_mut(&k) {
+                astats.spec_baseline = sb_v.iter().sum::<f64>() / f64::from(sb_v.len() as u32);
+            } else {
+                println!("not found for spec base {:?} ind: {:?}", ek, k);
+            }
         }
     }
 
@@ -336,33 +337,33 @@ fn get_qc_spec_bases() -> Vec<Vec<BreakdownHierarchy>> {
             BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0, 1], 1),
             BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0, 1], 1),
         ],
+        vec![
+            BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0], 0),
+            BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0, 1], 1),
+            BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0], 1),
+        ],
+        vec![
+            BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0], 0),
+            BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0, 1], 1),
+        ],
         // vec![
-        //     BreakdownHierarchy::new("concept-hier", vec![0], 0),
-        //     BreakdownHierarchy::new("country-inst", vec![0, 1], 1),
-        //     BreakdownHierarchy::new("concept-hier", vec![0], 1),
+        //     BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0, 1], 1),
+        //     BreakdownHierarchy::new(vnames::W2S, vec![0], 1),
         // ],
         // vec![
-        //     BreakdownHierarchy::new("country-inst", vec![0], 0),
-        //     BreakdownHierarchy::new("concept-hier", vec![0, 1], 1),
+        //     BreakdownHierarchy::new(vnames::W2S, vec![0], 1),
+        //     BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0], 1),
+        //     BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0], 1),
         // ],
-        // vec![
-        //     BreakdownHierarchy::new("concept-hier", vec![0, 1], 1),
-        //     BreakdownHierarchy::new("paper-source", vec![0], 1),
-        // ],
-        // vec![
-        //     BreakdownHierarchy::new("paper-source", vec![0], 1),
-        //     BreakdownHierarchy::new("country-inst", vec![0], 1),
-        //     BreakdownHierarchy::new("concept-hier", vec![0], 1),
-        // ],
-        // vec![
-        //     BreakdownHierarchy::new("country-inst", vec![0], 0),
-        //     BreakdownHierarchy::new("concept-hier", vec![0, 1], 0),
-        //     BreakdownHierarchy::new("country-inst", vec![1], 0), //TODO tricky!!!
+        // // vec![
+        //     BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0], 0),
+        //     BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0, 1], 0),
+        //     BreakdownHierarchy::new(vnames::COUNTRY_H, vec![1], 0), //TODO tricky!!!
         // ],
         // vec![
         //     BreakdownHierarchy::new("qed-source", vec![0, 1], 0),
-        //     BreakdownHierarchy::new("country-inst", vec![0], 1),
-        //     BreakdownHierarchy::new("concept-hier", vec![0], 1),
+        //     BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0], 1),
+        //     BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0], 1),
         // ],
     ]
 }
