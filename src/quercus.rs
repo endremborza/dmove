@@ -218,13 +218,12 @@ pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
         );
     }
 
-    println!("getting ares map");
-    let ares_map = get_attribute_resolver_map(stowage);
-
     println!("getting var atts");
     let full_clist: Vec<Vec<WorkId>> = read_var_att(stowage, vnames::TO_CITING);
     let works_of_inst: Vec<Vec<WeightedEdge<WorkId>>> = read_var_att(stowage, vnames::I2W);
-    println!("got var atts");
+
+    println!("getting ares map");
+    let ares_map = get_attribute_resolver_map(stowage);
 
     //preps for specs and metas
     let mut inst_cite_counts = vec![0; works_of_inst.len()];

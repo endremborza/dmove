@@ -138,13 +138,23 @@ impl<T: ByteConvert> Iterator for VarReader<T> {
         match FilePointer::read_next(&mut self.counts_file) {
             Some(fp) => {
                 self.targets_file.seek(SeekFrom::Start(fp.offset)).unwrap();
-                if (fp.count as usize) > MAX_BUF {
-                    panic!("too large block {:?}", fp.count);
+                let mut remaining_count = fp.count as usize;
+                let mut bvec: Vec<u8> = Vec::new();
+                while remaining_count > 0 {
+                    let endidx = if (remaining_count as usize) > MAX_BUF {
+                        MAX_BUF
+                    } else {
+                        remaining_count
+                    };
+                    self.targets_file
+                        .read_exact(&mut self.buf[..endidx])
+                        .unwrap();
+                    bvec.extend(self.buf[..endidx].iter());
+                    remaining_count -= endidx;
                 }
-                self.targets_file
-                    .read_exact(&mut self.buf[..fp.count as usize])
-                    .unwrap();
-                let (v, _) = T::from_bytes(&self.buf[..fp.count as usize]);
+                // println!("readin from {:?}", bvec);
+                let (v, _) = T::from_bytes(&bvec);
+                // println!("read to",);
                 Some(v)
             }
             None => None,
@@ -257,6 +267,7 @@ impl<T: ByteConvert> ByteConvert for Vec<T> {
         let mut out = Vec::new();
         let mut i = std::mem::size_of::<u32>();
         let l = u32::from_be_bytes(buf[..i].try_into().unwrap()) as usize + i;
+        // println!("read len {} incoming {}", l, buf.len());
         while i < l {
             let (e, size) = T::from_bytes(&buf[i..]);
             out.push(e);
