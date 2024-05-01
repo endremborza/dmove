@@ -1,6 +1,7 @@
 use std::{
     fs::{create_dir_all, File},
     io::{self, Read, Seek, SeekFrom, Write},
+    marker::PhantomData,
     usize,
 };
 
@@ -28,13 +29,15 @@ pub mod vnames {
     pub const COUNTRY_H: &str = "country-hierarchy";
     pub const CONCEPT_ANC: &str = "concept-ancestors";
     pub const W2S: &str = "w2s";
-    pub const W2QS: &str = "w2s";
+    pub const W2QS: &str = "w2qs";
     pub const TO_CITED: &str = "to-cited";
     pub const TO_CITING: &str = "to-citing";
 }
 
 pub type MidId = u32;
+pub type SmolId = u16;
 type CountryId = u8;
+type QId = u8;
 type InstId = u16; // TODO figure this shit out to be dynamic properly
 type ConceptId = u16;
 type SourceId = u16;
@@ -42,8 +45,8 @@ pub type WorkId = u32;
 pub type AttributeResolverMap = HashMap<String, HashMap<MidId, MappedAttributes>>;
 
 pub enum MappedAttributes {
-    List(Vec<MidId>),
-    Map(HashMap<MidId, MappedAttributes>),
+    List(Vec<SmolId>),
+    Map(Vec<(SmolId, MappedAttributes)>),
 }
 
 pub struct WeightedEdge<T> {
@@ -52,8 +55,8 @@ pub struct WeightedEdge<T> {
 }
 
 struct HierEdge<T1, T2> {
-    id: T1,
-    subs: Vec<T2>,
+    pub id: T1,
+    pub subs: Vec<T2>,
 }
 
 struct InstToWorkPrep {
@@ -78,6 +81,20 @@ struct Geo {
     country_code: String,
 }
 
+#[derive(Deserialize)]
+struct WorkQ {
+    id: BigId,
+    source: BigId,
+    best_q: QId,
+}
+
+struct HEdgeSet<T1, T2>(Vec<HierEdge<T1, T2>>);
+
+pub struct FilePointer {
+    offset: u64,
+    pub count: u32, // these might also be optimized to be smaller
+}
+
 impl ParsedId for Geo {
     fn get_parsed_id(&self) -> BigId {
         short_string_to_u64(&self.country_code)
@@ -90,6 +107,49 @@ where
 {
     fn to_bytes(&self) -> Vec<u8>;
     fn from_bytes(buf: &[u8]) -> (Self, usize);
+}
+
+const MAX_BUF: usize = 0x5FFFF; // how to minimize this?
+struct VarReader<T> {
+    counts_file: File,
+    targets_file: File,
+    buf: [u8; MAX_BUF],
+    phantom: PhantomData<T>,
+}
+
+impl<T> VarReader<T> {
+    fn new(stowage: &Stowage, att_name: &str) -> Self {
+        let att_dir = stowage.var_atts.join(att_name);
+        let counts_file = File::open(&att_dir.join("sizes")).unwrap();
+        let targets_file = File::open(&att_dir.join("targets")).unwrap();
+        let buf: [u8; MAX_BUF] = [0; MAX_BUF];
+        Self {
+            counts_file,
+            targets_file,
+            buf,
+            phantom: PhantomData::<T>,
+        }
+    }
+}
+
+impl<T: ByteConvert> Iterator for VarReader<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        match FilePointer::read_next(&mut self.counts_file) {
+            Some(fp) => {
+                self.targets_file.seek(SeekFrom::Start(fp.offset)).unwrap();
+                if (fp.count as usize) > MAX_BUF {
+                    panic!("too large block {:?}", fp.count);
+                }
+                self.targets_file
+                    .read_exact(&mut self.buf[..fp.count as usize])
+                    .unwrap();
+                let (v, _) = T::from_bytes(&self.buf[..fp.count as usize]);
+                Some(v)
+            }
+            None => None,
+        }
+    }
 }
 
 macro_rules! id_impl {
@@ -110,8 +170,6 @@ macro_rules! id_impl {
 
 id_impl!(u8, u16, u32, u64,);
 add_strict_parsed_id_traits!(NamedEntity);
-
-struct HEdgeSet<T1, T2>(Vec<HierEdge<T1, T2>>);
 
 impl<T1: Eq, T2: Eq> HEdgeSet<T1, T2> {
     fn new() -> Self {
@@ -260,11 +318,6 @@ impl InstPrepInner {
     }
 }
 
-pub struct FilePointer {
-    offset: u64,
-    pub count: u32, // these might also be optimized to be smaller
-}
-
 impl FilePointer {
     fn read_next<T: Read>(reader: &mut T) -> Option<Self> {
         const S1: usize = std::mem::size_of::<u64>();
@@ -281,6 +334,34 @@ impl FilePointer {
     }
 }
 
+impl MappedAttributes {
+    fn from_hedges<T1, T2>(hedges: Vec<HierEdge<T1, T2>>) -> Self
+    where
+        SmolId: From<T1> + From<T2>,
+        T1: Copy,
+        T2: Copy,
+    {
+        type InnerType = SmolId;
+        let mut sub_matts = Vec::new();
+        for hedge in hedges {
+            let hedge_main = InnerType::try_from(hedge.id).unwrap();
+            let mut sub_sub = Vec::new();
+            for subsubid in &hedge.subs {
+                sub_sub.push(InnerType::try_from(*subsubid).unwrap());
+            }
+            sub_matts.push((hedge_main, Self::List(sub_sub)));
+        }
+        Self::Map(sub_matts)
+    }
+
+    pub fn iter_inner(&self) -> std::slice::Iter<'_, (SmolId, MappedAttributes)> {
+        match self {
+            Self::List(_) => panic!("no more levels"),
+            Self::Map(vhs) => vhs.iter(),
+        }
+    }
+}
+
 pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
     let inst_countries = read_fix_att(stowage, names::I2C);
     let concept_levels = read_fix_att(stowage, names::CLEVEL);
@@ -289,6 +370,9 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
     for ename in vec![INSTS, SOURCES, CONCEPTS] {
         write_names(stowage, ename)?
     }
+    let mut q_names: Vec<String> = (0..5).map(|i| format!("Q{}", i)).collect();
+    q_names.push("Uncategorized".to_owned());
+    write_var_att(stowage, &get_name_name(QS), q_names.iter())?;
 
     // concept parents
     //
@@ -311,6 +395,7 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
     let mut rel_preps: Vec<InstToWorkPrep> = Vec::new();
     let mut country_hiers: Vec<HEdgeSet<CountryId, InstId>> = Vec::new();
     let mut concept_hiers: Vec<HEdgeSet<ConceptId, ConceptId>> = Vec::new();
+    let mut q_hiers: Vec<HEdgeSet<QId, SourceId>> = Vec::new();
     let mut to_source: Vec<Vec<SourceId>> = Vec::new();
     let mut to_cited: Vec<Vec<WorkId>> = Vec::new();
     let mut to_citing: Vec<Vec<WorkId>> = Vec::new();
@@ -322,12 +407,23 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
         to_source.push(Vec::new());
         country_hiers.push(HEdgeSet::new());
         concept_hiers.push(HEdgeSet::new());
+        q_hiers.push(HEdgeSet::new());
     }
 
     let mut i2w: Vec<Vec<WeightedEdge<WorkId>>> = Vec::new();
     for _ in 0..(inst_id_map.len() + 1) {
         i2w.push(Vec::new());
     }
+
+    for wq in stowage.read_csv_objs::<WorkQ>(WORKS, "qs") {
+        if let (Some(work_id), Some(source_id)) =
+            (work_id_map.get(&wq.id), source_id_map.get(&wq.source))
+        {
+            let h_set = &mut q_hiers[*work_id as usize];
+            h_set.add(wq.best_q, Some(*source_id as SourceId));
+        };
+    }
+    write_var_att(stowage, vnames::W2QS, q_hiers.iter())?;
 
     for anc in stowage.read_csv_objs::<Ancestor>(CONCEPTS, "ancestors") {
         if let (Some(pid), Some(anc_id)) = (
@@ -419,6 +515,18 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
     Ok(())
 }
 
+pub fn get_name_name(entity_name: &str) -> String {
+    format!("{}-names", entity_name)
+}
+
+pub fn get_attribute_resolver_map(stowage: &Stowage) -> AttributeResolverMap {
+    let mut ares_map = HashMap::new();
+    build_ar_map::<CountryId, InstId>(stowage, vnames::COUNTRY_H, &mut ares_map);
+    build_ar_map::<ConceptId, ConceptId>(stowage, vnames::CONCEPT_H, &mut ares_map);
+    build_ar_map::<QId, SourceId>(stowage, vnames::W2QS, &mut ares_map);
+    ares_map
+}
+
 fn write_names(stowage: &Stowage, entity_name: &str) -> io::Result<()> {
     inner_str_write::<NamedEntity, _>(stowage, entity_name, entity_name, "main", |o| {
         o.display_name
@@ -448,10 +556,6 @@ where
     }
     write_var_att(stowage, &get_name_name(entity_name), names.iter())?;
     Ok(())
-}
-
-pub fn get_name_name(entity_name: &str) -> String {
-    format!("{}-names", entity_name)
 }
 
 fn add_to_prep(
@@ -496,64 +600,35 @@ where
     Ok(())
 }
 
-pub fn get_attribute_resolver_map(stowage: &Stowage) -> AttributeResolverMap {
-    let mut ares_map = HashMap::new();
-    build_ar_map::<CountryId, InstId>(stowage, vnames::COUNTRY_H, &mut ares_map);
-    build_ar_map::<ConceptId, ConceptId>(stowage, vnames::CONCEPT_H, &mut ares_map);
-    ares_map
-}
-
 fn build_ar_map<T1, T2>(stowage: &Stowage, var_att_name: &str, ares_map: &mut AttributeResolverMap)
 where
-    MidId: From<T1> + From<T2>,
+    SmolId: From<T1> + From<T2>,
     T1: Copy + ByteConvert,
     T2: Copy + ByteConvert,
 {
-    let base: Vec<Vec<HierEdge<T1, T2>>> = read_var_att(stowage, var_att_name);
+    type InnerType = SmolId;
+    // let base: Vec<Vec<HierEdge<T1, T2>>> = read_var_att(stowage, var_att_name);
+    let base = VarReader::<Vec<HierEdge<T1, T2>>>::new(stowage, var_att_name);
+    // let mut ci = Vec::new();
     let mut ci = HashMap::new();
-    for (iid, hedges) in base.iter().enumerate() {
-        let mut sub_matts: HashMap<MidId, MappedAttributes> = HashMap::new();
-        for hedge in hedges {
-            let mut sub_sub: Vec<MidId> = Vec::new();
-            for subsubid in &hedge.subs {
-                sub_sub.push(MidId::try_from(*subsubid).unwrap());
-            }
-            sub_matts.insert(
-                MidId::try_from(hedge.id).unwrap(),
-                MappedAttributes::List(sub_sub),
-            );
-        }
-        ci.insert(iid as MidId, MappedAttributes::Map(sub_matts));
+    println!("building from hedges {}", var_att_name);
+    for (mid, hedges) in base.enumerate().tqdm() {
+        // ci.push(MappedAttributes::Map(sub_matts));
+        // if sub_matts.len() > 0 {
+        //     ci.insert(mid as MidId, MappedAttributes::Map(sub_matts));
+        // }
+        ci.insert(mid as MidId, MappedAttributes::from_hedges(hedges));
     }
     ares_map.insert(var_att_name.to_string(), ci);
+    println!("built, inserted");
 }
 
 pub fn read_var_att<T: ByteConvert>(stowage: &Stowage, att_name: &str) -> Vec<T> {
+    println!("reading var length attributes: {}", att_name);
     let mut out = Vec::new();
-    let att_dir = stowage.var_atts.join(att_name);
-    let mut counts_file = File::open(&att_dir.join("sizes")).unwrap();
-    let mut targets_file = File::open(&att_dir.join("targets")).unwrap();
-
-    const MAX_BUF: usize = 0x5FFFFF; // how to minimize this?
-    let mut buf: [u8; MAX_BUF] = [0; MAX_BUF];
-
-    loop {
-        match FilePointer::read_next(&mut counts_file) {
-            Some(fp) => {
-                targets_file.seek(SeekFrom::Start(fp.offset)).unwrap();
-                if (fp.count as usize) > MAX_BUF {
-                    panic!("too large block {:?}", fp.count);
-                }
-                targets_file
-                    .read_exact(&mut buf[..fp.count as usize])
-                    .unwrap();
-                let (v, _) = T::from_bytes(&buf[..fp.count as usize]);
-                out.push(v);
-            }
-            None => break,
-        }
+    for v in VarReader::new(stowage, att_name) {
+        out.push(v)
     }
-
     out
 }
 
@@ -573,7 +648,7 @@ pub fn get_mapped_atts(resolver_id: &str) -> Vec<String> {
         vnames::CONCEPT_H,
         vec![MAIN_CONCEPTS.to_string(), SUB_CONCEPTS.to_string()],
     );
-    hm.insert(vnames::W2S, vec![SOURCES.to_string()]);
+    // hm.insert(vnames::W2S, vec![SOURCES.to_string()]);
     hm.insert(vnames::W2QS, vec![QS.to_string(), SOURCES.to_string()]);
     hm.get(resolver_id).unwrap().to_vec()
 }
