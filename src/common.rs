@@ -14,10 +14,12 @@ pub type StowReader = Reader<BufReader<GzDecoder<File>>>;
 
 pub const WORKS: &str = "works";
 pub const AUTHORS: &str = "authors";
+pub const PUBLISHERS: &str = "publishers";
 pub const SOURCES: &str = "sources";
 pub const INSTS: &str = "institutions";
 pub const COUNTRIES: &str = "countries";
 pub const CONCEPTS: &str = "concepts";
+pub const TOPICS: &str = "topics";
 
 pub const MAIN_CONCEPTS: &str = "main-concepts";
 pub const SUB_CONCEPTS: &str = "sub-concepts";

@@ -30,7 +30,7 @@ pub trait IdTrait {
     fn get_id(&self) -> String;
 }
 
-add_id_traits!(Author, Concept, Institution, Publisher, Source, Work);
+add_id_traits!(Author, Concept, Institution, Publisher, Source, Work, Topic);
 
 impl<T> IdTrait for IdCountDecorated<T>
 where
@@ -101,6 +101,18 @@ pub struct Concept {
     image_url: Option<String>,
     image_thumbnail_url: Option<String>,
     updated_date: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Topic {
+    id: String,
+    display_name: String,
+    #[serde(default, deserialize_with = "deserialize_strict_hash_field")]
+    subfield: String,
+    #[serde(default, deserialize_with = "deserialize_strict_hash_field")]
+    field: String,
+    #[serde(default, deserialize_with = "deserialize_strict_hash_field")]
+    domain: String,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -253,6 +265,14 @@ pub struct WorkConcept {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
+pub struct WorkTopic {
+    pub parent_id: Option<String>,
+    #[serde(rename = "id")]
+    pub topic_id: Option<String>,
+    pub score: Option<f64>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
 pub struct Mesh {
     pub parent_id: Option<String>,
     descriptor_ui: Option<String>,
@@ -323,6 +343,15 @@ where
     }
     return Ok(None);
 }
+
+fn deserialize_strict_hash_field<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let hfid = deserialize_hash_field(deserializer)?;
+    Ok(hfid.unwrap())
+}
+
 fn deserialize_hash_field<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
