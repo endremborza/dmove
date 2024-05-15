@@ -1,24 +1,29 @@
 use hashbrown::HashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io;
 use tqdm::*;
 
-use crate::common::{Stowage, CONCEPTS, COUNTRIES, INSTS, MAIN_CONCEPTS, SOURCES, SUB_CONCEPTS};
+use crate::common::{Stowage, COUNTRIES, FIELDS, INSTS, QS, SOURCES, SUB_FIELDS};
 use crate::ingest_entity::get_idmap;
+use crate::oa_filters::START_YEAR;
 use crate::oa_fix_atts::{names, read_fix_att};
 use crate::oa_var_atts::{
     get_attribute_resolver_map, get_mapped_atts, get_name_name, read_var_att, vnames,
     AttributeResolverMap, MappedAttributes, MidId, SmolId, WeightedEdge, WorkId,
 };
 
-type GraphPath = Vec<MidId>;
-type AttributeStaticMap = HashMap<String, HashMap<SmolId, AttributeStatic>>;
+pub const BUILD_LOC: &str = "qc-builds";
+pub const A_STAT_PATH: &str = "attribute-statics";
+pub const QC_CONF: &str = "qc-specs";
 
-struct BreakdownHierarchy {
-    levels: Vec<usize>,
-    side: usize,
-    resolver_id: String,
-    entity_types: Vec<String>,
+type GraphPath = Vec<MidId>;
+pub type AttributeStaticMap = HashMap<String, HashMap<SmolId, AttributeStatic>>;
+
+pub struct BreakdownHierarchy {
+    pub levels: Vec<usize>,
+    pub side: usize,
+    pub resolver_id: String,
+    pub entity_types: Vec<String>,
 }
 
 impl BreakdownHierarchy {
@@ -32,12 +37,13 @@ impl BreakdownHierarchy {
         }
     }
 }
-#[derive(Debug, Serialize)]
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Quercus {
     //TODO: at one point include "stats" or "meta"
-    weight: u32,
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    children: HashMap<SmolId, Quercus>,
+    pub weight: u32,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default = "HashMap::new")]
+    pub children: HashMap<SmolId, Quercus>,
 }
 
 struct QuercusRoller<'a> {
@@ -49,30 +55,25 @@ struct QuercusRoller<'a> {
     current_hier_depth: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct JsBifurcation {
     attribute_kind: String,
     resolver_id: String,
     description: String,
 }
 
-#[derive(Serialize)]
-struct JsQcSpec {
+#[derive(Serialize, Deserialize)]
+pub struct JsQcSpec {
     bifurcations: Vec<JsBifurcation>,
-    root_entity_type: String,
+    pub root_entity_type: String,
 }
 
-#[derive(Serialize)]
-struct AttributeStatic {
+#[derive(Serialize, Deserialize)]
+pub struct AttributeStatic {
     name: String,
-    spec_baselines: HashMap<String, f64>,
-    #[serde(default = "default_meta")]
-    meta: HashMap<String, u32>,
-}
-
-trait Absorbable {
-    fn new() -> Self;
-    fn absorb(&mut self, other: Self);
+    pub spec_baselines: HashMap<String, f64>,
+    #[serde(default = "HashMap::new")]
+    meta: HashMap<String, String>,
 }
 
 impl Quercus {
@@ -85,9 +86,35 @@ impl Quercus {
 
     fn get_and_add(&mut self, k: &SmolId) -> &mut Quercus {
         let entry = self.children.entry(*k);
-        let child = entry.or_insert_with(|| Quercus::new());
+        let child = entry.or_insert_with(Quercus::new);
         child.weight += 1;
         child
+    }
+
+    fn prune(&mut self, level: usize) -> usize {
+        if level == 0 {
+            return self.children.len();
+        }
+
+        let mut dropks = Vec::new();
+        for (k, child) in self.children.iter_mut() {
+            if child.prune(level - 1) == 0 {
+                dropks.push(*k);
+            }
+        }
+        for k in dropks {
+            self.children.remove(&k);
+        }
+
+        return self.children.len();
+    }
+
+    fn absorb(&mut self, other: &Quercus) {
+        self.weight += other.weight;
+        for (k, v) in &other.children {
+            let child = self.children.entry(*k).or_insert_with(Quercus::new);
+            child.absorb(v);
+        }
     }
 }
 
@@ -143,12 +170,12 @@ impl<'a> QuercusRoller<'a> {
                 let cq = current_quercus;
                 match mapped_attributes.unwrap() {
                     List(vec_data) => {
-                        for v in vec_data {
+                        for v in vec_data.iter() {
                             self.hierarchy_ender(cq.get_and_add(v));
                         }
                     }
                     Map(map_data) => {
-                        for (k, v) in map_data {
+                        for (k, v) in map_data.iter() {
                             self.current_index_within_hier_levels += 1;
                             self.current_hier_depth += 1;
                             self.roll_setup(Some(v), cq.get_and_add(&k));
@@ -193,43 +220,52 @@ impl SpecPrepType {
     }
 }
 
-pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
-    let mut attribute_statics: AttributeStaticMap = HashMap::new();
-    attribute_statics.insert(MAIN_CONCEPTS.to_string(), HashMap::new());
-    attribute_statics.insert(SUB_CONCEPTS.to_string(), HashMap::new());
+struct FilterSet {
+    year_atts: Vec<u8>,
+    years: Vec<u16>,
+    filter_keys: Vec<String>,
+}
 
-    let clevels = read_fix_att(stowage, names::CLEVEL);
-    let cnames: Vec<String> = read_var_att(stowage, &get_name_name(CONCEPTS));
-    for cid in get_idmap(stowage, CONCEPTS).iter_ids() {
-        let k = {
-            if clevels[cid as usize] == 0 {
-                MAIN_CONCEPTS
-            } else {
-                SUB_CONCEPTS
-            }
-        };
-        attribute_statics.get_mut(k).unwrap().insert(
-            cid.try_into().unwrap(),
-            AttributeStatic {
-                name: cnames[cid as usize].clone(),
-                spec_baselines: HashMap::new(),
-                meta: HashMap::new(),
-            },
-        );
+impl FilterSet {
+    fn new(stowage: &Stowage) -> Self {
+        let year_atts = read_fix_att(stowage, names::WORK_YEAR);
+        let years = (2019..2024).collect();
+        let mut filter_keys = vec!["all".to_string()];
+        for y in &years {
+            filter_keys.push(format!("y-{}", y).to_owned());
+        }
+        Self {
+            year_atts,
+            years,
+            filter_keys,
+        }
     }
 
-    println!("getting var atts");
-    let full_clist: Vec<Vec<WorkId>> = read_var_att(stowage, vnames::TO_CITING);
-    let works_of_inst: Vec<Vec<WeightedEdge<WorkId>>> = read_var_att(stowage, vnames::I2W);
+    fn filter(&self, i: &usize, wid: &MidId) -> bool {
+        if *i == 0 {
+            return false;
+        }
+        let work_year = self.year_atts[*wid as usize] as u16 + START_YEAR;
+        return work_year >= self.years[i - 1];
+    }
+}
+
+pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
+    let mut attribute_statics: AttributeStaticMap = HashMap::new();
 
     println!("getting ares map");
     let ares_map = get_attribute_resolver_map(stowage);
 
+    println!("getting var atts");
+    let full_clist: Box<[Box<[WorkId]>]> = read_var_att(stowage, vnames::TO_CITING).into();
+    let semantic_ids: Box<[String]> = read_var_att(stowage, vnames::INST_SEM_IDS).into();
+    let works_of_inst: Box<[Vec<WeightedEdge<WorkId>>]> = read_var_att(stowage, vnames::I2W).into();
+
     //preps for specs and metas
     let mut inst_cite_counts = vec![0; works_of_inst.len()];
+    let mut spec_bases_vecs = SpecPrepType(HashMap::new());
 
-    let mut spec_bases_vecs: SpecPrepType = SpecPrepType(HashMap::new());
-
+    let filter_set = FilterSet::new(stowage);
     let mut js_qc_specs = HashMap::new();
     for (i, bd_hiers) in get_qc_spec_bases().iter().enumerate() {
         let entity_type = INSTS;
@@ -242,36 +278,55 @@ pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
             for i in &bdh.levels {
                 bifurcations.push(JsBifurcation {
                     attribute_kind: bdh.entity_types[*i].clone(),
-                    description: format!("{}-{}-{}", bdh.side, resolver_id, i).clone(),
+                    description: get_bd_description(bdh, i),
                     resolver_id: resolver_id.clone(),
                 })
             }
         }
+        let mut qcr = QuercusRoller::new(bd_hiers, &ares_map);
         let qc_key = format!("qc-{}", i + 1);
 
-        for iid in id_map.iter_ids().tqdm().desc(Some(&qc_key)) {
-            let mut qc = Quercus::new();
-            let mut qcr = QuercusRoller::new(bd_hiers, &ares_map);
+        for iid in id_map.iter_ids(false).tqdm().desc(Some(&qc_key)) {
+            let mut qcs: Box<[Quercus]> = filter_set
+                .filter_keys
+                .iter()
+                .map(|_| Quercus::new())
+                .collect();
             for wid in works_of_inst[iid as usize].iter() {
-                for citing_wid in full_clist[wid.id as usize].iter() {
-                    let ref_path = vec![wid.id, *citing_wid];
-                    qcr.set(ref_path);
-                    qc.weight += 1;
-                    qcr.current_hier_index = 0;
-                    qcr.roll_hier(&mut qc);
+                for (i, mut qc) in qcs.iter_mut().enumerate() {
+                    if filter_set.filter(&i, &wid.id) {
+                        continue;
+                    }
+
+                    for citing_wid in full_clist[wid.id as usize].iter() {
+                        let ref_path = vec![wid.id, *citing_wid];
+                        qcr.set(ref_path);
+                        qc.weight += 1;
+                        qcr.current_hier_index = 0;
+                        qcr.roll_hier(&mut qc);
+                    }
                 }
             }
-            stowage.write_cache(&qc, &format!("qc-builds/{}/{}", qc_key, iid))?;
-            inst_cite_counts[iid as usize] = qc.weight;
-            //calc spec bases for first 2 levels only
-            let root_denom = f64::from(qc.weight);
-            for (child_id, child_qc) in qc.children {
-                let rate = f64::from(child_qc.weight) / root_denom;
-                spec_bases_vecs.add(&bifurcations[0], &child_id, rate);
-                if bifurcations[0].resolver_id == bifurcations[1].resolver_id {
-                    for (sub_child_id, sub_child_qc) in child_qc.children {
-                        let rate = f64::from(sub_child_qc.weight) / root_denom;
-                        spec_bases_vecs.add(&bifurcations[1], &sub_child_id, rate);
+            for (i, qc) in qcs.iter_mut().enumerate() {
+                qc.prune(bifurcations.len() - 1);
+                if i == 0 {
+                    inst_cite_counts[iid as usize] = qc.weight;
+                }
+                let filter_key = &filter_set.filter_keys[i];
+                stowage.write_cache(
+                    &qc,
+                    &format!("{}/{}/{}/{}", BUILD_LOC, filter_key, qc_key, iid),
+                )?;
+                //calc spec bases for first 2 levels only
+                let root_denom = f64::from(qc.weight);
+                for (child_id, child_qc) in &qc.children {
+                    let rate = f64::from(child_qc.weight) / root_denom;
+                    spec_bases_vecs.add(&bifurcations[0], &child_id, rate);
+                    if bifurcations[0].resolver_id == bifurcations[1].resolver_id {
+                        for (sub_child_id, sub_child_qc) in &child_qc.children {
+                            let rate = f64::from(sub_child_qc.weight) / root_denom;
+                            spec_bases_vecs.add(&bifurcations[1], &sub_child_id, rate);
+                        }
                     }
                 }
             }
@@ -285,17 +340,24 @@ pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
         );
     }
 
-    for entity in [INSTS, COUNTRIES, SOURCES] {
+    for entity in [INSTS, COUNTRIES, SOURCES, QS, FIELDS, SUB_FIELDS] {
         let mut entity_statics = HashMap::new();
         let names: Vec<String> = read_var_att(stowage, &get_name_name(entity));
-        for eid in get_idmap(stowage, entity).iter_ids() {
+        for eid in get_idmap(stowage, entity).iter_ids(true) {
             let mut meta = HashMap::new();
             if entity == INSTS {
                 meta.insert(
                     "papers".to_string(),
-                    works_of_inst[eid as usize].len().try_into().unwrap(),
+                    works_of_inst[eid as usize].len().to_string(),
                 );
-                meta.insert("citations".to_string(), inst_cite_counts[eid as usize]);
+                meta.insert(
+                    "citations".to_string(),
+                    inst_cite_counts[eid as usize].to_string(),
+                );
+                meta.insert(
+                    "semantic_id".to_string(),
+                    semantic_ids[eid as usize].clone(),
+                );
             }
 
             let e_map = AttributeStatic {
@@ -310,27 +372,37 @@ pub fn dump_all_cache(stowage: &Stowage) -> io::Result<()> {
 
     for (ek, recs) in spec_bases_vecs.0 {
         for (k, sb_hm) in recs {
-            if let Some(astats) = attribute_statics.get_mut(&ek).unwrap().get_mut(&k) {
-                for (res_id, sb_v) in sb_hm {
-                    astats.spec_baselines.insert(
-                        res_id,
-                        sb_v.iter().sum::<f64>() / f64::from(sb_v.len() as u32),
-                    );
-                }
-            } else {
-                println!("not found for spec base {:?} ind: {:?}", ek, k);
+            let astats = attribute_statics.get_mut(&ek).unwrap().get_mut(&k).unwrap();
+            for (res_id, sb_v) in sb_hm {
+                astats.spec_baselines.insert(
+                    res_id,
+                    sb_v.iter().sum::<f64>() / f64::from(sb_v.len() as u32),
+                );
             }
         }
     }
 
-    stowage.write_cache(&attribute_statics, "attribute-statics")?;
-    stowage.write_cache(&js_qc_specs, "qc-specs")?;
+    stowage.write_cache(&attribute_statics, A_STAT_PATH)?;
+    stowage.write_cache(&js_qc_specs, QC_CONF)?;
 
     Ok(())
 }
 
-fn get_qc_spec_bases() -> Vec<Vec<BreakdownHierarchy>> {
+pub fn get_bd_description(bdh: &BreakdownHierarchy, i: &usize) -> String {
+    format!("{}-{}-{}", bdh.side, bdh.resolver_id, i)
+}
+
+pub fn get_qc_spec_bases() -> Vec<Vec<BreakdownHierarchy>> {
     vec![
+        vec![
+            BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0], 0),
+            BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0, 1], 1),
+        ],
+        vec![
+            BreakdownHierarchy::new(vnames::W2QS, vec![0, 1], 0),
+            BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0], 1),
+            BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0], 1),
+        ],
         vec![
             BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0, 1], 1),
             BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0, 1], 1),
@@ -341,10 +413,6 @@ fn get_qc_spec_bases() -> Vec<Vec<BreakdownHierarchy>> {
             BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0], 1),
         ],
         vec![
-            BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0], 0),
-            BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0, 1], 1),
-        ],
-        vec![
             BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0, 1], 1),
             BreakdownHierarchy::new(vnames::W2QS, vec![1], 1),
         ],
@@ -354,14 +422,13 @@ fn get_qc_spec_bases() -> Vec<Vec<BreakdownHierarchy>> {
             BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0], 1),
         ],
         vec![
-            BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0], 0),
+            BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0, 1], 0),
             BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0, 1], 0),
             // BreakdownHierarchy::new(vnames::COUNTRY_H, vec![1], 0), //TODO tricky!!!
         ],
         vec![
+            BreakdownHierarchy::new(vnames::CONCEPT_H, vec![1], 0),
             BreakdownHierarchy::new(vnames::W2QS, vec![0, 1], 0),
-            BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0], 1),
-            BreakdownHierarchy::new(vnames::CONCEPT_H, vec![0], 1),
         ],
     ]
 }
