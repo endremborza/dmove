@@ -20,9 +20,10 @@ pub const INSTS: &str = "institutions";
 pub const COUNTRIES: &str = "countries";
 pub const CONCEPTS: &str = "concepts";
 pub const TOPICS: &str = "topics";
+pub const DOMAINS: &str = "DOMAINS";
 
-pub const MAIN_CONCEPTS: &str = "main-concepts";
-pub const SUB_CONCEPTS: &str = "sub-concepts";
+pub const FIELDS: &str = "fields";
+pub const SUB_FIELDS: &str = "subfields";
 pub const QS: &str = "qs";
 
 pub const ID_PREFIX: &str = "https://openalex.org/";
@@ -52,6 +53,7 @@ pub struct Stowage {
     pub fix_atts: PathBuf,
     pub var_atts: PathBuf,
     pub cache: PathBuf,
+    pub pruned_cache: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -99,6 +101,10 @@ pub fn oa_id_parse(id: &str) -> u64 {
     id[(ID_PREFIX.len() + 1)..].parse::<u64>().expect(id)
 }
 
+pub fn field_id_parse(id: &str) -> u64 {
+    id.split("/").last().unwrap().parse::<u64>().expect(id)
+}
+
 impl Stowage {
     pathfields_fn!(
         entity_csvs => "entity-csvs",
@@ -107,6 +113,7 @@ impl Stowage {
         fix_atts => "fix-atts",
         var_atts => "var-atts",
         cache => "cache",
+        pruned_cache => "pruned-cache",
     );
 
     pub fn get_reader<T>(&self, fname: T) -> StowReader
@@ -192,7 +199,7 @@ pub fn get_gz_buf(file_name: &str) -> BufReader<GzDecoder<File>> {
     BufReader::new(gz_decoder)
 }
 
-fn write_gz<T>(out_path: &Path, obj: &T) -> io::Result<()>
+pub fn write_gz<T>(out_path: &Path, obj: &T) -> io::Result<()>
 where
     T: Serialize,
 {

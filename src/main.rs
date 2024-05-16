@@ -11,6 +11,7 @@ mod oa_filters;
 mod oa_fix_atts;
 mod oa_structs;
 mod oa_var_atts;
+mod prune_quercus;
 
 use common::Stowage;
 use oa_csv_writers::write_csvs;
@@ -18,6 +19,7 @@ use oa_entity_mapping::make_ids;
 use oa_filters::filter_setup;
 use oa_fix_atts::write_fix_atts;
 use oa_var_atts::write_var_atts;
+use prune_quercus::prune;
 use quercus::dump_all_cache;
 
 fn main() -> io::Result<()> {
@@ -43,7 +45,9 @@ fn main() -> io::Result<()> {
         } else if comm == "var-atts" {
             write_var_atts(&stowage)?;
         } else if comm == "build-qcs" {
-            dump_all_cache(&stowage)?;
+            dump_all_cache(stowage)?;
+        } else if comm == "prune-qcs" {
+            prune(stowage)?;
         }
     }
     Ok(())

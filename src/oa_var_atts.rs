@@ -12,41 +12,46 @@ use tqdm::Iter;
 use crate::{
     add_strict_parsed_id_traits,
     common::{
-        oa_id_parse, BigId, ParsedId, Stowage, CONCEPTS, COUNTRIES, INSTS, MAIN_CONCEPTS, QS,
-        SOURCES, SUB_CONCEPTS, WORKS,
+        field_id_parse, oa_id_parse, BigId, ParsedId, Stowage, COUNTRIES, FIELDS, INSTS, QS,
+        SOURCES, SUB_FIELDS, TOPICS, WORKS,
     },
     ingest_entity::get_idmap,
     oa_entity_mapping::short_string_to_u64,
     oa_filters::InstAuthorship,
     oa_fix_atts::{names, read_fix_att},
-    oa_structs::{Ancestor, Location, ReferencedWork, WorkConcept},
+    oa_structs::{Location, ReferencedWork, WorkTopic},
 };
 
 pub mod vnames {
+    pub const INST_SEM_IDS: &str = "inst-semantic-ids";
+
     pub const I2W: &str = "i2w";
-    pub const W2I: &str = "w2i";
     pub const CONCEPT_H: &str = "concept-hierarchy";
     pub const COUNTRY_H: &str = "country-hierarchy";
-    pub const CONCEPT_ANC: &str = "concept-ancestors";
     pub const W2S: &str = "w2s";
     pub const W2QS: &str = "w2qs";
-    pub const TO_CITED: &str = "to-cited";
     pub const TO_CITING: &str = "to-citing";
 }
 
 pub type MidId = u32;
 pub type SmolId = u16;
+// TODO figure this shit out to be dynamic properly
 type CountryId = u8;
 type QId = u8;
-type InstId = u16; // TODO figure this shit out to be dynamic properly
-type ConceptId = u16;
+type FieldId = u8;
+type SubFieldId = u8;
+type InstId = u16;
 type SourceId = u16;
 pub type WorkId = u32;
-pub type AttributeResolverMap = HashMap<String, HashMap<MidId, MappedAttributes>>;
+pub type AttributeResolverMap = HashMap<String, MappContainer>;
 
 pub enum MappedAttributes {
-    List(Vec<SmolId>),
-    Map(Vec<(SmolId, MappedAttributes)>),
+    List(Box<[SmolId]>),
+    Map(Box<[(SmolId, MappedAttributes)]>),
+}
+
+pub struct MappContainer {
+    mapps: Box<[MappedAttributes]>,
 }
 
 pub struct WeightedEdge<T> {
@@ -54,6 +59,7 @@ pub struct WeightedEdge<T> {
     rate: f32,
 }
 
+#[derive(Debug)]
 struct HierEdge<T1, T2> {
     pub id: T1,
     pub subs: Vec<T2>,
@@ -76,6 +82,18 @@ struct NamedEntity {
 }
 
 #[derive(Deserialize)]
+struct NamedFieldEntity {
+    id: String,
+    display_name: String,
+}
+
+#[derive(Deserialize)]
+struct AltNamed {
+    id: BigId,
+    alt_name: String,
+}
+
+#[derive(Deserialize)]
 struct Geo {
     country: String,
     country_code: String,
@@ -88,6 +106,7 @@ struct WorkQ {
     best_q: QId,
 }
 
+#[derive(Debug)]
 struct HEdgeSet<T1, T2>(Vec<HierEdge<T1, T2>>);
 
 pub struct FilePointer {
@@ -152,9 +171,7 @@ impl<T: ByteConvert> Iterator for VarReader<T> {
                     bvec.extend(self.buf[..endidx].iter());
                     remaining_count -= endidx;
                 }
-                // println!("readin from {:?}", bvec);
                 let (v, _) = T::from_bytes(&bvec);
-                // println!("read to",);
                 Some(v)
             }
             None => None,
@@ -180,6 +197,12 @@ macro_rules! id_impl {
 
 id_impl!(u8, u16, u32, u64,);
 add_strict_parsed_id_traits!(NamedEntity);
+
+impl ParsedId for NamedFieldEntity {
+    fn get_parsed_id(&self) -> BigId {
+        field_id_parse(&self.id)
+    }
+}
 
 impl<T1: Eq, T2: Eq> HEdgeSet<T1, T2> {
     fn new() -> Self {
@@ -212,19 +235,6 @@ impl<T1: ByteConvert, T2: ByteConvert> ByteConvert for HEdgeSet<T1, T2> {
     fn from_bytes(buf: &[u8]) -> (Self, usize) {
         let (v, vs) = Vec::<HierEdge<T1, T2>>::from_bytes(buf);
         (Self(v), vs)
-    }
-}
-
-impl WeightedEdge<InstId> {
-    fn new_vec(prep: &InstToWorkPrep) -> Vec<Self> {
-        let mut out = Vec::new();
-        for ip in &prep.inst_specs {
-            out.push(Self {
-                id: ip.inst_id,
-                rate: int_div(ip.authors, prep.total_authors),
-            })
-        }
-        out
     }
 }
 
@@ -267,13 +277,24 @@ impl<T: ByteConvert> ByteConvert for Vec<T> {
         let mut out = Vec::new();
         let mut i = std::mem::size_of::<u32>();
         let l = u32::from_be_bytes(buf[..i].try_into().unwrap()) as usize + i;
-        // println!("read len {} incoming {}", l, buf.len());
         while i < l {
             let (e, size) = T::from_bytes(&buf[i..]);
             out.push(e);
             i = i + size;
         }
         (out, i)
+    }
+}
+
+impl<T: ByteConvert + Clone> ByteConvert for Box<[T]> {
+    fn to_bytes(&self) -> Vec<u8> {
+        let v: Vec<T> = self.to_vec();
+        v.to_bytes()
+    }
+
+    fn from_bytes(buf: &[u8]) -> (Self, usize) {
+        let (v, l) = Vec::<T>::from_bytes(buf);
+        (v.into_boxed_slice(), l)
     }
 }
 
@@ -345,6 +366,12 @@ impl FilePointer {
     }
 }
 
+impl MappContainer {
+    pub fn get(&self, id: &MidId) -> Option<&MappedAttributes> {
+        Some(&self.mapps[*id as usize])
+    }
+}
+
 impl MappedAttributes {
     fn from_hedges<T1, T2>(hedges: Vec<HierEdge<T1, T2>>) -> Self
     where
@@ -353,16 +380,17 @@ impl MappedAttributes {
         T2: Copy,
     {
         type InnerType = SmolId;
-        let mut sub_matts = Vec::new();
+        //TODO: spare some space with repetitions
+        let mut outer = Vec::new();
         for hedge in hedges {
             let hedge_main = InnerType::try_from(hedge.id).unwrap();
-            let mut sub_sub = Vec::new();
+            let mut inner = Vec::new();
             for subsubid in &hedge.subs {
-                sub_sub.push(InnerType::try_from(*subsubid).unwrap());
+                inner.push(InnerType::try_from(*subsubid).unwrap());
             }
-            sub_matts.push((hedge_main, Self::List(sub_sub)));
+            outer.push((hedge_main, MappedAttributes::List(inner.into_boxed_slice())))
         }
-        Self::Map(sub_matts)
+        Self::Map(outer.into_boxed_slice())
     }
 
     pub fn iter_inner(&self) -> std::slice::Iter<'_, (SmolId, MappedAttributes)> {
@@ -375,37 +403,48 @@ impl MappedAttributes {
 
 pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
     let inst_countries = read_fix_att(stowage, names::I2C);
-    let concept_levels = read_fix_att(stowage, names::CLEVEL);
 
     //NAMES
-    for ename in vec![INSTS, SOURCES, CONCEPTS] {
-        write_names(stowage, ename)?
+    let nclosure = |o: NamedFieldEntity| o.display_name;
+    for fid in vec![FIELDS, SUB_FIELDS] {
+        inner_str_write::<NamedFieldEntity, _>(stowage, fid, fid, fid, "main", nclosure)?;
     }
+    inner_str_write::<Geo, _>(stowage, COUNTRIES, COUNTRIES, INSTS, "geo", |o| o.country)?;
+
     let mut q_names: Vec<String> = (0..5).map(|i| format!("Q{}", i)).collect();
     q_names.push("Uncategorized".to_owned());
     write_var_att(stowage, &get_name_name(QS), q_names.iter())?;
 
-    // concept parents
-    //
+    for ename in vec![INSTS, SOURCES] {
+        write_names(stowage, ename)?
+    }
+
     println!("getting maps");
 
-    let conc_id_map = get_idmap(stowage, CONCEPTS).to_map();
+    let topic_id_map = get_idmap(stowage, TOPICS).to_map();
     let inst_id_map = get_idmap(stowage, INSTS).to_map();
     let work_id_map = get_idmap(stowage, WORKS).to_map();
     let source_id_map = get_idmap(stowage, SOURCES).to_map();
     println!("got maps");
 
-    inner_str_write::<Geo, _>(stowage, COUNTRIES, INSTS, "geo", |o| o.country)?;
-
-    let mut ancestors: Vec<Vec<ConceptId>> = Vec::new();
-    for _ in 0..(conc_id_map.len() + 1) {
-        //TODO this pattern repeats a _lot_
-        ancestors.push(Vec::new());
+    //semantic ids
+    let mut semids = Vec::new();
+    for _ in 0..(inst_id_map.len() + 1) {
+        semids.push("".to_string());
     }
+    for obj in stowage.read_csv_objs::<AltNamed>(INSTS, "semantic-ids") {
+        if let Some(id) = inst_id_map.get(&obj.id) {
+            semids[*id as usize] = obj.alt_name;
+        }
+    }
+    write_var_att(stowage, vnames::INST_SEM_IDS, semids.iter())?;
+
+    let subfield_ancestors: Vec<FieldId> = read_fix_att(stowage, names::ANCESTOR);
+    let topic_subfields: Vec<FieldId> = read_fix_att(stowage, names::TOPIC_SUBFIELDS);
 
     let mut rel_preps: Vec<InstToWorkPrep> = Vec::new();
     let mut country_hiers: Vec<HEdgeSet<CountryId, InstId>> = Vec::new();
-    let mut concept_hiers: Vec<HEdgeSet<ConceptId, ConceptId>> = Vec::new();
+    let mut concept_hiers: Vec<HEdgeSet<FieldId, SubFieldId>> = Vec::new();
     let mut q_hiers: Vec<HEdgeSet<QId, SourceId>> = Vec::new();
     let mut to_source: Vec<Vec<SourceId>> = Vec::new();
     let mut to_cited: Vec<Vec<WorkId>> = Vec::new();
@@ -426,6 +465,22 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
         i2w.push(Vec::new());
     }
 
+    for w_conc in stowage.read_csv_objs::<WorkTopic>(WORKS, "topics") {
+        if w_conc.score.unwrap() < 0.6 {
+            continue;
+        };
+        if let (Some(work_id), Some(topic_id)) = (
+            work_id_map.get(&oa_id_parse(&w_conc.parent_id.unwrap())),
+            topic_id_map.get(&oa_id_parse(&w_conc.topic_id.unwrap())),
+        ) {
+            let ch_set = &mut concept_hiers[*work_id as usize];
+            let subfield_id = topic_subfields[*topic_id as usize];
+            let field_id = subfield_ancestors[subfield_id as usize];
+            ch_set.add(field_id, Some(subfield_id));
+        }
+    }
+    write_var_att(stowage, vnames::CONCEPT_H, concept_hiers.iter())?;
+
     for wq in stowage.read_csv_objs::<WorkQ>(WORKS, "qs") {
         if let (Some(work_id), Some(source_id)) =
             (work_id_map.get(&wq.id), source_id_map.get(&wq.source))
@@ -435,38 +490,6 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
         };
     }
     write_var_att(stowage, vnames::W2QS, q_hiers.iter())?;
-
-    for anc in stowage.read_csv_objs::<Ancestor>(CONCEPTS, "ancestors") {
-        if let (Some(pid), Some(anc_id)) = (
-            conc_id_map.get(&oa_id_parse(&anc.parent_id.unwrap())),
-            conc_id_map.get(&oa_id_parse(&anc.ancestor_id)),
-        ) {
-            ancestors[*pid as usize].push(*anc_id as ConceptId);
-        }
-    }
-
-    write_var_att(stowage, vnames::CONCEPT_ANC, ancestors.iter())?;
-
-    for w_conc in stowage.read_csv_objs::<WorkConcept>(WORKS, "concepts") {
-        if w_conc.score.unwrap() < 0.6 {
-            continue;
-        };
-        if let (Some(work_id), Some(cid)) = (
-            work_id_map.get(&oa_id_parse(&w_conc.parent_id.unwrap())),
-            conc_id_map.get(&oa_id_parse(&w_conc.concept_id.unwrap())),
-        ) {
-            let ch_set = &mut concept_hiers[*work_id as usize];
-            if concept_levels[*cid as usize] == 0 {
-                ch_set.add(*cid as ConceptId, None);
-            } else {
-                for anc in &ancestors[*cid as usize] {
-                    ch_set.add(*anc, Some(*cid as ConceptId))
-                }
-            }
-        }
-    }
-
-    write_var_att(stowage, vnames::CONCEPT_H, concept_hiers.iter())?;
 
     for a_ship in stowage.read_csv_objs::<InstAuthorship>(WORKS, "authorships") {
         if let Some(work_id) = work_id_map.get(&oa_id_parse(&a_ship.parent_id)) {
@@ -483,7 +506,6 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
             }
         };
     }
-
     write_var_att(stowage, vnames::COUNTRY_H, country_hiers.iter())?;
 
     for sobj in stowage.read_csv_objs::<Location>(WORKS, "locations") {
@@ -533,19 +555,25 @@ pub fn get_name_name(entity_name: &str) -> String {
 pub fn get_attribute_resolver_map(stowage: &Stowage) -> AttributeResolverMap {
     let mut ares_map = HashMap::new();
     build_ar_map::<CountryId, InstId>(stowage, vnames::COUNTRY_H, &mut ares_map);
-    build_ar_map::<ConceptId, ConceptId>(stowage, vnames::CONCEPT_H, &mut ares_map);
+    build_ar_map::<FieldId, SubFieldId>(stowage, vnames::CONCEPT_H, &mut ares_map);
     build_ar_map::<QId, SourceId>(stowage, vnames::W2QS, &mut ares_map);
     ares_map
 }
 
 fn write_names(stowage: &Stowage, entity_name: &str) -> io::Result<()> {
-    inner_str_write::<NamedEntity, _>(stowage, entity_name, entity_name, "main", |o| {
-        o.display_name
-    })
+    inner_str_write::<NamedEntity, _>(
+        stowage,
+        entity_name,
+        entity_name,
+        entity_name,
+        "main",
+        |o| o.display_name,
+    )
 }
 
 fn inner_str_write<T, F>(
     stowage: &Stowage,
+    map_base: &str,
     entity_name: &str,
     main: &str,
     sub: &str,
@@ -555,11 +583,12 @@ where
     T: DeserializeOwned + ParsedId,
     F: Fn(T) -> String,
 {
-    let mut id_map = get_idmap(stowage, entity_name);
+    let mut id_map = get_idmap(stowage, map_base);
     let mut names = Vec::new();
     for _ in 0..(id_map.current_total + 1) {
         names.push("".to_string());
     }
+    println!("inner write len: {}, idbase: {}", names.len(), entity_name);
     for obj in stowage.read_csv_objs::<T>(main, sub) {
         if let Some(id) = id_map.get(&obj.get_parsed_id()) {
             names[id as usize] = name_getter(obj);
@@ -617,20 +646,20 @@ where
     T1: Copy + ByteConvert,
     T2: Copy + ByteConvert,
 {
-    type InnerType = SmolId;
-    // let base: Vec<Vec<HierEdge<T1, T2>>> = read_var_att(stowage, var_att_name);
     let base = VarReader::<Vec<HierEdge<T1, T2>>>::new(stowage, var_att_name);
-    // let mut ci = Vec::new();
-    let mut ci = HashMap::new();
-    println!("building from hedges {}", var_att_name);
-    for (mid, hedges) in base.enumerate().tqdm() {
-        // ci.push(MappedAttributes::Map(sub_matts));
-        // if sub_matts.len() > 0 {
-        //     ci.insert(mid as MidId, MappedAttributes::Map(sub_matts));
-        // }
-        ci.insert(mid as MidId, MappedAttributes::from_hedges(hedges));
+    let mut mapp = Vec::new();
+    for hedges in base
+        .tqdm()
+        .desc(Some(format!("ares from {}", var_att_name)))
+    {
+        mapp.push(MappedAttributes::from_hedges(hedges));
     }
-    ares_map.insert(var_att_name.to_string(), ci);
+    ares_map.insert(
+        var_att_name.to_string(),
+        MappContainer {
+            mapps: mapp.into_boxed_slice(),
+        },
+    );
     println!("built, inserted");
 }
 
@@ -657,7 +686,7 @@ pub fn get_mapped_atts(resolver_id: &str) -> Vec<String> {
     );
     hm.insert(
         vnames::CONCEPT_H,
-        vec![MAIN_CONCEPTS.to_string(), SUB_CONCEPTS.to_string()],
+        vec![FIELDS.to_string(), SUB_FIELDS.to_string()],
     );
     // hm.insert(vnames::W2S, vec![SOURCES.to_string()]);
     hm.insert(vnames::W2QS, vec![QS.to_string(), SOURCES.to_string()]);

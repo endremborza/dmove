@@ -124,12 +124,9 @@ impl IdMap {
         None
     }
 
-    pub fn len(&self) -> usize {
-        self.current_total as usize
-    }
-
-    pub fn iter_ids(&self) -> std::ops::Range<BigId> {
-        1..self.current_total + 1
+    pub fn iter_ids(&self, include_unknown: bool) -> std::ops::Range<BigId> {
+        let start = if include_unknown { 0 } else { 1 };
+        start..self.current_total + 1
     }
 
     pub fn to_map(&self) -> HashMap<BigId, BigId> {

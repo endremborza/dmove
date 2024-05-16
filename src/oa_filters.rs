@@ -10,8 +10,10 @@ use tqdm::*;
 
 use crate::{
     add_strict_parsed_id_traits,
-    common::{oa_id_parse, BigId, ParsedId, Stowage, AUTHORS, CONCEPTS, INSTS, SOURCES, WORKS},
+    common::{oa_id_parse, BigId, ParsedId, Stowage, AUTHORS, INSTS, SOURCES, WORKS},
 };
+
+pub const START_YEAR: u16 = 2004;
 
 trait FilterBase {
     fn csv_path() -> String;
@@ -56,7 +58,7 @@ impl FilterBase for InstAuthorship {
     }
 
     fn get_min() -> usize {
-        1000
+        1500
     }
 
     fn get_edge_end_types() -> [&'static str; 2] {
@@ -158,7 +160,12 @@ impl FilterBase for PersonAuthorship {
     }
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
-        vec![[self.parent_id.to_string(), self.author.to_string()]]
+        let mut out = Vec::new();
+        let aid = self.author.to_string();
+        if aid.len() > 0 {
+            out.push([self.parent_id.to_string(), self.author.to_string()])
+        }
+        out
     }
 }
 
@@ -172,31 +179,25 @@ pub fn filter_setup(stowage: &Stowage) -> io::Result<()> {
 }
 
 #[derive(Deserialize)]
-struct SWork {
+pub struct SWork {
     pub id: String,
     is_retracted: bool,
     #[serde(rename = "type")]
     work_type: String,
-    // publication_year: u16,
-}
-#[derive(Deserialize)]
-pub struct SConcept {
-    pub id: String,
-    pub level: u8,
+    pub publication_year: Option<u16>,
 }
 
-add_strict_parsed_id_traits!(SWork, SConcept);
+add_strict_parsed_id_traits!(SWork);
 
 fn single_filter(stowage: &Stowage) -> io::Result<()> {
     let step_id = "1";
     let out_root = stowage.filter_steps.join(step_id);
     create_dir_all(&out_root)?;
     filter_write::<SWork, _>(stowage, WORKS, &out_root, |o| {
-        !o.is_retracted & (o.work_type == "article")
+        !o.is_retracted
+            & (o.work_type == "article")
+            & (o.publication_year.unwrap_or(0) > START_YEAR)
     })?;
-    // & (o.publication_year > 1950) {
-
-    filter_write::<SConcept, _>(stowage, CONCEPTS, &out_root, |o| o.level <= 1)?;
     Ok(())
 }
 
@@ -210,14 +211,11 @@ where
     T: for<'de> Deserialize<'de> + ParsedId,
     F: Fn(&T) -> bool,
 {
-    let mut rdr = stowage.get_sub_reader(entity_type, "main");
     let mut file = File::create(&out_root.join(entity_type))?;
 
-    for obj in rdr.deserialize::<T>().tqdm() {
-        if let Ok(o) = obj {
-            if closure(&o) {
-                file.write_all(&o.get_parsed_id().to_be_bytes())?;
-            }
+    for o in stowage.read_csv_objs::<T>(entity_type, "main") {
+        if closure(&o) {
+            file.write_all(&o.get_parsed_id().to_be_bytes())?;
         }
     }
     Ok(())
@@ -232,7 +230,7 @@ where
     let [source_set_o, target_set_o] = types.map(|t| get_last_filter(stowage, t));
 
     println!(
-        "filtering {:?} - {:?} --> {:?}. filtered to {:?}, filtered to {:?}",
+        "filtering {:?} - {:?} --> {:?}. pre-filtered to {:?}, pre-filtered to {:?}",
         step_id,
         source_type,
         target_type,
@@ -320,7 +318,8 @@ pub fn get_last_filter(stowage: &Stowage, entity_type: &str) -> Option<HashSet<u
     let mut out = None;
 
     if !stowage.entity_csvs.join(entity_type).exists() {
-        panic!("no such type")
+        println!("no such type {}", entity_type);
+        return None;
     }
     let dirs = match read_dir(&stowage.filter_steps) {
         Err(_) => vec![],

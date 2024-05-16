@@ -1,17 +1,15 @@
 use std::io;
-use std::marker::PhantomData;
 
 use serde::{de::DeserializeOwned, Deserialize};
 use std::collections::HashSet;
 
-use tqdm::Iter;
-
-use crate::add_parsed_id_traits;
 use crate::common::{
-    oa_id_parse, BigId, ParsedId, StowReader, Stowage, CONCEPTS, COUNTRIES, INSTS, SOURCES, WORKS,
+    field_id_parse, oa_id_parse, BigId, ParsedId, Stowage, CONCEPTS, COUNTRIES, FIELDS, INSTS, QS,
+    SOURCES, SUB_FIELDS, TOPICS, WORKS,
 };
 use crate::ingest_entity::get_idmap;
 use crate::oa_filters::get_last_filter;
+use crate::{add_parsed_id_traits, add_strict_parsed_id_traits};
 
 #[derive(Deserialize, Debug)]
 struct SIdObj {
@@ -27,93 +25,51 @@ pub struct SInstitution {
     pub display_name: String,
 }
 
-struct InstIter<T> {
-    rdr: StowReader,
-    phantom: PhantomData<T>,
-}
-
-impl<T> InstIter<T> {
-    pub fn new(stowage: &Stowage) -> Self {
-        let rdr = stowage.get_sub_reader(INSTS, "main");
-        Self {
-            rdr,
-            phantom: PhantomData::<T>,
-        }
-    }
-}
-
-trait OptionGetter<T> {
-    fn get(e: T) -> Option<String>;
-}
-
-struct GCountry;
-struct GType;
-
-impl OptionGetter<SInstitution> for GCountry {
-    fn get(e: SInstitution) -> Option<String> {
-        e.country_code
-    }
-}
-impl OptionGetter<SInstitution> for GType {
-    fn get(e: SInstitution) -> Option<String> {
-        e.ints_type
-    }
-}
-
-impl<T: OptionGetter<SInstitution>> Iterator for InstIter<T> {
-    type Item = BigId;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let inst = self.rdr.deserialize::<SInstitution>().next();
-            match inst {
-                Some(i) => {
-                    if let Some(cc) = T::get(i.unwrap()) {
-                        return Some(short_string_to_u64(&cc));
-                    }
-                }
-                None => return None,
-            }
-        }
-    }
+#[derive(Deserialize, Debug)]
+pub struct STopic {
+    pub id: String,
+    pub field: String,
+    pub subfield: String,
 }
 
 add_parsed_id_traits!(SIdObj, SInstitution);
-
-macro_rules! entites_from_dir {
-    ($dirname: ident, $typename: ident, $s: ident) => {
-        make_entity_ids::<$typename>($s, $dirname)?;
-    };
-}
-
-macro_rules! entites_from_attr {
-    ($ename: ident, $typename: ident, $s: ident) => {
-        entities_from_iter($s, $ename, InstIter::<$typename>::new($s), None)?;
-    };
-}
+add_strict_parsed_id_traits!(STopic);
 
 pub fn make_ids(stowage: &Stowage) -> io::Result<()> {
-    entites_from_dir!(WORKS, SIdObj, stowage);
-    entites_from_dir!(SOURCES, SIdObj, stowage);
-    entites_from_dir!(INSTS, SInstitution, stowage);
-    entites_from_attr!(COUNTRIES, GCountry, stowage);
-    entites_from_dir!(CONCEPTS, SIdObj, stowage);
-    // entites_from_attr!("inst_types", GType, stowage);
+    entities_from_iter(stowage, QS, 1..6, None)?;
+
+    for sw in vec![FIELDS, SUB_FIELDS] {
+        ids_from_atts::<SIdObj, _>(stowage, sw, sw, |e| field_id_parse(&e.id.unwrap()))?;
+    }
+
+    for en in vec![WORKS, INSTS, SOURCES, CONCEPTS, TOPICS] {
+        ids_from_atts::<SIdObj, _>(stowage, en, en, |e| e.get_parsed_id())?;
+    }
+
+    ids_from_atts::<SInstitution, _>(stowage, COUNTRIES, INSTS, |e| {
+        short_string_to_u64(&e.country_code.unwrap_or("".to_string()))
+    })?;
+
     Ok(())
 }
 
-fn make_entity_ids<T>(stowage: &Stowage, entity_name: &str) -> io::Result<()>
+fn ids_from_atts<T, F>(
+    stowage: &Stowage,
+    out_name: &str,
+    parent_entity: &str,
+    closure: F,
+) -> io::Result<()>
 where
-    T: DeserializeOwned + ParsedId,
+    T: DeserializeOwned,
+    F: Fn(T) -> BigId,
 {
-    let mut rdr = stowage.get_sub_reader(entity_name, "main");
     entities_from_iter(
         stowage,
-        entity_name,
-        rdr.deserialize::<T>()
-            .map(|e| e.unwrap().get_parsed_id())
-            .tqdm(),
-        get_last_filter(stowage, entity_name),
+        out_name,
+        stowage
+            .read_csv_objs::<T>(parent_entity, "main")
+            .map(closure),
+        get_last_filter(stowage, out_name),
     )
 }
 

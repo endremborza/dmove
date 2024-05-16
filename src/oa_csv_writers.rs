@@ -7,12 +7,14 @@ use std::path::{Path, PathBuf};
 use tqdm::Iter;
 
 use crate::oa_structs::{
-    Ancestor, AssociatedInstitution, Author, Authorship, Biblio, Concept, Geo, IdCountDecorated,
-    IdTrait, Institution, Location, Mesh, OpenAccess, Publisher, RelatedConcept, Source, Topic,
-    Work, WorkConcept, WorkTopic,
+    Ancestor, AssociatedInstitution, Author, Authorship, Biblio, Concept, FieldLike, Geo,
+    IdCountDecorated, IdTrait, Institution, Location, Mesh, OpenAccess, Publisher, RelatedConcept,
+    Source, SubField, Topic, Work, WorkConcept, WorkTopic,
 };
 
-use crate::common::{AUTHORS, CONCEPTS, INSTS, PUBLISHERS, SOURCES, TOPICS, WORKS};
+use crate::common::{
+    AUTHORS, CONCEPTS, DOMAINS, FIELDS, INSTS, PUBLISHERS, SOURCES, SUB_FIELDS, TOPICS, WORKS,
+};
 
 type GzInner = GzEncoder<BufWriter<File>>;
 type GzWriter = Writer<GzInner>;
@@ -85,6 +87,8 @@ create_writer!(SourceWriter, Source);
 create_writer!(PubWriter, Publisher);
 create_writer!(AuthorWriter, Author);
 create_writer!(TopicWriter, Topic);
+create_writer!(FieldWriter, FieldLike);
+create_writer!(SubFieldWriter, SubField);
 
 macro_rules! create_decorated_struct {
     ($writer_name: ident, $csv_writer: ident, $decor_name:ident, $t_name: ident $(,V $rest_key:ident => $rest_value: ident)* $(,S $rest_single_key:ident -> $rest_single_value: ident)* $(,I $rest_inner_key: ident)*) => {
@@ -149,11 +153,9 @@ create_decorated_struct!(
     WorkCsvWriter,
     DecoratedWork,
     Work,
+    V topics => WorkTopic,
     V locations => Location,
     V authorships => Authorship,
-    V concepts => WorkConcept,
-    V topics => WorkTopic,
-    V mesh => Mesh,
     S biblio -> Biblio,
     S open_access -> OpenAccess,
     I referenced_works
@@ -253,6 +255,12 @@ pub fn write_csvs(in_root_str: &str, out_root_str: &str, n: Option<usize>) -> io
         in_root_str,
         out_root_str,
         n,
+        FieldWriter,
+        FIELDS,
+        FieldWriter,
+        DOMAINS,
+        SubFieldWriter,
+        SUB_FIELDS,
         TopicWriter,
         TOPICS,
         InstitutionWriter,

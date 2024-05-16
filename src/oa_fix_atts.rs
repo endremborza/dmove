@@ -1,28 +1,39 @@
 use crate::{
-    common::{BigId, ParsedId, Stowage, CONCEPTS, COUNTRIES, INSTS},
-    ingest_entity::{get_idmap, IdMap},
-    oa_entity_mapping::{short_string_to_u64, SInstitution},
-    oa_filters::SConcept,
+    common::{
+        field_id_parse, BigId, ParsedId, Stowage, COUNTRIES, FIELDS, INSTS, SUB_FIELDS, TOPICS,
+        WORKS,
+    },
+    ingest_entity::get_idmap,
+    oa_entity_mapping::{short_string_to_u64, SInstitution, STopic},
+    oa_filters::{SWork, START_YEAR},
 };
-use serde::Deserialize;
+use hashbrown::HashMap;
+use serde::{de::DeserializeOwned, Deserialize};
 use std::io::{self, Read, Write};
-use tqdm::Iter;
 
 pub mod names {
     pub const I2C: &str = "inst-countries";
-    pub const CLEVEL: &str = "concept-levels";
+    pub const ANCESTOR: &str = "subfield-ancestor";
+    pub const TOPIC_SUBFIELDS: &str = "topic-subfields";
+    pub const WORK_YEAR: &str = "work-years";
 }
 
 #[derive(Deserialize, Debug)]
-struct SWork {
-    _id: Option<String>,
-    _publication_year: Option<u16>,
+struct SSubField {
+    id: String,
+    field: String,
 }
 
 trait ParseId {
     fn parse_id(id: &BigId) -> Self;
     fn null_value() -> Self;
     fn barr(&self) -> Vec<u8>;
+}
+
+impl ParsedId for SSubField {
+    fn get_parsed_id(&self) -> BigId {
+        field_id_parse(&self.id)
+    }
 }
 
 macro_rules! uints {
@@ -56,75 +67,73 @@ macro_rules! by_size {
 uints!(u8, u16, u32, u64,);
 
 pub fn write_fix_atts(stowage: &Stowage) -> io::Result<()> {
-    let mut cid_map = get_idmap(stowage, COUNTRIES);
-    let mut iid_map = get_idmap(stowage, INSTS);
-
-    let ct = cid_map.current_total;
-    let iid_map_arg = &mut iid_map;
-    let cid_map_arg = &mut cid_map;
-    let cfatt_name = names::I2C;
-    by_size!(
-        run_fatt,
-        SInstitution,
-        ct,
-        stowage,
-        cfatt_name,
-        INSTS,
-        cid_map_arg,
-    );
-    let fatt_name = names::CLEVEL;
-    let max_level = 3;
-    by_size!(
-        run_fatt,
-        SConcept,
-        max_level,
-        stowage,
-        fatt_name,
-        CONCEPTS,
-        iid_map_arg,
-    );
+    //WARNING only u8 len things work now!
+    sized_run::<SInstitution>(stowage, names::I2C, COUNTRIES, INSTS);
+    sized_run::<SSubField>(stowage, names::ANCESTOR, FIELDS, SUB_FIELDS);
+    sized_run::<STopic>(stowage, names::TOPIC_SUBFIELDS, SUB_FIELDS, TOPICS);
+    let phantom_map = HashMap::new();
+    run_fatt::<u8, SWork>(stowage, names::WORK_YEAR, WORKS, &phantom_map);
     Ok(())
 }
 
-trait FatGetter {
-    fn get_fatt(&self, att_id_map: &mut IdMap) -> Option<BigId>;
+fn sized_run<T>(stowage: &Stowage, fatt_name: &str, id_base: &str, parent: &str)
+where
+    T: FatGetter + ParsedId + DeserializeOwned,
+{
+    let id_map = get_idmap(stowage, id_base).to_map();
+    let max_count = id_map.len();
+    let id_map_arg = &id_map;
+    by_size!(run_fatt, T, max_count, stowage, fatt_name, parent, id_map_arg,);
 }
 
-impl FatGetter for SConcept {
-    fn get_fatt(&self, _: &mut IdMap) -> Option<BigId> {
-        Some(self.level.into())
+trait FatGetter {
+    fn get_fatt(&self, att_id_map: &HashMap<BigId, BigId>) -> Option<BigId>;
+}
+
+impl FatGetter for SSubField {
+    fn get_fatt(&self, field_id_map: &HashMap<BigId, BigId>) -> Option<BigId> {
+        Some(*field_id_map.get(&field_id_parse(&self.field))?)
+    }
+}
+
+impl FatGetter for STopic {
+    fn get_fatt(&self, subfield_id_map: &HashMap<BigId, BigId>) -> Option<BigId> {
+        Some(*subfield_id_map.get(&field_id_parse(&self.subfield))?)
+    }
+}
+
+impl FatGetter for SWork {
+    fn get_fatt(&self, _: &HashMap<BigId, BigId>) -> Option<BigId> {
+        if let Some(year) = &self.publication_year {
+            return Some((year - START_YEAR) as BigId); //TODO: this is not really an id
+        };
+        None
     }
 }
 
 impl FatGetter for SInstitution {
-    fn get_fatt(&self, att_id_map: &mut IdMap) -> Option<BigId> {
+    fn get_fatt(&self, att_id_map: &HashMap<BigId, BigId>) -> Option<BigId> {
         if let Some(cc_id) = &self.country_code {
-            return Some(att_id_map.get(&short_string_to_u64(&cc_id)).unwrap());
+            return Some(*att_id_map.get(&short_string_to_u64(&cc_id)).unwrap());
         }
         return None;
     }
 }
 
-fn run_fatt<T, R>(stowage: &Stowage, fatt_name: &str, main_type: &str, att_id_map: &mut IdMap)
-where
+fn run_fatt<T, R>(
+    stowage: &Stowage,
+    fatt_name: &str,
+    main_type: &str,
+    att_id_map: &HashMap<BigId, BigId>,
+) where
     T: ParseId + std::clone::Clone,
     R: for<'de> Deserialize<'de> + ParsedId + FatGetter,
 {
     let mut obj_id_map = get_idmap(stowage, main_type);
     let mut out_file = stowage.get_fix_writer(fatt_name);
-    let mut rdr = stowage.get_sub_reader(main_type, "main");
     let mut attribute_arr: Vec<T> = vec![T::null_value(); (obj_id_map.current_total + 1) as usize];
 
-    println!(
-        "writing {} for {} with map of {} ({})",
-        fatt_name,
-        main_type,
-        attribute_arr.len(),
-        obj_id_map.current_total
-    );
-
-    for obj_raw in rdr.deserialize::<R>().tqdm() {
-        let obj = obj_raw.unwrap();
+    for obj in stowage.read_csv_objs::<R>(main_type, "main") {
         if let Some(oid) = obj_id_map.get(&obj.get_parsed_id()) {
             if let Some(inner_id) = obj.get_fatt(att_id_map) {
                 let parsed_id = T::parse_id(&inner_id);

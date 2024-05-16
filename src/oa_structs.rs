@@ -30,7 +30,17 @@ pub trait IdTrait {
     fn get_id(&self) -> String;
 }
 
-add_id_traits!(Author, Concept, Institution, Publisher, Source, Work, Topic);
+add_id_traits!(
+    Author,
+    Concept,
+    Institution,
+    Publisher,
+    Source,
+    Work,
+    Topic,
+    FieldLike,
+    SubField
+);
 
 impl<T> IdTrait for IdCountDecorated<T>
 where
@@ -105,14 +115,28 @@ pub struct Concept {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Topic {
-    id: String,
-    display_name: String,
+    pub id: String,
+    pub display_name: String,
     #[serde(default, deserialize_with = "deserialize_strict_hash_field")]
-    subfield: String,
+    pub subfield: String,
     #[serde(default, deserialize_with = "deserialize_strict_hash_field")]
-    field: String,
+    pub field: String,
     #[serde(default, deserialize_with = "deserialize_strict_hash_field")]
     domain: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct FieldLike {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct SubField {
+    pub id: String,
+    pub display_name: String,
+    #[serde(default, deserialize_with = "deserialize_strict_hash_field")]
+    pub field: String,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
