@@ -419,7 +419,7 @@ fn make_qcs(
     bifurcations: Vec<JsBifurcation>,
 ) -> (Vec<u32>, SpecPrepType, Vec<JsBifurcation>, String) {
     let mut qcr = QuercusRoller::new(&bd_hiers, &ares_map);
-    let mut full_counts = vec![0; id_map.current_total as usize];
+    let mut full_counts = vec![0; (id_map.current_total + 1) as usize];
     let mut spec_bases_vecs = SpecPrepType(HashMap::new());
 
     for iid in id_map.iter_ids(false).tqdm().desc(Some(&qc_key)) {
