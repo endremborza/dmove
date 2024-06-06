@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-const MAX_SIBLINGS: usize = 20;
+const MAX_SIBLINGS: usize = 16;
 
 pub fn prune(stowage_owned: Stowage) -> io::Result<()> {
     let stowage_arc = Arc::new(stowage_owned);
@@ -44,10 +44,6 @@ pub fn prune(stowage_owned: Stowage) -> io::Result<()> {
     for done_thread in spawned_threads {
         done_thread.join().unwrap();
     }
-    write_gz(
-        &stowage.pruned_cache.join(format!("{}.json", A_STAT_PATH)),
-        &astats,
-    )?;
     write_gz(
         &stowage.pruned_cache.join(format!("{}.json", QC_CONF)),
         &read_cache::<HashMap<String, JsQcSpec>>(stowage, QC_CONF),
