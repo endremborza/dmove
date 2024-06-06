@@ -8,8 +8,8 @@ use tqdm::Iter;
 
 use crate::oa_structs::{
     Ancestor, AssociatedInstitution, Author, Authorship, Biblio, Concept, FieldLike, Geo,
-    IdCountDecorated, IdTrait, Institution, Location, Mesh, OpenAccess, Publisher, RelatedConcept,
-    Source, SubField, Topic, Work, WorkConcept, WorkTopic,
+    IdCountDecorated, IdTrait, Institution, Location, OpenAccess, Publisher, RelatedConcept,
+    Source, SubField, Topic, Work, WorkTopic,
 };
 
 use crate::common::{

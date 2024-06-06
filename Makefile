@@ -1,7 +1,7 @@
 include .env
 export
 
-QV := quercus-basis-v6
+QV := quercus-basis-v`date +%Y-%m-%d`
 S3_LOC := s3://tmp-borza-public-cyx/$(QV)
 
 hello:
@@ -16,15 +16,16 @@ to-csv:
 filter to-keys fix-atts var-atts build-qcs prune-qcs:
 	cargo run --release -- $@ $(OA_ROOT) 
 
-inst_str_id serve to_build_urls paper_qs:
+inst_str_id serve to_build_urls paper_qs astats_to_pruned:
 	python3 pyscripts/$@.py
 
 pre_var_att_py: paper_qs inst_str_id
 	echo "pyruns"
 
-deploy:
+deploy-data-to-s3:
 	aws s3 rm $(S3_LOC) --recursive
-	aws s3 sync $(OA_ROOT)/cache $(S3_LOC)  --acl public-read --content-encoding gzip
+	aws s3 sync $(OA_ROOT)/pruned-cache $(S3_LOC)  --acl public-read --content-encoding gzip
+	echo $(S3_LOC)
 
 clean-keys:
 	rm -rf $(OA_ROOT)/key-stores
