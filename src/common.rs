@@ -1,5 +1,7 @@
+use std::fs::{DirEntry, ReadDir};
+use std::io::prelude::*;
 use std::{
-    fs::{create_dir_all, File},
+    fs::{create_dir_all, read_dir, File},
     io::{self, BufReader, Write},
     path::{Path, PathBuf},
 };
@@ -20,11 +22,15 @@ pub const INSTS: &str = "institutions";
 pub const COUNTRIES: &str = "countries";
 pub const CONCEPTS: &str = "concepts";
 pub const TOPICS: &str = "topics";
-pub const DOMAINS: &str = "DOMAINS";
+pub const DOMAINS: &str = "domains";
 
 pub const FIELDS: &str = "fields";
 pub const SUB_FIELDS: &str = "subfields";
 pub const QS: &str = "qs";
+
+pub const BUILD_LOC: &str = "qc-builds";
+pub const A_STAT_PATH: &str = "attribute-statics";
+pub const QC_CONF: &str = "qc-specs";
 
 pub const ID_PREFIX: &str = "https://openalex.org/";
 
@@ -65,8 +71,10 @@ pub trait ParsedId {
     fn get_parsed_id(&self) -> BigId;
 }
 
-pub trait ParentGetter {
-    fn parent(&self) -> &str;
+pub struct QcPathIter {
+    builds: ReadDir,
+    inner_dir: PathBuf,
+    inner_reader: ReadDir,
 }
 
 #[macro_export]
@@ -154,12 +162,58 @@ impl Stowage {
     ) -> ObjIter<T> {
         ObjIter::new(self, main_path, sub_path)
     }
+
+    pub fn iter_cached_qc_locs(&self) -> QcPathIter {
+        QcPathIter::new(&self.cache)
+    }
+
+    pub fn iter_pruned_qc_locs(&self) -> QcPathIter {
+        QcPathIter::new(&self.pruned_cache)
+    }
 }
 
-type InIterator<T> = Tqdm<
-    Result<T, csv::Error>,
-    DeserializeRecordsIntoIter<BufReader<flate2::read::GzDecoder<File>>, T>,
->;
+impl QcPathIter {
+    fn new(path: &PathBuf) -> Self {
+        let mut builds = read_dir(path.join(BUILD_LOC)).unwrap();
+        let inner_dir = builds.next().unwrap().unwrap().path();
+        let inner_reader = read_dir(&inner_dir).unwrap();
+        Self {
+            builds,
+            inner_dir,
+            inner_reader,
+        }
+    }
+}
+
+impl Iterator for QcPathIter {
+    type Item = (String, DirEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.inner_reader.next() {
+            Some(inner_file) => {
+                return Some((
+                    self.inner_dir
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_owned(),
+                    inner_file.unwrap(),
+                ))
+            }
+            None => {
+                if let Some(inner_next) = self.builds.next() {
+                    self.inner_dir = inner_next.unwrap().path();
+                    self.inner_reader = read_dir(&self.inner_dir).unwrap();
+                    return self.next();
+                }
+            }
+        }
+        None
+    }
+}
+
+type InIterator<T> = Tqdm<DeserializeRecordsIntoIter<BufReader<flate2::read::GzDecoder<File>>, T>>;
 
 pub struct ObjIter<T>
 where
@@ -210,4 +264,21 @@ where
         .write_all(serde_json::to_string(&obj).unwrap().as_bytes())
         .unwrap();
     return Ok(());
+}
+
+pub fn read_js_path<T: DeserializeOwned>(fp: &str) -> Result<T, serde_json::Error> {
+    let mut js_str = String::new();
+    get_gz_buf(fp).read_to_string(&mut js_str).unwrap();
+    serde_json::from_str(&js_str)
+}
+
+pub fn read_cache<T: DeserializeOwned>(stowage: &Stowage, fname: &str) -> T {
+    read_js_path(
+        stowage
+            .cache
+            .join(format!("{}.json.gz", fname))
+            .to_str()
+            .unwrap(),
+    )
+    .expect(&format!("tried reading {}", fname))
 }
