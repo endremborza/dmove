@@ -1,46 +1,35 @@
 import json
 import re
-from pathlib import Path
 from string import ascii_lowercase
 
-import numpy as np
 import pandas as pd
-from dotenv import load_dotenv
-from pandas.compat import os
 from unidecode import unidecode
 
-load_dotenv()
-
-oa_root = Path(os.environ["OA_ROOT"])
-
-inst_root = oa_root / "entity-csvs/institutions"
+from .common import MAIN_NAME, insts, oa_root, parse_id, read_p_gz
+from .rust_gen import ComC, StowC
 
 
-def get_filter(sub):
-    return np.frombuffer(
-        Path(oa_root, "filter-steps", sub).read_bytes(),
-        dtype=np.dtype(np.uint64).newbyteorder(">"),
+def to_name_dic(df, k):
+    # TODO: replace with get_map
+    return (
+        df.reset_index()
+        .assign(i=lambda df: list(map(str, range(1, df.shape[0] + 1))))
+        .set_index("i")[k]
+        .to_dict()
     )
 
 
-def load_map(kind):
-    blob = Path(oa_root, "key-stores", kind).read_bytes()
-
-    imap = np.frombuffer(blob, dtype=np.dtype(np.uint64).newbyteorder(">")).reshape(
-        -1, 2
-    )
-    return pd.DataFrame(imap).set_index(0).loc[:, 1].to_dict()
-
-
-def parse_id(col):
-    return col.str[22:].astype(np.uint64)
+def get_country_semantic_ids():
+    astats = read_p_gz(oa_root / StowC.cache / ComC.A_STAT_PATH)
+    return {
+        k: "-".join(ed["name"].lower().replace(".", " ").split())
+        for k, ed in astats[ComC.COUNTRIES].items()
+    }
 
 
-insts = get_filter("13/institutions")
-
-if __name__ == "__main__":
+def get_inst_semantic_ids():
     df = (
-        pd.read_csv(inst_root / "main.csv.gz")
+        pd.read_csv(oa_root / StowC.entity_csvs / ComC.INSTS / MAIN_NAME)
         .assign(id=lambda df: df["id"].pipe(parse_id))
         .loc[lambda df: df["id"].isin(insts), :]
     )
@@ -119,9 +108,6 @@ if __name__ == "__main__":
         .sort_values(["is_different", "neg_cc"])
         .drop_duplicates(subset=["alt_name"], keep="first")
     )
-
-    (
-        shortname_df.drop_duplicates(subset=["id"])
-        .set_index("id")[["alt_name"]]
-        .to_csv(inst_root / "semantic-ids.csv.gz")
-    )
+    return shortname_df.drop_duplicates(subset=["id"]).set_index("id").loc[
+        df["id"].values, :
+    ].pipe(to_name_dic, "alt_name") | {"0": "unknown"}

@@ -1,11 +1,24 @@
 import gzip
 import json
 from functools import reduce
-from pathlib import Path
 
 import pandas as pd
-from inst_str_id import get_filter, inst_root, insts, oa_root, parse_id
 from Levenshtein import ratio
+from tqdm import tqdm
+
+from .common import (
+    COMPLETE_FILTER,
+    MAIN_NAME,
+    Keys,
+    get_filter,
+    inst_root,
+    insts,
+    oa_root,
+    parse_id,
+    read_p_gz,
+)
+from .rust_gen import ComC, StowC
+from .semantic_ids import get_country_semantic_ids, get_inst_semantic_ids, to_name_dic
 
 
 def get_flag_emoji(ccode):
@@ -15,28 +28,16 @@ def get_flag_emoji(ccode):
     ).decode("utf-8")
 
 
-def to_name_dic(df, k):
-    return (
-        df.reset_index()
-        .assign(i=lambda df: list(map(str, range(1, df.shape[0] + 1))))
-        .set_index("i")[k]
-        .to_dict()
-    )
-
-
 MIN_D = 0.8
 
 dn = "display_name"
 
-as_fname = "attribute-statics.json.gz"
-astat_cache_path = Path(oa_root, "cache", as_fname)
-astat_pruned_cache_path = Path(oa_root, "pruned-cache", as_fname)
 
 if __name__ == "__main__":
     sources = get_filter("12/sources")
 
     sdf = (
-        pd.read_csv(oa_root / "entity-csvs" / "sources" / "main.csv.gz")
+        pd.read_csv(oa_root / StowC.entity_csvs / ComC.SOURCES / MAIN_NAME)
         .assign(id=lambda df: df["id"].pipe(parse_id))
         .loc[lambda df: df["id"].isin(sources), :]
         .set_index("id")
@@ -69,7 +70,7 @@ if __name__ == "__main__":
 
     df = (
         (
-            pd.read_csv(inst_root / "main.csv.gz")
+            pd.read_csv(inst_root / MAIN_NAME)
             .assign(id=lambda df: df["id"].pipe(parse_id))
             .loc[lambda df: df["id"].isin(insts), :]
         )
@@ -104,15 +105,40 @@ if __name__ == "__main__":
         )
     )
 
-    d = json.loads(gzip.decompress(astat_cache_path.read_bytes()))
+    astats = read_p_gz(oa_root / StowC.cache / ComC.A_STAT_PATH)
+    specs = read_p_gz(oa_root / StowC.pruned_cache / ComC.QC_CONF)
+    r2spec = dict((v[Keys.ROOT], k) for k, v in specs.items())
+    semdicts = {
+        ComC.INSTS: get_inst_semantic_ids(),
+        ComC.COUNTRIES: get_country_semantic_ids(),
+    }
+
+    for k, v in r2spec.items():
+        for qid in tqdm(astats[k].keys(), desc=k):
+            qcp = (
+                oa_root
+                / StowC.pruned_cache
+                / ComC.BUILD_LOC
+                / COMPLETE_FILTER
+                / v
+                / qid
+            )
+            try:
+                qc = read_p_gz(qcp)
+                cmeta = {Keys.CITE: qc["weight"], Keys.PAPER: qc["source_count"]}
+            except FileNotFoundError:
+                cmeta = {}
+
+            ed = astats[k][qid]
+            ed[Keys.META] = cmeta | {
+                Keys.SEM: semdicts[k][qid],
+            }
 
     for iid, oa_id in enumerate(df["id"]):
-        d["institutions"][str(iid + 1)]["meta"][
-            "oa_id"
-        ] = f"https://openalex.org/I{oa_id}"
+        astats[ComC.INSTS][str(iid + 1)][Keys.META][Keys.OA_ID_META] = str(oa_id)
 
     def mod_astats(name_dic, k):
-        for ik, idic in d[k].items():
+        for ik, idic in astats[k].items():
             new_name = name_dic.get(ik, "")
             if new_name != idic["name"]:
                 print(idic["name"], "==>", new_name, "\n")
@@ -121,4 +147,6 @@ if __name__ == "__main__":
     mod_astats(to_name_dic(df, "citied_name"), "institutions")
     mod_astats(to_name_dic(named_sdf, "clean_name"), "sources")
 
-    astat_pruned_cache_path.write_bytes(gzip.compress(json.dumps(d).encode()))
+    (oa_root / StowC.pruned_cache / ComC.A_STAT_PATH).with_suffix(
+        ".json.gz"
+    ).write_bytes(gzip.compress(json.dumps(astats).encode()))

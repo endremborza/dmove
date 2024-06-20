@@ -3,15 +3,24 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler, test
 
 from dotenv import load_dotenv
 
+from .merge_files import suffix
+
 load_dotenv()
 
 
 class CORSRequestHandler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "ngrok-skip-browser-warning")
+        self.send_header("Content-Encoding", suffix)
         self.send_header("Content-Type", "application/json")
-        SimpleHTTPRequestHandler.end_headers(self)
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.end_headers()
 
 
 if __name__ == "__main__":
