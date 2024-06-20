@@ -23,7 +23,6 @@ use crate::{
 };
 
 pub mod vnames {
-    pub const INST_SEM_IDS: &str = "inst-semantic-ids";
 
     pub const I2W: &str = "i2w";
     pub const CONCEPT_H: &str = "concept-hierarchy";
@@ -36,11 +35,11 @@ pub mod vnames {
 pub type MidId = u32;
 pub type SmolId = u16;
 // TODO figure this shit out to be dynamic properly
-type CountryId = u8;
+pub type CountryId = u8;
 type QId = u8;
 type FieldId = u8;
 type SubFieldId = u8;
-type InstId = u16;
+pub type InstId = u16;
 type SourceId = u16;
 pub type WorkId = u32;
 pub type AttributeResolverMap = HashMap<String, MappContainer>;
@@ -85,12 +84,6 @@ struct NamedEntity {
 struct NamedFieldEntity {
     id: String,
     display_name: String,
-}
-
-#[derive(Deserialize)]
-struct AltNamed {
-    id: BigId,
-    alt_name: String,
 }
 
 #[derive(Deserialize)]
@@ -370,6 +363,25 @@ impl MappContainer {
     pub fn get(&self, id: &MidId) -> Option<&MappedAttributes> {
         Some(&self.mapps[*id as usize])
     }
+
+    pub fn from_name<T1, T2>(stowage: &Stowage, var_att_name: &str) -> Self
+    where
+        SmolId: From<T1> + From<T2>,
+        T1: Copy + ByteConvert,
+        T2: Copy + ByteConvert,
+    {
+        let base = VarReader::<Vec<HierEdge<T1, T2>>>::new(stowage, var_att_name);
+        let mut mapp = Vec::new();
+        for hedges in base
+            .tqdm()
+            .desc(Some(format!("ares from {}", var_att_name)))
+        {
+            mapp.push(MappedAttributes::from_hedges(hedges));
+        }
+        Self {
+            mapps: mapp.into_boxed_slice(),
+        }
+    }
 }
 
 impl MappedAttributes {
@@ -426,18 +438,6 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
     let work_id_map = get_idmap(stowage, WORKS).to_map();
     let source_id_map = get_idmap(stowage, SOURCES).to_map();
     println!("got maps");
-
-    //semantic ids
-    let mut semids = Vec::new();
-    for _ in 0..(inst_id_map.len() + 1) {
-        semids.push("".to_string());
-    }
-    for obj in stowage.read_csv_objs::<AltNamed>(INSTS, "semantic-ids") {
-        if let Some(id) = inst_id_map.get(&obj.id) {
-            semids[*id as usize] = obj.alt_name;
-        }
-    }
-    write_var_att(stowage, vnames::INST_SEM_IDS, semids.iter())?;
 
     let subfield_ancestors: Vec<FieldId> = read_fix_att(stowage, names::ANCESTOR);
     let topic_subfields: Vec<FieldId> = read_fix_att(stowage, names::TOPIC_SUBFIELDS);
@@ -646,19 +646,9 @@ where
     T1: Copy + ByteConvert,
     T2: Copy + ByteConvert,
 {
-    let base = VarReader::<Vec<HierEdge<T1, T2>>>::new(stowage, var_att_name);
-    let mut mapp = Vec::new();
-    for hedges in base
-        .tqdm()
-        .desc(Some(format!("ares from {}", var_att_name)))
-    {
-        mapp.push(MappedAttributes::from_hedges(hedges));
-    }
     ares_map.insert(
         var_att_name.to_string(),
-        MappContainer {
-            mapps: mapp.into_boxed_slice(),
-        },
+        MappContainer::from_name::<T1, T2>(stowage, var_att_name),
     );
     println!("built, inserted");
 }
