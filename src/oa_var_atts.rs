@@ -17,7 +17,7 @@ use crate::{
     },
     ingest_entity::get_idmap,
     oa_entity_mapping::short_string_to_u64,
-    oa_filters::InstAuthorship,
+    oa_filters::{InstAuthorship, ASHIP},
     oa_fix_atts::{names, read_fix_att},
     oa_structs::{Location, ReferencedWork, WorkTopic},
 };
@@ -491,7 +491,7 @@ pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
     }
     write_var_att(stowage, vnames::W2QS, q_hiers.iter())?;
 
-    for a_ship in stowage.read_csv_objs::<InstAuthorship>(WORKS, "authorships") {
+    for a_ship in stowage.read_csv_objs::<InstAuthorship>(WORKS, ASHIP) {
         if let Some(work_id) = work_id_map.get(&oa_id_parse(&a_ship.parent_id)) {
             let rel_prep = &mut rel_preps[*work_id as usize];
             rel_prep.total_authors += 1;
