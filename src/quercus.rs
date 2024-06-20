@@ -5,9 +5,12 @@ use std::collections::VecDeque;
 use std::ops::AddAssign;
 use std::sync::{Arc, Mutex};
 use std::{io, thread};
-use tqdm::*;
+use tqdm::pbar;
 
-use crate::common::{BigId, Stowage, COUNTRIES, FIELDS, INSTS, QS, SOURCES, SUB_FIELDS, WORKS};
+use crate::common::{
+    BigId, Stowage, A_STAT_PATH, BUILD_LOC, COUNTRIES, FIELDS, INSTS, QC_CONF, QS, SOURCES,
+    SUB_FIELDS, WORKS,
+};
 use crate::ingest_entity::get_idmap;
 use crate::oa_filters::START_YEAR;
 use crate::oa_fix_atts::{names, read_fix_att};
@@ -16,12 +19,9 @@ use crate::oa_var_atts::{
     AttributeResolverMap, MappedAttributes, MidId, SmolId, WeightedEdge, WorkId,
 };
 
-pub const BUILD_LOC: &str = "qc-builds";
-pub const A_STAT_PATH: &str = "attribute-statics";
-pub const QC_CONF: &str = "qc-specs";
-
 type GraphPath = Vec<MidId>;
 pub type AttributeStaticMap = HashMap<String, HashMap<SmolId, AttributeStatic>>;
+pub type FullJsSpec = HashMap<String, JsQcSpec>;
 
 pub struct BreakdownHierarchy {
     pub levels: Vec<usize>,
@@ -42,9 +42,31 @@ impl BreakdownHierarchy {
     }
 }
 
+pub struct BdHierarcyList {
+    hiers: Vec<BreakdownHierarchy>,
+    qc_id: String,
+}
+
+impl BdHierarcyList {
+    pub fn to_jsbifs(&self) -> Vec<JsBifurcation> {
+        let mut out = Vec::new();
+        for bdh in &self.hiers {
+            let resolver_id = &bdh.resolver_id;
+            for i in &bdh.levels {
+                out.push(JsBifurcation {
+                    attribute_kind: bdh.entity_types[*i].clone(),
+                    description: get_bd_description(&bdh, i),
+                    resolver_id: resolver_id.clone(),
+                    source_side: bdh.side == 0,
+                })
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Quercus {
-    //TODO: at one point include "stats" or "meta"
     pub weight: u32,
     pub source_count: usize,
     pub top_source: (BigId, u32),
@@ -64,16 +86,17 @@ struct QuercusRoller<'a> {
     current_source: MidId,
 }
 
-#[derive(Serialize, Deserialize)]
-struct JsBifurcation {
-    attribute_kind: String,
-    resolver_id: String,
-    description: String,
+#[derive(Serialize, Deserialize, Clone)]
+pub struct JsBifurcation {
+    pub attribute_kind: String,
+    pub resolver_id: String,
+    pub description: String,
+    pub source_side: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct JsQcSpec {
-    bifurcations: Arc<Vec<JsBifurcation>>,
+    pub bifurcations: Vec<JsBifurcation>,
     pub root_entity_type: String,
 }
 
@@ -81,12 +104,10 @@ pub struct JsQcSpec {
 pub struct AttributeStatic {
     name: String,
     pub spec_baselines: HashMap<String, f64>,
-    #[serde(default = "HashMap::new")]
-    meta: HashMap<String, String>,
 }
 
 impl Quercus {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             weight: 0,
             source_count: 0,
@@ -133,7 +154,7 @@ impl Quercus {
         return self.children.len();
     }
 
-    fn absorb(&mut self, other: Quercus) {
+    pub fn absorb(&mut self, other: Quercus) {
         self.weight += other.weight;
 
         for (sid, sc) in &other.sources {
@@ -142,6 +163,17 @@ impl Quercus {
         for (k, v) in other.children {
             let child = self.children.entry(k).or_insert_with(Quercus::new);
             child.absorb(v);
+        }
+    }
+
+    pub fn chop(&mut self, depth: usize) {
+        if depth <= 0 {
+            self.children = HashMap::new();
+            self.sources = HashMap::new();
+        } else {
+            for qc in self.children.values_mut() {
+                qc.chop(depth - 1)
+            }
         }
     }
 }
@@ -248,22 +280,6 @@ impl SpecPrepType {
         let entry = parent.entry(bif.description.clone()).or_insert((0.0, 0));
         update_tentry(entry, &(value, 1));
     }
-
-    fn absorb(&mut self, other: &Self) {
-        for (entity_type, v) in &other.0 {
-            let item_map = self
-                .0
-                .entry(entity_type.to_string())
-                .or_insert_with(HashMap::new);
-            for (k2, v2) in v {
-                let res_map = item_map.entry(*k2).or_insert_with(HashMap::new);
-                for (k3, v3) in v2 {
-                    let entry = res_map.entry(k3.to_string()).or_insert((0.0, 0));
-                    update_tentry(entry, v3);
-                }
-            }
-        }
-    }
 }
 
 fn update_tentry(entry: &mut (f64, usize), other: &(f64, usize)) {
@@ -306,15 +322,27 @@ impl FilterSet {
 }
 
 struct QcInput {
-    qc_key: String,
-    bd_hiers: Arc<Vec<BreakdownHierarchy>>,
-    bifurcations: Arc<Vec<JsBifurcation>>,
+    bd_hiers: Arc<BdHierarcyList>,
     iid: usize,
 }
 
 enum QueIn {
     Go(QcInput),
     Poison,
+}
+
+macro_rules! clone_thread_push {
+    ($thread_vec: ident, $para_fun: ident, $($arg: ident,)*) => {
+        {
+        $(let $arg = Arc::clone(&$arg);)*
+
+        $thread_vec.push(thread::spawn(move || {
+            $para_fun(
+                $($arg,)*
+        )
+        }))
+        }
+    };
 }
 
 pub fn dump_all_cache(stowage_owned: Stowage) -> io::Result<()> {
@@ -327,7 +355,6 @@ pub fn dump_all_cache(stowage_owned: Stowage) -> io::Result<()> {
 
     println!("getting var atts");
     let full_clist: Arc<[Box<[WorkId]>]> = read_var_att(stowage, vnames::TO_CITING).into();
-    let semantic_ids: Box<[String]> = read_var_att(stowage, vnames::INST_SEM_IDS).into();
     let works_of_inst: Arc<[Box<[WeightedEdge<WorkId>]>]> = read_var_att(stowage, vnames::I2W)
         .into_iter()
         .map(|e: Vec<WeightedEdge<WorkId>>| e.into_boxed_slice())
@@ -344,83 +371,55 @@ pub fn dump_all_cache(stowage_owned: Stowage) -> io::Result<()> {
     let source_ids = source_ids_mut.into();
 
     //preps for specs and metas
-    let inst_cite_counts = vec![0; works_of_inst.len()];
     let spec_bases_vecs = SpecPrepType(HashMap::new());
 
     let filter_set = FilterSet::new(stowage);
     let mut spawned_threads = Vec::new();
     let mut js_qc_specs = HashMap::new();
-    let entity_type = INSTS;
-    let id_map = get_idmap(stowage, entity_type);
 
-    let arc_arm = Arc::new(ares_map);
-    let arc_fset = Arc::new(filter_set);
+    let arm_arc = Arc::new(ares_map);
+    let fset_arc = Arc::new(filter_set);
 
     let n_threads: usize = std::thread::available_parallelism().unwrap().into();
     let qc_in_q = Mutex::new(VecDeque::with_capacity(n_threads * 5));
     let in_arc = Arc::new(qc_in_q);
 
-    let inst_counts_arc = Arc::new(Mutex::new(inst_cite_counts));
     let specs_arc = Arc::new(Mutex::new(spec_bases_vecs));
 
     for _ in 0..(n_threads / 2) {
-        let count_clone = Arc::clone(&inst_counts_arc);
-        let specs_clone = Arc::clone(&specs_arc);
-
-        let arm_clone = Arc::clone(&arc_arm);
-        let fset_clone = Arc::clone(&arc_fset);
-        let clist_clone = Arc::clone(&full_clist);
-        let winst_clone = Arc::clone(&works_of_inst);
-        let source_ids_clone = Arc::clone(&source_ids);
-        let q = Arc::clone(&in_arc);
-
-        let stowage_cloned = Arc::clone(&stowage_arc);
-
-        spawned_threads.push(thread::spawn(move || {
-            make_qcs(
-                stowage_cloned,
-                q,
-                count_clone,
-                specs_clone,
-                arm_clone,
-                fset_clone,
-                winst_clone,
-                clist_clone,
-                source_ids_clone,
-            )
-        }))
+        clone_thread_push!(
+            spawned_threads,
+            make_qcs,
+            stowage_arc,
+            in_arc,
+            specs_arc,
+            arm_arc,
+            fset_arc,
+            works_of_inst,
+            full_clist,
+            source_ids,
+        );
     }
     let mut v = Vec::new();
 
-    for (i, bd_hiers) in get_qc_spec_bases().into_iter().enumerate() {
-        let mut bifurcations = Vec::new();
-        for bdh in &bd_hiers {
-            let resolver_id = &bdh.resolver_id;
+    let entity_type = INSTS;
+    let id_map = get_idmap(stowage, entity_type);
 
-            for i in &bdh.levels {
-                bifurcations.push(JsBifurcation {
-                    attribute_kind: bdh.entity_types[*i].clone(),
-                    description: get_bd_description(&bdh, i),
-                    resolver_id: resolver_id.clone(),
-                })
-            }
-        }
-        let qc_key = format!("qc-{}", i + 1);
-        let bif_arc = Arc::new(bifurcations);
-        let hiers_arc = Arc::new(bd_hiers);
-        for iid in id_map.iter_ids(false).tqdm().desc(Some(&qc_key)) {
+    for bdhl in get_hier_lists() {
+        js_qc_specs.insert(
+            bdhl.qc_id.clone(),
+            JsQcSpec {
+                bifurcations: bdhl.to_jsbifs(),
+                root_entity_type: entity_type.to_string(),
+            },
+        );
+        let hiers_arc = Arc::new(bdhl);
+        for iid in id_map.iter_ids(false) {
             v.push(QueIn::Go(QcInput {
                 iid: iid.clone() as usize,
-                bifurcations: Arc::clone(&bif_arc),
                 bd_hiers: Arc::clone(&hiers_arc),
-                qc_key: qc_key.clone(),
             }));
         }
-        let js_spec = JsQcSpec {
-            bifurcations: bif_arc,
-            root_entity_type: entity_type.to_string(),
-        };
-        js_qc_specs.insert(qc_key.clone(), js_spec);
     }
     let mut rng = rand::thread_rng();
     v.shuffle(&mut rng);
@@ -435,32 +434,13 @@ pub fn dump_all_cache(stowage_owned: Stowage) -> io::Result<()> {
         done_thread.join().unwrap();
     }
 
-    let inst_counts_done = inst_counts_arc.lock().unwrap();
-
     for entity in [INSTS, COUNTRIES, SOURCES, QS, FIELDS, SUB_FIELDS] {
         let mut entity_statics = HashMap::new();
         let names: Vec<String> = read_var_att(stowage, &get_name_name(entity));
         for eid in get_idmap(stowage, entity).iter_ids(true) {
-            let mut meta = HashMap::new();
-            if entity == INSTS {
-                meta.insert(
-                    "papers".to_string(),
-                    works_of_inst[eid as usize].len().to_string(),
-                );
-                meta.insert(
-                    "citations".to_string(),
-                    inst_counts_done[eid as usize].to_string(),
-                );
-                meta.insert(
-                    "semantic_id".to_string(),
-                    semantic_ids[eid as usize].clone(),
-                );
-            }
-
             let e_map = AttributeStatic {
                 name: names[eid as usize].clone(),
                 spec_baselines: HashMap::new(),
-                meta,
             };
             entity_statics.insert(eid as SmolId, e_map);
         }
@@ -485,7 +465,6 @@ pub fn dump_all_cache(stowage_owned: Stowage) -> io::Result<()> {
 fn make_qcs(
     stowage: Arc<Stowage>,
     in_queue: Arc<Mutex<VecDeque<QueIn>>>,
-    full_counts: Arc<Mutex<Vec<u32>>>,
     spec_bases_vecs: Arc<Mutex<SpecPrepType>>,
     ares_map: Arc<AttributeResolverMap>,
     filter_set: Arc<FilterSet>,
@@ -493,13 +472,18 @@ fn make_qcs(
     l2_var_atts: Arc<[Box<[WorkId]>]>,
     source_ids: Arc<[BigId]>,
 ) {
+    let mut pbar = pbar(None);
+
     loop {
         let queue_in = match in_queue.lock().unwrap().pop_back() {
             Some(q) => q,
             None => continue,
         };
         if let QueIn::Go(qc_in) = queue_in {
-            let mut qcr = QuercusRoller::new(&qc_in.bd_hiers, &ares_map);
+            pbar.update(1).unwrap();
+            let qc_key = &qc_in.bd_hiers.qc_id;
+            let bifurcations = qc_in.bd_hiers.to_jsbifs();
+            let mut qcr = QuercusRoller::new(&qc_in.bd_hiers.hiers, &ares_map);
             let mut qcs: Vec<Quercus> = filter_set
                 .filter_keys
                 .iter()
@@ -522,15 +506,12 @@ fn make_qcs(
             for to_abs in qcs.into_iter().rev().into_iter() {
                 i = i - 1;
                 qc.absorb(to_abs);
-                qc.finalize(qc_in.bifurcations.len(), &source_ids);
+                qc.finalize(bifurcations.len(), &source_ids);
                 let filter_key = &filter_set.filter_keys[i];
                 stowage
                     .write_cache(
                         &qc,
-                        &format!(
-                            "{}/{}/{}/{}",
-                            BUILD_LOC, filter_key, qc_in.qc_key, qc_in.iid
-                        ),
+                        &format!("{}/{}/{}/{}", BUILD_LOC, filter_key, qc_key, qc_in.iid),
                     )
                     .unwrap();
                 //calc spec bases for first 2 levels only
@@ -540,12 +521,12 @@ fn make_qcs(
                     spec_bases_vecs
                         .lock()
                         .unwrap()
-                        .add(&qc_in.bifurcations[0], &child_id, rate);
-                    if qc_in.bifurcations[0].resolver_id == qc_in.bifurcations[1].resolver_id {
+                        .add(&bifurcations[0], &child_id, rate);
+                    if bifurcations[0].resolver_id == bifurcations[1].resolver_id {
                         for (sub_child_id, sub_child_qc) in &child_qc.children {
                             let rate = f64::from(sub_child_qc.weight) / root_denom;
                             spec_bases_vecs.lock().unwrap().add(
-                                &qc_in.bifurcations[1],
+                                &bifurcations[1],
                                 &sub_child_id,
                                 rate,
                             );
@@ -553,7 +534,6 @@ fn make_qcs(
                     }
                 }
             }
-            full_counts.lock().unwrap()[qc_in.iid as usize] = qc.weight;
         } else {
             break;
         };
@@ -564,7 +544,18 @@ pub fn get_bd_description(bdh: &BreakdownHierarchy, i: &usize) -> String {
     format!("{}-{}-{}", bdh.side, bdh.resolver_id, i)
 }
 
-pub fn get_qc_spec_bases() -> Vec<Vec<BreakdownHierarchy>> {
+pub fn get_hier_lists() -> Vec<BdHierarcyList> {
+    get_qc_spec_bases()
+        .into_iter()
+        .enumerate()
+        .map(|(i, hiers)| BdHierarcyList {
+            hiers,
+            qc_id: format!("qc-{}", i + 1),
+        })
+        .collect()
+}
+
+fn get_qc_spec_bases() -> Vec<Vec<BreakdownHierarchy>> {
     vec![
         vec![
             BreakdownHierarchy::new(vnames::COUNTRY_H, vec![0], 0),
