@@ -2,7 +2,6 @@ use std::{
     collections::VecDeque,
     io,
     sync::{Arc, Mutex},
-    thread,
 };
 
 use tqdm::pbar;
@@ -36,30 +35,27 @@ pub fn para_run<W, T, S, I>(in_v: I, setup: Arc<S>) -> io::Result<()>
 where
     W: Worker<S, T>,
     I: Iterator<Item = T>,
-    T: Send + 'static,
-    S: Send + Sync + 'static,
+    T: Send,
+    S: Send + Sync,
 {
     let n_threads: usize = std::thread::available_parallelism().unwrap().into();
 
     let in_q = Arc::new(Mutex::new(VecDeque::new()));
 
-    let mut spawned_threads = Vec::new();
-    for _ in 0..(n_threads) {
-        let in_clone = Arc::clone(&in_q);
-        let s_clone = setup.clone();
-        spawned_threads.push(thread::spawn(move || subf::<W, _, _>(in_clone, s_clone)));
-    }
+    std::thread::scope(|s| {
+        for _ in 0..(n_threads) {
+            let in_clone = Arc::clone(&in_q);
+            let s_clone = setup.clone();
+            s.spawn(move || subf::<W, _, _>(in_clone, s_clone));
+        }
 
-    for e in in_v {
-        in_q.lock().unwrap().push_front(QueIn::Go(e))
-    }
-    for _ in &spawned_threads {
-        in_q.lock().unwrap().push_front(QueIn::Poison);
-    }
-
-    for done_thread in spawned_threads {
-        done_thread.join().unwrap();
-    }
+        for e in in_v {
+            in_q.lock().unwrap().push_front(QueIn::Go(e))
+        }
+        for _ in 0..(n_threads) {
+            in_q.lock().unwrap().push_front(QueIn::Poison);
+        }
+    });
 
     Ok(())
 }
