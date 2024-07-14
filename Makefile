@@ -13,19 +13,25 @@ download-snapshot:
 to-csv: 
 	cargo run --release -- $@ $(OA_ROOT) $(OA_SNAPSHOT)
 
-filter to-keys fix-atts var-atts build-qcs prune-qcs:
+filter fix-atts var-atts build-qcs prune-qcs agg-qcs packet-qcs:
 	cargo run --release -- $@ $(OA_ROOT) 
 
-inst_str_id serve to_build_urls paper_qs astats_to_pruned:
-	python3 pyscripts/$@.py
-
-pre_var_att_py: paper_qs inst_str_id
-	echo "pyruns"
+serve extend_csvs post_agg:
+	python3 -m pyscripts.$@
 
 deploy-data-to-s3:
 	aws s3 rm $(S3_LOC) --recursive
 	aws s3 sync $(OA_ROOT)/pruned-cache $(S3_LOC)  --acl public-read --content-encoding gzip
 	echo $(S3_LOC)
+
+profile:
+	# echo "-1"  > perf_event_paranoid
+	sudo nvim perf_event_paranoid /proc/sys/kernel/
+	flamegraph -o make_fg.svg -- target/release/dmove fix-atts $(OA_ROOT)
+	sudo nvim perf_event_paranoid /proc/sys/kernel/
+	# echo "4"  > perf_event_paranoid
+	# sudo mv perf_event_paranoid /proc/sys/kernel/
+	# install linux-tools-generic
 
 clean-keys:
 	rm -rf $(OA_ROOT)/key-stores
