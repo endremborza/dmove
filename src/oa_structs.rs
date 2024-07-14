@@ -1,25 +1,20 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::common::IdStruct;
+use crate::common::{oa_id_parse, BigId, IdStruct, ParsedId};
 
 macro_rules! add_id_traits {
-    () => {};
-    ($struct:ident $(, $rest:ident)*) => {
-        impl IdTrait for $struct {
+    ($($struct:ident),*) => {
+        $(impl IdTrait for $struct {
             fn get_id(&self) -> String {
                 self.id.clone()
             }
-        }
-        add_id_traits!($($rest),*);
+        })*
     };
 }
 
 #[derive(Deserialize, Debug)]
-pub struct IdCountDecorated<T>
-where
-    T: IdTrait,
-{
+pub struct IdCountDecorated<T: IdTrait> {
     #[serde(flatten)]
     pub child: T,
     pub ids: Option<IdSet>,
@@ -42,16 +37,17 @@ add_id_traits!(
     SubField
 );
 
-impl<T> IdTrait for IdCountDecorated<T>
-where
-    T: IdTrait,
-{
+impl<T: IdTrait> IdTrait for IdCountDecorated<T> {
     fn get_id(&self) -> String {
         self.child.get_id()
     }
 }
 
-// STRUCTS
+impl<T: IdTrait> ParsedId for T {
+    fn get_parsed_id(&self) -> BigId {
+        oa_id_parse(&self.get_id().clone())
+    }
+}
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct IdSet {
@@ -241,9 +237,13 @@ pub struct Work {
     cited_by_count: Option<u64>,
     is_retracted: Option<bool>,
     is_paratext: Option<bool>,
-    #[serde(deserialize_with = "deserialize_list_of_strings", skip_serializing)]
-    pub related_works: Option<Vec<RelatedWork>>,
-    #[serde(deserialize_with = "deserialize_list_of_strings", skip_serializing)]
+    // #[serde(deserialize_with = "deserialize_list_of_strings", skip_serializing)]
+    // pub related_works: Option<Vec<RelatedWork>>,
+    #[serde(
+        deserialize_with = "deserialize_list_of_strings",
+        skip_serializing,
+        default = "default_empty"
+    )]
     pub referenced_works: Option<Vec<ReferencedWork>>,
 }
 
@@ -264,7 +264,7 @@ pub struct Location {
 pub struct Authorship {
     pub parent_id: Option<String>,
     #[serde(deserialize_with = "deserialize_hash_field", rename = "author")]
-    author_id: Option<String>,
+    pub author_id: Option<String>,
     #[serde(deserialize_with = "deserialize_hash_fields")]
     pub institutions: Option<String>,
     author_position: Option<String>,
@@ -343,6 +343,11 @@ impl From<String> for RelatedWork {
         }
     }
 }
+
+fn default_empty<T>() -> Option<Vec<T>> {
+    Some(Vec::new())
+}
+
 fn deserialize_list_of_strings<'de, T, D>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -397,4 +402,34 @@ where
         return Ok(Some(json_string));
     }
     return Ok(None);
+}
+
+pub mod post {
+    use super::{Deserialize, IdTrait};
+
+    #[derive(Deserialize, Debug)]
+    pub struct Authorship {
+        pub parent_id: Option<String>,
+        #[serde(rename = "author")]
+        pub author_id: Option<String>,
+        pub institutions: Option<String>,
+    }
+
+    #[derive(Deserialize, Debug)]
+    pub struct Location {
+        pub parent_id: Option<String>,
+        #[serde(rename = "source")]
+        pub source_id: Option<String>,
+    }
+
+    #[derive(Deserialize, Debug)]
+    pub struct Author {
+        id: String,
+        // orcid: Option<String>,
+        // display_name: Option<String>,
+        pub works_count: Option<u32>,
+        pub cited_by_count: Option<u32>,
+    }
+
+    add_id_traits!(Author);
 }

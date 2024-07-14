@@ -1,181 +1,31 @@
 use std::{
-    collections::{HashMap, HashSet},
-    fs::{create_dir_all, read_dir, File},
+    fs::{read_dir, File},
     io::{self, Read, Write},
     path::PathBuf,
 };
 
+use hashbrown::{HashMap, HashSet};
 use serde::{de::DeserializeOwned, Deserialize};
-use tqdm::*;
 
 use crate::{
     add_strict_parsed_id_traits,
-    common::{oa_id_parse, BigId, ParsedId, Stowage, AUTHORS, INSTS, SOURCES, WORKS},
+    common::{oa_id_parse, BigId, ParsedId, Stowage},
+    oa_csv_writers::{authors, institutions, sources, works},
+    oa_entity_mapping::make_ids,
+    oa_structs::{
+        post::{Author, Authorship, Location},
+        ReferencedWork,
+    },
 };
 
-pub const START_YEAR: u16 = 2004;
+pub const START_YEAR: u16 = 1950;
 
-trait FilterBase {
-    fn csv_path() -> String;
-    fn get_min() -> usize {
-        0
-    }
-    fn get_max() -> usize {
-        usize::max_value()
-    }
-    fn has_max() -> bool {
-        false
-    }
-    fn get_edge_end_types() -> [&'static str; 2];
-    fn filter_targets() -> bool {
-        true
-    }
-    fn iter_edges(&self) -> Vec<[String; 2]>;
-}
-
-#[derive(Deserialize, Debug)]
-pub struct InstAuthorship {
-    pub parent_id: String,
-    pub author: String,
-    pub institutions: Option<String>,
-}
-
-impl InstAuthorship {
-    pub fn iter_insts(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        if let Some(insts) = &self.institutions {
-            for inst_oa_id in insts.split(";") {
-                out.push(inst_oa_id.to_string());
-            }
-        }
-        out
-    }
-}
-
-impl FilterBase for InstAuthorship {
-    fn csv_path() -> String {
-        format!("{}/authorships", WORKS)
-    }
-
-    fn get_min() -> usize {
-        1500
-    }
-
-    fn get_edge_end_types() -> [&'static str; 2] {
-        [INSTS, WORKS]
-    }
-
-    fn iter_edges(&self) -> Vec<[String; 2]> {
-        let mut out = Vec::new();
-        for inst_oa_id in self.iter_insts() {
-            out.push([inst_oa_id, self.parent_id.to_string()]);
-        }
-        out
-    }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct Citation {
-    pub parent_id: String,
-    pub referenced_work_id: String,
-}
-
-impl FilterBase for Citation {
-    fn csv_path() -> String {
-        format!("{}/referenced_works", WORKS)
-    }
-
-    fn get_min() -> usize {
-        2
-    }
-
-    fn get_edge_end_types() -> [&'static str; 2] {
-        [WORKS, WORKS]
-    }
-
-    fn iter_edges(&self) -> Vec<[String; 2]> {
-        vec![[
-            self.referenced_work_id.to_string(),
-            self.parent_id.to_string(),
-        ]]
-    }
-
-    fn filter_targets() -> bool {
-        false
-    }
-}
-
-#[derive(Deserialize, Debug)]
-struct Location {
-    parent_id: String,
-    source: Option<String>,
-}
-
-impl FilterBase for Location {
-    fn csv_path() -> String {
-        format!("{}/locations", WORKS)
-    }
-
-    fn get_min() -> usize {
-        200
-    }
-
-    fn get_edge_end_types() -> [&'static str; 2] {
-        [SOURCES, WORKS]
-    }
-
-    fn iter_edges(&self) -> Vec<[String; 2]> {
-        match &self.source {
-            Some(source_id) => vec![[source_id.to_string(), self.parent_id.to_string()]],
-            None => Vec::new(),
-        }
-    }
-}
+const FIX_AUTHORS: [BigId; 3] = [5064297795, 5005839111, 5078032253];
 
 #[derive(Deserialize, Debug)]
 pub struct PersonAuthorship {
     pub parent_id: String,
     pub author: String,
-}
-
-impl FilterBase for PersonAuthorship {
-    fn csv_path() -> String {
-        format!("{}/authorships", WORKS)
-    }
-
-    fn get_max() -> usize {
-        20
-    }
-
-    fn has_max() -> bool {
-        true
-    }
-
-    fn get_edge_end_types() -> [&'static str; 2] {
-        [WORKS, AUTHORS]
-    }
-
-    fn filter_targets() -> bool {
-        false
-    }
-
-    fn iter_edges(&self) -> Vec<[String; 2]> {
-        let mut out = Vec::new();
-        let aid = self.author.to_string();
-        if aid.len() > 0 {
-            out.push([self.parent_id.to_string(), self.author.to_string()])
-        }
-        out
-    }
-}
-
-pub fn filter_setup(stowage: &Stowage) -> io::Result<()> {
-    single_filter(stowage)?;
-    filter_step::<Citation>(stowage, 11)?;
-    filter_step::<Location>(stowage, 12)?;
-    filter_step::<InstAuthorship>(stowage, 13)?;
-    filter_step::<PersonAuthorship>(stowage, 14)?;
-    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -187,131 +37,126 @@ pub struct SWork {
     pub publication_year: Option<u16>,
 }
 
+trait FilterBase {
+    fn entity_c() -> &'static str {
+        works::C
+    }
+
+    fn entity_att() -> &'static str;
+
+    fn get_min() -> usize {
+        0
+    }
+    fn get_max() -> usize {
+        usize::max_value()
+    }
+    fn has_max() -> bool {
+        false
+    }
+    fn filter_targets() -> bool {
+        true
+    }
+    fn iter_edges(&self) -> Vec<[String; 2]>;
+}
+
 add_strict_parsed_id_traits!(SWork);
 
-fn single_filter(stowage: &Stowage) -> io::Result<()> {
-    let step_id = "1";
-    let out_root = stowage.filter_steps.join(step_id);
-    create_dir_all(&out_root)?;
-    filter_write::<SWork, _>(stowage, WORKS, &out_root, |o| {
-        !o.is_retracted
-            & (o.work_type == "article")
-            & (o.publication_year.unwrap_or(0) > START_YEAR)
-    })?;
-    Ok(())
+impl Authorship {
+    pub fn iter_insts(&self) -> Vec<String> {
+        if let Some(instids) = &self.institutions {
+            return instids.split(";").map(|e| e.to_owned()).collect();
+        }
+        return Vec::new();
+    }
 }
 
-fn filter_write<T, F>(
-    stowage: &Stowage,
-    entity_type: &str,
-    out_root: &PathBuf,
-    closure: F,
-) -> io::Result<()>
-where
-    T: for<'de> Deserialize<'de> + ParsedId,
-    F: Fn(&T) -> bool,
-{
-    let mut file = File::create(&out_root.join(entity_type))?;
-
-    for o in stowage.read_csv_objs::<T>(entity_type, "main") {
-        if closure(&o) {
-            file.write_all(&o.get_parsed_id().to_be_bytes())?;
-        }
+impl FilterBase for Authorship {
+    fn entity_att() -> &'static str {
+        works::atts::authorships
     }
-    Ok(())
+
+    fn get_min() -> usize {
+        700
+    }
+
+    fn iter_edges(&self) -> Vec<[String; 2]> {
+        self.iter_insts()
+            .into_iter()
+            .map(|e| [e, self.parent_id.clone().unwrap()])
+            .collect()
+    }
 }
 
-fn filter_step<T>(stowage: &Stowage, step_id: u8) -> io::Result<()>
-where
-    T: FilterBase + DeserializeOwned + core::fmt::Debug,
-{
-    let types = T::get_edge_end_types();
-    let [source_type, target_type] = types;
-    let [source_set_o, target_set_o] = types.map(|t| get_last_filter(stowage, t));
-
-    println!(
-        "filtering {:?} - {:?} --> {:?}. pre-filtered to {:?}, pre-filtered to {:?}",
-        step_id,
-        source_type,
-        target_type,
-        match source_set_o {
-            Some(ref l) => l.len(),
-            None => 0,
-        },
-        match target_set_o {
-            Some(ref l) => l.len(),
-            None => 0,
-        }
-    );
-
-    let mut hmap: HashMap<u64, HashSet<u64>> = HashMap::new();
-    let mut rdr = stowage.get_reader(T::csv_path());
-
-    for obj in rdr.deserialize::<T>().tqdm() {
-        let rec = obj?;
-        for ends in rec.iter_edges().iter() {
-            let source_key = oa_id_parse(&ends[0]);
-            let target_key = oa_id_parse(&ends[1]);
-            if let Some(source_set) = &source_set_o {
-                if !source_set.contains(&source_key) {
-                    continue;
-                }
-            }
-            if let Some(target_set) = &target_set_o {
-                if !target_set.contains(&target_key) {
-                    continue;
-                }
-            }
-            if !hmap.contains_key(&source_key) {
-                let hset = HashSet::new();
-                hmap.insert(source_key, hset);
-            }
-            if let Some(hset) = hmap.get_mut(&source_key) {
-                if T::filter_targets() | (hset.len() < T::get_min()) | T::has_max() {
-                    hset.insert(target_key);
-                }
-            }
-        }
+impl FilterBase for ReferencedWork {
+    fn entity_att() -> &'static str {
+        works::atts::referenced_works
     }
-    let out_root = stowage.filter_steps.join(step_id.to_string());
-    create_dir_all(&out_root)?;
-    let mut taken_sources = Vec::new();
-    let mut taken_targets: HashSet<u64> = HashSet::new();
-    for (k, v) in hmap.iter() {
-        if (v.len() >= T::get_min()) && (v.len() <= T::get_max()) {
-            taken_sources.push(*k);
-            if T::filter_targets() {
-                taken_targets.extend(v);
-            }
-        }
-    }
-    if T::filter_targets() {
-        write_ids(&out_root.join(target_type), &mut taken_targets.iter())?;
-    }
-    write_ids(&out_root.join(source_type), &mut taken_sources.iter())?;
 
-    println!(
-        "{}  -  min: {:?}, max: {:?}, {:?}: {:?}, {:?}: {:?}\n\n",
-        step_id,
-        T::get_min(),
-        T::get_max(),
-        source_type,
-        taken_sources.len(),
-        target_type,
-        taken_targets.len()
-    );
-    Ok(())
+    fn get_min() -> usize {
+        2
+    }
+
+    fn iter_edges(&self) -> Vec<[String; 2]> {
+        let pid = self.parent_id.clone().unwrap();
+        vec![[self.referenced_work_id.to_string(), pid]]
+    }
+
+    fn filter_targets() -> bool {
+        false
+    }
 }
 
-fn write_ids<'a, T>(fname: &PathBuf, id_iter: T) -> io::Result<()>
-where
-    T: Iterator<Item = &'a u64>,
-{
-    let mut file = File::create(fname)?;
-    for e in id_iter {
-        file.write_all(&e.to_be_bytes())?;
+impl FilterBase for Location {
+    fn entity_att() -> &'static str {
+        works::atts::locations
     }
-    Ok(())
+
+    fn get_min() -> usize {
+        200
+    }
+
+    fn iter_edges(&self) -> Vec<[String; 2]> {
+        match &self.source_id {
+            Some(source_id) => vec![[source_id.to_string(), self.parent_id.clone().unwrap()]],
+            None => Vec::new(),
+        }
+    }
+}
+
+impl FilterBase for PersonAuthorship {
+    fn entity_att() -> &'static str {
+        works::atts::authorships
+    }
+
+    fn get_max() -> usize {
+        20
+    }
+
+    fn has_max() -> bool {
+        true
+    }
+
+    fn filter_targets() -> bool {
+        false
+    }
+
+    fn iter_edges(&self) -> Vec<[String; 2]> {
+        if self.author.len() > 0 {
+            vec![[self.parent_id.to_string(), self.author.to_string()]]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+pub fn filter_setup(stowage: &Stowage) -> io::Result<()> {
+    single_filter(stowage, 10)?;
+    filter_step::<ReferencedWork>(stowage, [works::C, works::C], 11)?;
+    filter_step::<Location>(stowage, [sources::C, works::C], 12)?;
+    filter_step::<Authorship>(stowage, [institutions::C, works::C], 13)?;
+    filter_step::<PersonAuthorship>(stowage, [works::C, authors::C], 14)?;
+    author_filter(stowage, 20)?;
+    make_ids(stowage)
 }
 
 pub fn get_last_filter(stowage: &Stowage, entity_type: &str) -> Option<HashSet<u64>> {
@@ -339,6 +184,127 @@ pub fn get_last_filter(stowage: &Stowage, entity_type: &str) -> Option<HashSet<u
         Some(pb) => Some(read_filter_set(pb)),
         None => None,
     }
+}
+
+fn single_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
+    let out_root = stowage.get_filter_dir(step_id);
+    filter_write::<SWork, _>(stowage, works::C, &out_root, |o| {
+        !o.is_retracted
+            & (o.work_type == "article")
+            & (o.publication_year.unwrap_or(0) > START_YEAR)
+    })?;
+    Ok(())
+}
+
+fn author_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
+    let out_root = stowage.get_filter_dir(step_id);
+    filter_write::<Author, _>(stowage, authors::C, &out_root, |o| {
+        FIX_AUTHORS.contains(&o.get_parsed_id())
+            | ((o.cited_by_count.unwrap_or(0) >= 50000) & (o.works_count.unwrap_or(0) >= 200))
+    })?;
+    Ok(())
+}
+
+fn filter_write<T, F>(
+    stowage: &Stowage,
+    entity_type: &str,
+    out_root: &PathBuf,
+    closure: F,
+) -> io::Result<()>
+where
+    T: for<'de> Deserialize<'de> + ParsedId,
+    F: Fn(&T) -> bool,
+{
+    let mut file = File::create(&out_root.join(entity_type))?;
+
+    for o in stowage.read_csv_objs::<T>(entity_type, "main") {
+        if closure(&o) {
+            file.write_all(&o.get_parsed_id().to_be_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+fn olen<T>(o: &Option<HashSet<T>>) -> String {
+    match o {
+        Some(ref l) => l.len().to_string(),
+        None => "nothing".to_string(),
+    }
+}
+
+fn filter_step<T>(stowage: &Stowage, types: [&'static str; 2], step_id: u8) -> io::Result<()>
+where
+    T: FilterBase + DeserializeOwned + core::fmt::Debug,
+{
+    let [source_type, target_type] = types;
+    let [source_set_o, target_set_o] = types.map(|t| get_last_filter(stowage, t));
+
+    println!(
+        "filtering {:?} - {:?} --> {:?}. pre-filtered to {} pre-filtered to {}",
+        step_id,
+        source_type,
+        target_type,
+        olen(&source_set_o),
+        olen(&target_set_o),
+    );
+
+    let mut source_map: HashMap<u64, HashSet<u64>> = HashMap::new();
+
+    for rec in stowage.read_csv_objs::<T>(T::entity_c(), T::entity_att()) {
+        'endloop: for ends in rec.iter_edges().into_iter() {
+            let [source_key, target_key] = ends.map(|e| oa_id_parse(&e));
+            for (seto, key) in [(&source_set_o, &source_key), (&target_set_o, &target_key)] {
+                if let Some(set) = seto {
+                    if !set.contains(key) {
+                        continue 'endloop;
+                    }
+                }
+            }
+            let set_entry = source_map.entry(source_key).or_insert_with(HashSet::new);
+            if T::filter_targets() | (set_entry.len() < T::get_min()) | T::has_max() {
+                set_entry.insert(target_key);
+            }
+        }
+    }
+    let mut taken_sources = Vec::new();
+    let mut taken_targets: HashSet<u64> = HashSet::new();
+    for (k, v) in source_map.iter() {
+        if (v.len() >= T::get_min()) && (v.len() <= T::get_max()) {
+            taken_sources.push(*k);
+            if T::filter_targets() {
+                taken_targets.extend(v);
+            }
+        }
+    }
+
+    let out_root = stowage.get_filter_dir(step_id);
+    if T::filter_targets() {
+        write_ids(&out_root.join(target_type), &mut taken_targets.iter())?;
+    }
+    write_ids(&out_root.join(source_type), &mut taken_sources.iter())?;
+
+    println!(
+        "{}  -  min: {:?}, max: {:?}, {:?}: {:?}, {:?}: {:?}\n\n",
+        step_id,
+        T::get_min(),
+        T::get_max(),
+        source_type,
+        taken_sources.len(),
+        target_type,
+        taken_targets.len()
+    );
+    Ok(())
+}
+
+fn write_ids<'a, T>(fname: &PathBuf, id_iter: T) -> io::Result<()>
+where
+    T: Iterator<Item = &'a u64>,
+{
+    let mut file = File::create(fname)?;
+    for e in id_iter {
+        file.write_all(&e.to_be_bytes())?;
+    }
+    Ok(())
 }
 
 fn read_filter_set(pb: PathBuf) -> HashSet<u64> {

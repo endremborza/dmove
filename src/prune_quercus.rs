@@ -9,9 +9,10 @@ use hashbrown::HashMap;
 use tqdm::Iter;
 
 use crate::{
-    common::{read_cache, read_js_path, write_gz, Stowage, A_STAT_PATH, BUILD_LOC, QC_CONF},
+    common::{read_buf_path, read_cache, write_gz, Stowage, A_STAT_PATH, BUILD_LOC, QC_CONF},
     oa_var_atts::SmolId,
     quercus::{AttributeStaticMap, FullJsSpec, JsQcSpec, Quercus},
+    quercus_packet::QP4,
 };
 
 const MAX_SIBLINGS: usize = 16;
@@ -55,7 +56,8 @@ fn write_prunes(
         .desc(Some(qc_kind_name))
     {
         let qcp = qc_file.unwrap().path();
-        let mut qc: Quercus = read_js_path(&qcp.to_str().unwrap()).unwrap();
+        let qc_pack: QP4 = read_buf_path(&qcp.to_str().unwrap()).unwrap();
+        let mut qc = qc_pack.to_qc();
         prune_qc(&mut qc, &astats, 0, qc_desc);
 
         let pruned_path = stowage

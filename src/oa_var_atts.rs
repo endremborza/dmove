@@ -2,7 +2,7 @@ use std::{
     fs::{create_dir_all, File},
     io::{self, Read, Seek, SeekFrom, Write},
     marker::PhantomData,
-    usize,
+    sync::{Arc, Mutex},
 };
 
 use hashbrown::HashMap;
@@ -11,20 +11,21 @@ use tqdm::Iter;
 
 use crate::{
     add_strict_parsed_id_traits,
-    common::{
-        field_id_parse, oa_id_parse, BigId, ParsedId, Stowage, COUNTRIES, FIELDS, INSTS, QS,
-        SOURCES, SUB_FIELDS, TOPICS, WORKS,
-    },
-    ingest_entity::get_idmap,
+    common::{field_id_parse, oa_id_parse, BigId, ParsedId, Stowage, COUNTRIES, QS},
+    ingest_entity::{get_idmap, LoadedIdMap},
+    oa_csv_writers::{authors, fields, institutions, sources, subfields, topics, works},
     oa_entity_mapping::short_string_to_u64,
-    oa_filters::{InstAuthorship, ASHIP},
     oa_fix_atts::{names, read_fix_att},
-    oa_structs::{Location, ReferencedWork, WorkTopic},
+    oa_structs::{
+        post::{Authorship, Location},
+        ReferencedWork, WorkTopic,
+    },
+    para::Worker,
 };
 
 pub mod vnames {
-
     pub const I2W: &str = "i2w";
+    pub const A2W: &str = "a2w";
     pub const CONCEPT_H: &str = "concept-hierarchy";
     pub const COUNTRY_H: &str = "country-hierarchy";
     pub const W2S: &str = "w2s";
@@ -32,6 +33,7 @@ pub mod vnames {
     pub const TO_CITING: &str = "to-citing";
 }
 
+pub type AttributeResolverMap = HashMap<String, MappContainer>;
 pub type MidId = u32;
 pub type SmolId = u16;
 // TODO figure this shit out to be dynamic properly
@@ -42,7 +44,6 @@ type SubFieldId = u8;
 pub type InstId = u16;
 type SourceId = u16;
 pub type WorkId = u32;
-pub type AttributeResolverMap = HashMap<String, MappContainer>;
 
 pub enum MappedAttributes {
     List(Box<[SmolId]>),
@@ -102,9 +103,38 @@ struct WorkQ {
 #[derive(Debug)]
 struct HEdgeSet<T1, T2>(Vec<HierEdge<T1, T2>>);
 
+struct StrFiller<T, F>
+where
+    F: Fn(T) -> String,
+{
+    id_map: LoadedIdMap,
+    names: Mutex<Box<[String]>>,
+    name_getter: F,
+    phantom: PhantomData<T>,
+}
+
 pub struct FilePointer {
     offset: u64,
     pub count: u32, // these might also be optimized to be smaller
+}
+
+impl<T, F> StrFiller<T, F>
+where
+    F: Fn(T) -> String,
+{
+    fn new(stowage: &Stowage, map_base: &str, name_getter: F) -> Self {
+        let id_map = get_idmap(stowage, map_base);
+        let mut names = Vec::new();
+        for _ in id_map.iter_ids(true) {
+            names.push("".to_string());
+        }
+        Self {
+            id_map: id_map.to_map(),
+            names: Mutex::new(names.into_boxed_slice()),
+            name_getter,
+            phantom: PhantomData,
+        }
+    }
 }
 
 impl ParsedId for Geo {
@@ -172,23 +202,19 @@ impl<T: ByteConvert> Iterator for VarReader<T> {
     }
 }
 
-macro_rules! id_impl {
-    ($($idt:ident,)*) => {
-        $(impl ByteConvert for $idt {
-            fn to_bytes(&self) -> Vec<u8> {
-                let mut out: Vec<u8> = vec![];
-                out.extend(self.to_be_bytes());
-                out
-            }
-            fn from_bytes(buf: &[u8]) -> (Self, usize) {
-                let cs = std::mem::size_of::<$idt>();
-                (Self::from_be_bytes(buf[..cs].try_into().unwrap()), cs)
-            }
-        })*
-    };
+impl<T, F> Worker<T> for StrFiller<T, F>
+where
+    Arc<Self>: Send,
+    T: ParsedId + Send + Sync,
+    F: Fn(T) -> String + Send,
+{
+    fn proc(&self, input: T) {
+        if let Some(id) = self.id_map.get(&input.get_parsed_id()) {
+            self.names.lock().unwrap()[*id as usize] = (self.name_getter)(input);
+        }
+    }
 }
 
-id_impl!(u8, u16, u32, u64,);
 add_strict_parsed_id_traits!(NamedEntity);
 
 impl ParsedId for NamedFieldEntity {
@@ -413,124 +439,167 @@ impl MappedAttributes {
     }
 }
 
+macro_rules! fillem {
+    ($id_map:ident, $($vname:ident => $cls:ident,)*) => {
+        $(let mut $vname = Vec::new();)*
+
+        for _ in (0..$id_map.len() + 1) {
+            $($vname.push($cls::new());)*
+        }
+
+        $(let mut $vname = $vname.into_boxed_slice();)*
+    };
+}
+
+macro_rules! id_impl {
+    ($($idt:ident,)*) => {
+        $(impl ByteConvert for $idt {
+            fn to_bytes(&self) -> Vec<u8> {
+                let mut out: Vec<u8> = vec![];
+                out.extend(self.to_be_bytes());
+                out
+            }
+            fn from_bytes(buf: &[u8]) -> (Self, usize) {
+                let cs = std::mem::size_of::<$idt>();
+                (Self::from_be_bytes(buf[..cs].try_into().unwrap()), cs)
+            }
+        })*
+    };
+}
+
+id_impl!(u8, u16, u32, u64,);
+
+fn var_write_meta<R, F, S>(
+    stowage: &Stowage,
+    mut out: Box<[S]>,
+    att: &'static str,
+    clojure: F,
+    out_name: &'static str,
+) -> io::Result<()>
+where
+    R: DeserializeOwned,
+    F: Fn(R, &mut Box<[S]>),
+    S: ByteConvert,
+{
+    for obj in stowage.read_csv_objs::<R>(works::C, att) {
+        clojure(obj, &mut out);
+    }
+    write_var_att(stowage, out_name, out.iter())
+}
+
+#[allow(unused_mut)]
 pub fn write_var_atts(stowage: &Stowage) -> io::Result<()> {
+    write_names(stowage)?;
+
     let inst_countries = read_fix_att(stowage, names::I2C);
 
-    //NAMES
-    let nclosure = |o: NamedFieldEntity| o.display_name;
-    for fid in vec![FIELDS, SUB_FIELDS] {
-        inner_str_write::<NamedFieldEntity, _>(stowage, fid, fid, fid, "main", nclosure)?;
-    }
-    inner_str_write::<Geo, _>(stowage, COUNTRIES, COUNTRIES, INSTS, "geo", |o| o.country)?;
-
-    let mut q_names: Vec<String> = (0..5).map(|i| format!("Q{}", i)).collect();
-    q_names.push("Uncategorized".to_owned());
-    write_var_att(stowage, &get_name_name(QS), q_names.iter())?;
-
-    for ename in vec![INSTS, SOURCES] {
-        write_names(stowage, ename)?
-    }
-
-    println!("getting maps");
-
-    let topic_id_map = get_idmap(stowage, TOPICS).to_map();
-    let inst_id_map = get_idmap(stowage, INSTS).to_map();
-    let work_id_map = get_idmap(stowage, WORKS).to_map();
-    let source_id_map = get_idmap(stowage, SOURCES).to_map();
-    println!("got maps");
+    let topic_id_map = get_idmap(stowage, topics::C).to_map();
+    let inst_id_map = get_idmap(stowage, institutions::C).to_map();
+    let work_id_map = get_idmap(stowage, works::C).to_map();
+    let source_id_map = get_idmap(stowage, sources::C).to_map();
+    let author_id_map = get_idmap(stowage, authors::C).to_map();
 
     let subfield_ancestors: Vec<FieldId> = read_fix_att(stowage, names::ANCESTOR);
     let topic_subfields: Vec<FieldId> = read_fix_att(stowage, names::TOPIC_SUBFIELDS);
 
-    let mut rel_preps: Vec<InstToWorkPrep> = Vec::new();
-    let mut country_hiers: Vec<HEdgeSet<CountryId, InstId>> = Vec::new();
-    let mut concept_hiers: Vec<HEdgeSet<FieldId, SubFieldId>> = Vec::new();
-    let mut q_hiers: Vec<HEdgeSet<QId, SourceId>> = Vec::new();
-    let mut to_source: Vec<Vec<SourceId>> = Vec::new();
-    let mut to_cited: Vec<Vec<WorkId>> = Vec::new();
-    let mut to_citing: Vec<Vec<WorkId>> = Vec::new();
+    fillem!(
+        work_id_map,
+        rel_preps => InstToWorkPrep,
+        country_hiers => HEdgeSet,
+        concept_hiers => HEdgeSet,
+        q_hiers => HEdgeSet,
+        // to_cited => Vec,
+        to_citing => Vec,
+        to_source => Vec,
+    );
+    fillem!(inst_id_map, i2w => Vec,);
+    fillem!(author_id_map, a2w => Vec,);
 
-    for _ in 0..(work_id_map.len() + 1) {
-        rel_preps.push(InstToWorkPrep::new());
-        to_cited.push(Vec::new());
-        to_citing.push(Vec::new());
-        to_source.push(Vec::new());
-        country_hiers.push(HEdgeSet::new());
-        concept_hiers.push(HEdgeSet::new());
-        q_hiers.push(HEdgeSet::new());
-    }
+    var_write_meta::<WorkTopic, _, _>(
+        stowage,
+        concept_hiers,
+        works::atts::topics,
+        |w_conc, c_hiers| {
+            if w_conc.score.unwrap() < 0.6 {
+                return;
+            };
+            if let (Some(work_id), Some(topic_id)) = (
+                work_id_map.get(&oa_id_parse(&w_conc.parent_id.unwrap())),
+                topic_id_map.get(&oa_id_parse(&w_conc.topic_id.unwrap())),
+            ) {
+                let ch_set: &mut HEdgeSet<FieldId, SubFieldId> = &mut c_hiers[*work_id as usize];
+                let subfield_id = topic_subfields[*topic_id as usize];
+                let field_id = subfield_ancestors[subfield_id as usize];
+                ch_set.add(field_id, Some(subfield_id));
+            }
+        },
+        vnames::CONCEPT_H,
+    )?;
 
-    let mut i2w: Vec<Vec<WeightedEdge<WorkId>>> = Vec::new();
-    for _ in 0..(inst_id_map.len() + 1) {
-        i2w.push(Vec::new());
-    }
-
-    for w_conc in stowage.read_csv_objs::<WorkTopic>(WORKS, "topics") {
-        if w_conc.score.unwrap() < 0.6 {
-            continue;
-        };
-        if let (Some(work_id), Some(topic_id)) = (
-            work_id_map.get(&oa_id_parse(&w_conc.parent_id.unwrap())),
-            topic_id_map.get(&oa_id_parse(&w_conc.topic_id.unwrap())),
-        ) {
-            let ch_set = &mut concept_hiers[*work_id as usize];
-            let subfield_id = topic_subfields[*topic_id as usize];
-            let field_id = subfield_ancestors[subfield_id as usize];
-            ch_set.add(field_id, Some(subfield_id));
-        }
-    }
-    write_var_att(stowage, vnames::CONCEPT_H, concept_hiers.iter())?;
-
-    for wq in stowage.read_csv_objs::<WorkQ>(WORKS, "qs") {
+    let wq_cloj = |wq: WorkQ, qhs: &mut Box<[HEdgeSet<QId, SourceId>]>| {
         if let (Some(work_id), Some(source_id)) =
             (work_id_map.get(&wq.id), source_id_map.get(&wq.source))
         {
-            let h_set = &mut q_hiers[*work_id as usize];
+            let h_set: &mut HEdgeSet<QId, SourceId> = &mut qhs[*work_id as usize];
             h_set.add(wq.best_q, Some(*source_id as SourceId));
         };
-    }
-    write_var_att(stowage, vnames::W2QS, q_hiers.iter())?;
+    };
 
-    for a_ship in stowage.read_csv_objs::<InstAuthorship>(WORKS, ASHIP) {
-        if let Some(work_id) = work_id_map.get(&oa_id_parse(&a_ship.parent_id)) {
+    var_write_meta(stowage, q_hiers, QS, wq_cloj, vnames::W2QS)?;
+
+    var_write_meta::<Location, _, _>(
+        stowage,
+        to_source,
+        works::atts::locations,
+        |sobj, tos| {
+            if let Some(source_id_str) = sobj.source_id {
+                if let (Some(pid), Some(source_id)) = (
+                    work_id_map.get(&oa_id_parse(&sobj.parent_id.unwrap())),
+                    source_id_map.get(&oa_id_parse(&source_id_str)),
+                ) {
+                    tos[*pid as usize].push(*source_id as SourceId);
+                }
+            }
+        },
+        vnames::W2S,
+    )?;
+
+    var_write_meta::<ReferencedWork, _, _>(
+        stowage,
+        to_citing,
+        works::atts::referenced_works,
+        |ref_obj, to_citing_box| {
+            if let (Some(pid), Some(refid)) = (
+                work_id_map.get(&oa_id_parse(&ref_obj.parent_id.unwrap())),
+                work_id_map.get(&oa_id_parse(&ref_obj.referenced_work_id)),
+            ) {
+                // to_cited[*pid as usize].push(*refid as WorkId);
+                to_citing_box[*refid as usize].push(*pid as WorkId);
+            }
+        },
+        vnames::TO_CITING,
+    )?;
+
+    for a_ship in stowage.read_csv_objs::<Authorship>(works::C, works::atts::authorships) {
+        if let Some(work_id) = work_id_map.get(&oa_id_parse(&a_ship.parent_id.clone().unwrap())) {
             let rel_prep = &mut rel_preps[*work_id as usize];
             rel_prep.total_authors += 1;
             add_to_prep(&a_ship.iter_insts(), &inst_id_map, rel_prep);
-
-            let ch_set = &mut country_hiers[*work_id as usize];
+            let ch_set: &mut HEdgeSet<CountryId, InstId> = &mut country_hiers[*work_id as usize];
             for iid_str in &a_ship.iter_insts() {
                 if let Some(iid) = inst_id_map.get(&oa_id_parse(&iid_str)) {
                     let country_id = inst_countries[*iid as usize];
                     ch_set.add(country_id, Some(*iid as InstId));
                 }
             }
+
+            if let Some(aid) = author_id_map.get(&oa_id_parse(&a_ship.author_id.clone().unwrap())) {
+                a2w[*aid as usize].push(*work_id as WorkId);
+            }
         };
     }
     write_var_att(stowage, vnames::COUNTRY_H, country_hiers.iter())?;
-
-    for sobj in stowage.read_csv_objs::<Location>(WORKS, "locations") {
-        if let Some(source_id_str) = sobj.source_id {
-            if let (Some(pid), Some(source_id)) = (
-                work_id_map.get(&oa_id_parse(&sobj.parent_id.unwrap())),
-                source_id_map.get(&oa_id_parse(&source_id_str)),
-            ) {
-                to_source[*pid as usize].push(*source_id as SourceId);
-            }
-        }
-    }
-    write_var_att(stowage, vnames::W2S, to_source.iter())?;
-
-    for ref_obj in stowage.read_csv_objs::<ReferencedWork>(WORKS, "referenced_works") {
-        if let (Some(pid), Some(refid)) = (
-            work_id_map.get(&oa_id_parse(&ref_obj.parent_id.unwrap())),
-            work_id_map.get(&oa_id_parse(&ref_obj.referenced_work_id)),
-        ) {
-            // to_cited[*pid as usize].push(*refid as WorkId);
-            to_citing[*refid as usize].push(*pid as WorkId);
-        }
-    }
-    write_var_att(stowage, vnames::TO_CITING, to_citing.iter())?;
-    // write_var_att(stowage, vnames::TO_CITED, to_cited.iter())?;
+    write_var_att(stowage, vnames::A2W, a2w.iter())?;
 
     // let mut w2i = Vec::new();
     for (wi, ship_prep) in rel_preps.iter().enumerate() {
@@ -560,15 +629,52 @@ pub fn get_attribute_resolver_map(stowage: &Stowage) -> AttributeResolverMap {
     ares_map
 }
 
-fn write_names(stowage: &Stowage, entity_name: &str) -> io::Result<()> {
-    inner_str_write::<NamedEntity, _>(
+pub fn read_var_att<T: ByteConvert>(stowage: &Stowage, att_name: &str) -> Vec<T> {
+    println!("reading var length attributes: {}", att_name);
+    let mut out = Vec::new();
+    for v in VarReader::new(stowage, att_name) {
+        out.push(v)
+    }
+    out
+}
+
+pub fn get_mapped_atts(resolver_id: &str) -> Vec<String> {
+    let mut hm = HashMap::new();
+    hm.insert(
+        vnames::COUNTRY_H,
+        vec![COUNTRIES.to_string(), institutions::C.to_string()],
+    );
+    hm.insert(
+        vnames::CONCEPT_H,
+        vec![fields::C.to_string(), subfields::C.to_string()],
+    );
+    // hm.insert(vnames::W2S, vec![sources::C.to_string()]);
+    hm.insert(vnames::W2QS, vec![QS.to_string(), sources::C.to_string()]);
+    hm.get(resolver_id).unwrap().to_vec()
+}
+
+fn write_names(stowage: &Stowage) -> io::Result<()> {
+    let nclosure = |o: NamedFieldEntity| o.display_name;
+    for fid in vec![fields::C, subfields::C] {
+        inner_str_write::<NamedFieldEntity, _>(stowage, fid, fid, fid, "main", nclosure)?;
+    }
+    inner_str_write::<Geo, _>(
         stowage,
-        entity_name,
-        entity_name,
-        entity_name,
-        "main",
-        |o| o.display_name,
-    )
+        COUNTRIES,
+        COUNTRIES,
+        institutions::C,
+        institutions::atts::geo,
+        |o| o.country,
+    )?;
+
+    let mut q_names: Vec<String> = (0..5).map(|i| format!("Q{}", i)).collect();
+    q_names.push("Uncategorized".to_owned());
+    write_var_att(stowage, &get_name_name(QS), q_names.iter())?;
+
+    for ename in vec![institutions::C, sources::C, authors::C] {
+        inner_str_write::<NamedEntity, _>(stowage, ename, ename, ename, "main", |o| o.display_name)?
+    }
+    Ok(())
 }
 
 fn inner_str_write<T, F>(
@@ -580,21 +686,17 @@ fn inner_str_write<T, F>(
     name_getter: F,
 ) -> io::Result<()>
 where
-    T: DeserializeOwned + ParsedId,
-    F: Fn(T) -> String,
+    T: DeserializeOwned + ParsedId + Send + Sync,
+    F: Fn(T) -> String + Send,
+    Arc<StrFiller<T, F>>: Send,
 {
-    let mut id_map = get_idmap(stowage, map_base);
-    let mut names = Vec::new();
-    for _ in 0..(id_map.current_total + 1) {
-        names.push("".to_string());
-    }
-    println!("inner write len: {}, idbase: {}", names.len(), entity_name);
-    for obj in stowage.read_csv_objs::<T>(main, sub) {
-        if let Some(id) = id_map.get(&obj.get_parsed_id()) {
-            names[id as usize] = name_getter(obj);
-        }
-    }
-    write_var_att(stowage, &get_name_name(entity_name), names.iter())?;
+    let filler = StrFiller::<T, F>::new(stowage, map_base, name_getter)
+        .para(stowage.read_csv_objs::<T>(main, sub));
+    write_var_att(
+        stowage,
+        &get_name_name(entity_name),
+        filler.names.lock().unwrap().iter(),
+    )?;
     Ok(())
 }
 
@@ -630,7 +732,10 @@ where
     create_dir_all(&att_dir).unwrap();
     let mut counts_file = File::create(&att_dir.join("sizes")).unwrap();
     let mut targets_file = File::create(&att_dir.join("targets")).unwrap();
-    for ts in targets.tqdm() {
+    for ts in targets
+        .tqdm()
+        .desc(Some(format!("writing var-atts {}", att_name)))
+    {
         let barr = ts.to_bytes();
         targets_file.write(&barr)?;
         ptr.count = barr.len() as u32;
@@ -653,34 +758,10 @@ where
     println!("built, inserted");
 }
 
-pub fn read_var_att<T: ByteConvert>(stowage: &Stowage, att_name: &str) -> Vec<T> {
-    println!("reading var length attributes: {}", att_name);
-    let mut out = Vec::new();
-    for v in VarReader::new(stowage, att_name) {
-        out.push(v)
-    }
-    out
-}
-
 fn write_to_sizes<T: Write>(writer: &mut T, ptr: &FilePointer) -> io::Result<()> {
     writer.write(&ptr.offset.to_be_bytes())?;
     writer.write(&ptr.count.to_be_bytes())?;
     Ok(())
-}
-
-pub fn get_mapped_atts(resolver_id: &str) -> Vec<String> {
-    let mut hm = HashMap::new();
-    hm.insert(
-        vnames::COUNTRY_H,
-        vec![COUNTRIES.to_string(), INSTS.to_string()],
-    );
-    hm.insert(
-        vnames::CONCEPT_H,
-        vec![FIELDS.to_string(), SUB_FIELDS.to_string()],
-    );
-    // hm.insert(vnames::W2S, vec![SOURCES.to_string()]);
-    hm.insert(vnames::W2QS, vec![QS.to_string(), SOURCES.to_string()]);
-    hm.get(resolver_id).unwrap().to_vec()
 }
 
 fn int_div<T>(dividend: T, divisor: T) -> f32

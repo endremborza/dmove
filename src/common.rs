@@ -14,19 +14,9 @@ use tqdm::*;
 pub type BigId = u64;
 pub type StowReader = Reader<BufReader<GzDecoder<File>>>;
 
-pub const WORKS: &str = "works";
-pub const AUTHORS: &str = "authors";
-pub const PUBLISHERS: &str = "publishers";
-pub const SOURCES: &str = "sources";
-pub const INSTS: &str = "institutions";
 pub const COUNTRIES: &str = "countries";
-pub const CONCEPTS: &str = "concepts";
-pub const TOPICS: &str = "topics";
-pub const DOMAINS: &str = "domains";
-
-pub const FIELDS: &str = "fields";
-pub const SUB_FIELDS: &str = "subfields";
 pub const QS: &str = "qs";
+pub const AREA_FIELDS: &str = "area-fields";
 
 pub const BUILD_LOC: &str = "qc-builds";
 pub const A_STAT_PATH: &str = "attribute-statics";
@@ -149,10 +139,22 @@ impl Stowage {
         BufReader::new(File::open(self.fix_atts.join(att_name)).unwrap())
     }
 
+    pub fn get_filter_dir(&self, step_id: u8) -> PathBuf {
+        let out_root = self.filter_steps.join(step_id.to_string());
+        create_dir_all(&out_root).unwrap();
+        out_root
+    }
+
     pub fn write_cache<T: Serialize>(&self, obj: &T, path: &str) -> io::Result<()> {
         let out_path = self.cache.join(path);
         create_dir_all(out_path.parent().unwrap())?;
         write_gz(&out_path, obj)
+    }
+
+    pub fn write_cache_buf<T: Serialize>(&self, obj: &T, path: &str) -> io::Result<()> {
+        let out_path = self.cache.join(path);
+        create_dir_all(out_path.parent().unwrap())?;
+        write_gz_buf(&out_path, obj)
     }
 
     pub fn read_csv_objs<T: DeserializeOwned>(
@@ -257,19 +259,47 @@ pub fn write_gz<T>(out_path: &Path, obj: &T) -> io::Result<()>
 where
     T: Serialize,
 {
-    let out_file = File::create(out_path.with_extension("json.gz").to_str().unwrap())?;
+    write_gz_meta(
+        out_path,
+        obj,
+        |o| serde_json::to_string(o).unwrap().as_bytes().to_vec(),
+        "json",
+    )
+}
+
+pub fn write_gz_buf<T>(out_path: &Path, obj: &T) -> io::Result<()>
+where
+    T: Serialize,
+{
+    write_gz_meta(out_path, obj, |o| bincode::serialize(o).unwrap(), "json")
+}
+
+pub fn write_gz_meta<T, F>(out_path: &Path, obj: &T, f: F, suffix: &str) -> io::Result<()>
+where
+    T: Serialize,
+    F: Fn(&T) -> Vec<u8>,
+{
+    let out_file = File::create(
+        out_path
+            .with_extension(format!("{}.gz", suffix))
+            .to_str()
+            .unwrap(),
+    )?;
     let encoder = GzEncoder::new(out_file, Compression::default());
     let mut writer = std::io::BufWriter::new(encoder);
-    writer
-        .write_all(serde_json::to_string(&obj).unwrap().as_bytes())
-        .unwrap();
-    return Ok(());
+    writer.write_all(&f(obj))
 }
 
 pub fn read_js_path<T: DeserializeOwned>(fp: &str) -> Result<T, serde_json::Error> {
     let mut js_str = String::new();
     get_gz_buf(fp).read_to_string(&mut js_str).unwrap();
     serde_json::from_str(&js_str)
+}
+
+pub fn read_buf_path<T: DeserializeOwned>(fp: &str) -> Result<T, bincode::Error> {
+    let mut buf: Vec<u8> = Vec::new();
+    get_gz_buf(fp).read_to_end(&mut buf)?;
+    bincode::deserialize(&buf)
 }
 
 pub fn read_cache<T: DeserializeOwned>(stowage: &Stowage, fname: &str) -> T {

@@ -1,11 +1,8 @@
-use std::{
-    collections::VecDeque,
-    io,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
-use tqdm::pbar;
+use crossbeam_channel::{bounded, Receiver};
 
+#[macro_export]
 macro_rules! clone_thread_push {
     ($thread_vec: ident, $para_fun: ident, $($arg: ident),*) => {
         {
@@ -20,61 +17,66 @@ macro_rules! clone_thread_push {
     };
 }
 
-pub trait Worker<S, T> {
-    fn new(setup: Arc<S>) -> Self;
-
+pub trait Worker<T>
+where
+    T: Send,
+    Self: Sized,
+    Arc<Self>: Send,
+{
     fn proc(&self, input: T);
+
+    fn para<I>(self, in_v: I) -> Arc<Self>
+    where
+        I: Iterator<Item = T>,
+    {
+        let arced_self = Arc::new(self);
+        para_run::<Self, T, _>(in_v, arced_self.clone());
+        arced_self
+    }
 }
 
-enum QueIn<T> {
+pub enum QueIn<T> {
     Go(T),
     Poison,
 }
 
-pub fn para_run<W, T, S, I>(in_v: I, setup: Arc<S>) -> io::Result<()>
+pub fn para_run<W, T, I>(in_v: I, setup: Arc<W>)
 where
-    W: Worker<S, T>,
+    W: Worker<T>,
     I: Iterator<Item = T>,
     T: Send,
-    S: Send + Sync,
+    Arc<W>: Send,
 {
     let n_threads: usize = std::thread::available_parallelism().unwrap().into();
+    let capacity = n_threads * 100;
 
-    let in_q = Arc::new(Mutex::new(VecDeque::new()));
+    let (sender, r) = bounded(capacity);
 
     std::thread::scope(|s| {
         for _ in 0..(n_threads) {
-            let in_clone = Arc::clone(&in_q);
+            let in_clone = r.clone();
             let s_clone = setup.clone();
-            s.spawn(move || subf::<W, _, _>(in_clone, s_clone));
+            s.spawn(move || subf::<W, _>(in_clone, s_clone));
         }
 
         for e in in_v {
-            in_q.lock().unwrap().push_front(QueIn::Go(e))
+            sender.send(QueIn::Go(e)).unwrap();
         }
         for _ in 0..(n_threads) {
-            in_q.lock().unwrap().push_front(QueIn::Poison);
+            sender.send(QueIn::Poison).unwrap();
         }
     });
-
-    Ok(())
 }
 
-fn subf<W, S, T>(in_queue: Arc<Mutex<VecDeque<QueIn<T>>>>, s: Arc<S>)
+fn subf<W, T>(r: Receiver<QueIn<T>>, s: Arc<W>)
 where
-    W: Worker<S, T>,
+    W: Worker<T>,
+    T: Send,
+    Arc<W>: Send,
 {
-    let mut pbar = pbar(None);
-    let w = W::new(s);
-
     loop {
-        let queue_in = match in_queue.lock().unwrap().pop_back() {
-            Some(q) => q,
-            None => continue,
-        };
-        if let QueIn::Go(qc_in) = queue_in {
-            pbar.update(1).unwrap();
-            w.proc(qc_in);
+        if let QueIn::Go(qc_in) = r.recv().unwrap() {
+            s.proc(qc_in);
         } else {
             break;
         };

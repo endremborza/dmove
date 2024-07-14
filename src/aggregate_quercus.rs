@@ -5,16 +5,15 @@ use std::{
     io,
     ops::AddAssign,
     sync::Arc,
-    thread::{self, JoinHandle},
     usize,
 };
 use tqdm::Iter;
 
 use crate::{
     common::{
-        read_cache, read_js_path, write_gz, Stowage, A_STAT_PATH, BUILD_LOC, COUNTRIES, INSTS,
-        QC_CONF,
+        read_cache, read_js_path, write_gz, Stowage, A_STAT_PATH, BUILD_LOC, COUNTRIES, QC_CONF,
     },
+    oa_csv_writers::institutions,
     oa_fix_atts::{names, read_fix_att},
     oa_var_atts::{
         read_var_att, vnames, CountryId, InstId, MappContainer, MappedAttributes, MidId, SmolId,
@@ -41,22 +40,63 @@ impl Counts {
         }
     }
 }
-
 pub fn aggregate(stowage_owned: Stowage) -> io::Result<()> {
+    let country_mapp =
+        MappContainer::from_name::<CountryId, InstId>(&stowage_owned, vnames::COUNTRY_H); // TODO:
+    let child_to_parent: Arc<[u8]> =
+        Arc::from(read_fix_att(&stowage_owned, names::I2C).into_boxed_slice());
+    let full_clist: Arc<[Box<[WorkId]>]> = read_var_att(&stowage_owned, vnames::TO_CITING).into();
+
+    let mut parent_counts = HashMap::new();
+
+    for cid in child_to_parent.iter() {
+        parent_counts
+            .entry(*cid as SmolId)
+            .or_insert_with(Counts::new)
+            .possible_children
+            .add_assign(1);
+    }
+
+    for (wid, barr) in full_clist.iter().enumerate() {
+        if let Some(MappedAttributes::Map(l1_map)) = country_mapp.get(&(wid as MidId)) {
+            for (cid, _) in l1_map.iter() {
+                let pv = parent_counts.get_mut(cid).unwrap();
+                pv.sources.add_assign(1);
+                pv.weight.add_assign(barr.len());
+            }
+        } else {
+            panic!("cant get country thing {}", wid);
+        }
+    }
+
+    aggregate_spec(
+        stowage_owned,
+        COUNTRIES,
+        institutions::C,
+        child_to_parent,
+        parent_counts,
+    )
+}
+
+fn aggregate_spec(
+    stowage_owned: Stowage,
+    parent_entity_type: &'static str,
+    child_entity_type: &'static str,
+    child_to_parent: Arc<[u8]>,
+    parent_counts: HashMap<SmolId, Counts>,
+) -> io::Result<()> {
     let stowage_arc = Arc::new(stowage_owned);
     let stowage = &stowage_arc;
 
     let mut qc_confs = read_cache::<FullJsSpec>(stowage, QC_CONF);
     let mut astats = read_cache::<AttributeStaticMap>(stowage, A_STAT_PATH);
-
-    let child_to_parent: Arc<[u8]> =
-        Arc::from(read_fix_att(&stowage, names::I2C).into_boxed_slice());
-    let parent_entity_type = COUNTRIES;
-    let child_entity_type = INSTS;
     let agg_key = get_agg_desc(child_entity_type, parent_entity_type);
 
     let mut qc_extend = HashMap::new();
     for (k, v) in &qc_confs {
+        if v.root_entity_type != child_entity_type {
+            continue;
+        }
         let mut bifurcations: Vec<JsBifurcation> = v
             .bifurcations
             .iter()
@@ -84,31 +124,6 @@ pub fn aggregate(stowage_owned: Stowage) -> io::Result<()> {
     qc_confs.extend(qc_extend);
     let conf_arc = Arc::new(qc_confs);
 
-    let full_clist: Arc<[Box<[WorkId]>]> = read_var_att(stowage, vnames::TO_CITING).into();
-    let country_mapp = MappContainer::from_name::<CountryId, InstId>(stowage, vnames::COUNTRY_H);
-
-    let mut parent_counts = HashMap::new();
-
-    for cid in child_to_parent.iter() {
-        parent_counts
-            .entry(*cid as SmolId)
-            .or_insert_with(Counts::new)
-            .possible_children
-            .add_assign(1);
-    }
-
-    for (wid, barr) in full_clist.iter().enumerate() {
-        if let Some(MappedAttributes::Map(l1_map)) = country_mapp.get(&(wid as MidId)) {
-            for (cid, _) in l1_map.iter() {
-                let pv = parent_counts.get_mut(cid).unwrap();
-                pv.sources.add_assign(1);
-                pv.weight.add_assign(barr.len());
-            }
-        } else {
-            panic!("cant get country thing {}", wid);
-        }
-    }
-
     for (cid, pid) in child_to_parent.iter().enumerate() {
         let pic = &parent_counts[&(*pid as SmolId)];
         astats
@@ -128,28 +143,34 @@ pub fn aggregate(stowage_owned: Stowage) -> io::Result<()> {
 
     stowage
         .iter_pruned_qc_locs()
-        .filter(|(_, qc_dir)| !is_new_dir(qc_dir))
+        .filter(|(_, qc_dir)| {
+            conf_arc
+                .get(qc_dir.file_name().to_str().unwrap())
+                .unwrap()
+                .root_entity_type
+                .eq(child_entity_type)
+        })
         .map(|(filter_name, qc_kind_dir)| {
             let stclone = Arc::clone(&stowage);
             let pclone = Arc::clone(&parent_arc);
             let cclone = Arc::clone(&child_to_parent);
             let asclone = Arc::clone(&astats_arc);
             let confclone = Arc::clone(&conf_arc);
-            thread::spawn(move || {
-                write_aggs(
-                    stclone,
-                    pclone,
-                    cclone,
-                    asclone,
-                    confclone,
-                    qc_kind_dir,
-                    filter_name,
-                )
-            })
+            // thread::spawn(move || {
+            write_aggs(
+                stclone,
+                pclone,
+                cclone,
+                asclone,
+                confclone,
+                qc_kind_dir,
+                filter_name,
+            )
+            // })
         })
-        .collect::<Vec<JoinHandle<()>>>()
-        .into_iter()
-        .map(|t| t.join().unwrap())
+        // .collect::<Vec<JoinHandle<()>>>()
+        // .into_iter()
+        // .map(|t| t.join().unwrap())
         .for_each(drop);
 
     write_gz(
@@ -161,7 +182,7 @@ pub fn aggregate(stowage_owned: Stowage) -> io::Result<()> {
 
 fn write_aggs(
     stowage: Arc<Stowage>,
-    parent_map: Arc<HashMap<SmolId, Counts>>, // TODO struct (source, weight)
+    parent_map: Arc<HashMap<SmolId, Counts>>,
     child_map: Arc<[u8]>,
     astats: Arc<AttributeStaticMap>,
     full_conf: Arc<FullJsSpec>,
@@ -171,12 +192,12 @@ fn write_aggs(
     let qc_kind_name = qc_kind_dir.file_name().to_owned().into_string().unwrap();
     let new_name = get_new_name(&qc_kind_name);
 
-    let mut country_qcs = HashMap::new();
+    let mut parent_qcs = HashMap::new();
     for (cid, counts) in parent_map.iter() {
         let mut qc = Quercus::new();
         qc.source_count = counts.sources;
         qc.weight = counts.weight as u32;
-        country_qcs.insert(cid, qc);
+        parent_qcs.insert(cid, qc);
     }
 
     for qc_file in read_dir(qc_kind_dir.path())
@@ -186,7 +207,7 @@ fn write_aggs(
     {
         let qcp = qc_file.unwrap().path();
         let mut qc: Quercus = read_js_path(&qcp.to_str().unwrap()).unwrap();
-        qc.chop(MAX_DEPTH - 2);
+        qc.chop(MAX_DEPTH - 1);
 
         let qc_iid = qcp
             .file_name()
@@ -200,7 +221,7 @@ fn write_aggs(
         let iid = SmolId::from_str_radix(&qc_iid, 10).unwrap();
         let cid = child_map[iid as usize] as SmolId;
 
-        country_qcs
+        parent_qcs
             .get_mut(&cid)
             .expect(&format!("country: {}", cid))
             .children
@@ -210,7 +231,7 @@ fn write_aggs(
         .get(&new_name)
         .expect(&format!("no conf {}", new_name));
 
-    for (cid, mut cqc) in country_qcs {
+    for (cid, mut cqc) in parent_qcs {
         let pruned_path = stowage
             .pruned_cache
             .join(BUILD_LOC)
@@ -230,8 +251,4 @@ fn get_agg_desc(etype_child: &str, etype_parent: &str) -> String {
 
 fn get_new_name(old_name: &str) -> String {
     format!("{}c", old_name)
-}
-
-fn is_new_dir(qc_dir: &DirEntry) -> bool {
-    qc_dir.file_name().to_str().iter().last().unwrap().eq(&"c")
 }

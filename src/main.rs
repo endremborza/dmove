@@ -3,6 +3,7 @@ use std::io;
 //gen
 mod common;
 mod ingest_entity;
+mod para;
 mod quercus;
 //spec
 mod aggregate_quercus;
@@ -18,7 +19,6 @@ mod quercus_packet;
 use aggregate_quercus::aggregate;
 use common::Stowage;
 use oa_csv_writers::write_csvs;
-use oa_entity_mapping::make_ids;
 use oa_filters::filter_setup;
 use oa_fix_atts::write_fix_atts;
 use oa_var_atts::write_var_atts;
@@ -42,8 +42,6 @@ fn main() -> io::Result<()> {
             }
         } else if comm == "filter" {
             filter_setup(&stowage)?;
-        } else if comm == "to-keys" {
-            make_ids(&stowage)?;
         } else if comm == "fix-atts" {
             write_fix_atts(&stowage)?;
         } else if comm == "var-atts" {

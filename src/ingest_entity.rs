@@ -1,14 +1,14 @@
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 use crate::common::{BigId, Stowage};
 
 const ID_TYPE_SIZE: usize = std::mem::size_of::<BigId>();
 const ID_RECORD_SIZE: usize = ID_TYPE_SIZE * 2;
+pub type LoadedIdMap = HashMap<BigId, BigId>;
 type IdRecord = [u8; ID_RECORD_SIZE];
 
 pub struct IdMap {
@@ -129,7 +129,7 @@ impl IdMap {
         start..self.current_total + 1
     }
 
-    pub fn to_map(&self) -> HashMap<BigId, BigId> {
+    pub fn to_map(&self) -> LoadedIdMap {
         let mut record_buffer = [0; ID_RECORD_SIZE];
         let mut br = BufReader::new(File::open(&self.map_buffer).unwrap());
         let mut out = HashMap::new();
