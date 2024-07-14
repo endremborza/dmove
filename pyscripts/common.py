@@ -7,7 +7,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from pandas.compat import os
 
-from .rust_gen import ComC, StowC
+from .rust_gen import EntC, StowC
 
 load_dotenv()
 
@@ -16,7 +16,7 @@ MAIN_NAME = "main.csv.gz"
 COMPLETE_FILTER = "all"
 
 oa_root = Path(os.environ["OA_ROOT"])
-inst_root = oa_root / StowC.entity_csvs / ComC.INSTS
+inst_root = oa_root / StowC.entity_csvs / EntC.INSTITUTIONS
 
 
 class Keys:
@@ -32,16 +32,23 @@ def get_root(entity):
     return oa_root / StowC.entity_csvs / entity
 
 
-def get_filter(sub):
-    return np.frombuffer(
-        Path(oa_root, StowC.filter_steps, sub).read_bytes(),
-        dtype=np.dtype(np.uint64).newbyteorder(">"),
+def get_last_filter(entity):
+    diriter = Path(oa_root, StowC.filter_steps).iterdir()
+    went = filter(lambda p: entity in map(lambda sp: sp.name, p.iterdir()), diriter)
+    p = sorted(went, key=lambda p: int(p.name))[-1] / entity
+    return np.frombuffer(p.read_bytes(), dtype=np.dtype(np.uint64).newbyteorder(">"))
+
+
+def get_filtered_main_df(ent: str):
+    return (
+        pd.read_csv(get_root(ent) / MAIN_NAME)
+        .assign(id=lambda df: df["id"].pipe(parse_id))
+        .loc[lambda df: df["id"].isin(get_last_filter(ent)), :]
     )
 
 
 def load_map(kind):
     blob = Path(oa_root, StowC.key_stores, kind).read_bytes()
-
     imap = np.frombuffer(blob, dtype=np.dtype(np.uint64).newbyteorder(">")).reshape(
         -1, 2
     )
@@ -58,6 +65,3 @@ def read_p_gz(path: Path):
 
 def read_p(path: Path):
     return json.loads(gzip.decompress(path.read_bytes()))
-
-
-insts = get_filter(f"13/{ComC.INSTS}")

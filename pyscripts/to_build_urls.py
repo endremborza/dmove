@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 
-from pyscripts.rust_gen import ComC, StowC
+from pyscripts.rust_gen import ComC, EntC, StowC
 
 from .common import Keys, load_map, oa_root, read_p_gz
 
@@ -26,7 +26,7 @@ intro_ids = [
 ]
 
 
-if __name__ == "__main__":
+def main():
     out = app_root / "roots.json"
     astats = read_p_gz(oa_root / StowC.pruned_cache / ComC.A_STAT_PATH)
     specs = read_p_gz(oa_root / StowC.pruned_cache / ComC.QC_CONF)
@@ -36,14 +36,20 @@ if __name__ == "__main__":
         {
             "entity_type": ComC.COUNTRIES,
             "prefix": "🌍",
-            "default_tree": "qc-3c",
+            "default_tree": "qc-2c",
             "start_sentence": "Scholars in",
         },
         {
-            "entity_type": ComC.INSTS,
+            "entity_type": EntC.INSTITUTIONS,
             "prefix": "🏛",
-            "default_tree": "qc-3",
+            "default_tree": "qc-2",  # 3!!
             "start_sentence": "Scholars at",
+        },
+        {
+            "entity_type": EntC.AUTHORS,
+            "prefix": "👤",
+            "default_tree": "qca-2",
+            "start_sentence": "Papers of",
         },
     ]
     root_list = []
@@ -58,6 +64,6 @@ if __name__ == "__main__":
     (app_root / "qc-specs.json").write_text(json.dumps(specs))
     (app_root / "root-basics.json").write_text(json.dumps(root_confs))
 
-    vdic = load_map("institutions")
+    vdic = load_map(EntC.INSTITUTIONS)
     intro_jsp = app_root / "intro-inst-ids.json"
     intro_jsp.write_text(json.dumps([str(vdic[i]) for i in intro_ids]))

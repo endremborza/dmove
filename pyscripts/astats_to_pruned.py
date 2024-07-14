@@ -8,17 +8,21 @@ from tqdm import tqdm
 
 from .common import (
     COMPLETE_FILTER,
-    MAIN_NAME,
     Keys,
-    get_filter,
+    get_filtered_main_df,
     inst_root,
-    insts,
+    load_map,
     oa_root,
     parse_id,
     read_p_gz,
 )
-from .rust_gen import ComC, StowC
-from .semantic_ids import get_country_semantic_ids, get_inst_semantic_ids, to_name_dic
+from .rust_gen import ComC, EntC, StowC
+from .semantic_ids import (
+    get_author_semantic_ids,
+    get_country_semantic_ids,
+    get_inst_semantic_ids,
+    to_name_dic,
+)
 
 
 def get_flag_emoji(ccode):
@@ -31,17 +35,12 @@ def get_flag_emoji(ccode):
 MIN_D = 0.8
 
 dn = "display_name"
+cc = "country_code"
 
 
-if __name__ == "__main__":
-    sources = get_filter("12/sources")
+def main():
 
-    sdf = (
-        pd.read_csv(oa_root / StowC.entity_csvs / ComC.SOURCES / MAIN_NAME)
-        .assign(id=lambda df: df["id"].pipe(parse_id))
-        .loc[lambda df: df["id"].isin(sources), :]
-        .set_index("id")
-    )
+    sdf = get_filtered_main_df(EntC.SOURCES).set_index("id")
 
     deslashed_names = (
         sdf.loc[lambda df: df[dn].str.contains("/"), dn]
@@ -69,11 +68,7 @@ if __name__ == "__main__":
     )
 
     df = (
-        (
-            pd.read_csv(inst_root / MAIN_NAME)
-            .assign(id=lambda df: df["id"].pipe(parse_id))
-            .loc[lambda df: df["id"].isin(insts), :]
-        )
+        get_filtered_main_df(EntC.INSTITUTIONS)
         .merge(
             pd.read_csv(inst_root / "geo.csv.gz", usecols=["parent_id", "city"])
             .assign(id=lambda df: df["parent_id"].pipe(parse_id))
@@ -81,8 +76,8 @@ if __name__ == "__main__":
             how="left",
         )
         .assign(
-            flag=lambda df: df["country_code"].fillna("  ").apply(get_flag_emoji),
-            country_ext=lambda df: "(" + df["country_code"].fillna("") + ")",
+            flag=lambda df: df[cc].fillna("  ").apply(get_flag_emoji),
+            country_ext=lambda df: "(" + df[cc].fillna("") + ")",
             countried_name=lambda df: df[dn].where(
                 ~df[dn].duplicated(keep=False), df[dn] + " " + df["country_ext"]
             ),
@@ -91,6 +86,7 @@ if __name__ == "__main__":
                 df[dn] + " (" + df["city"].fillna("") + ")",
             ),
         )
+        .set_index("id")
     )
 
     assert df.loc[lambda df: df["citied_name"].duplicated(keep=False)].empty
@@ -109,12 +105,16 @@ if __name__ == "__main__":
     specs = read_p_gz(oa_root / StowC.pruned_cache / ComC.QC_CONF)
     r2spec = dict((v[Keys.ROOT], k) for k, v in specs.items())
     semdicts = {
-        ComC.INSTS: get_inst_semantic_ids(),
+        EntC.INSTITUTIONS: get_inst_semantic_ids(),
+        EntC.AUTHORS: get_author_semantic_ids(),
         ComC.COUNTRIES: get_country_semantic_ids(),
     }
+    assert (
+        r2spec.keys() == semdicts.keys()
+    ), f"{r2spec.keys()} vs sem: {semdicts.keys()}"
 
     for k, v in r2spec.items():
-        for qid in tqdm(astats[k].keys(), desc=k):
+        for qid in tqdm(astats[k].keys(), desc=f"{k} count reads"):
             qcp = (
                 oa_root
                 / StowC.pruned_cache
@@ -127,6 +127,7 @@ if __name__ == "__main__":
                 qc = read_p_gz(qcp)
                 cmeta = {Keys.CITE: qc["weight"], Keys.PAPER: qc["source_count"]}
             except FileNotFoundError:
+                print("missing", qcp)
                 cmeta = {}
 
             ed = astats[k][qid]
@@ -134,18 +135,18 @@ if __name__ == "__main__":
                 Keys.SEM: semdicts[k][qid],
             }
 
-    for iid, oa_id in enumerate(df["id"]):
-        astats[ComC.INSTS][str(iid + 1)][Keys.META][Keys.OA_ID_META] = str(oa_id)
+    for oa_id, iid in load_map(EntC.INSTITUTIONS).items():
+        astats[EntC.INSTITUTIONS][str(iid)][Keys.META][Keys.OA_ID_META] = str(oa_id)
 
     def mod_astats(name_dic, k):
         for ik, idic in astats[k].items():
             new_name = name_dic.get(ik, "")
             if new_name != idic["name"]:
-                print(idic["name"], "==>", new_name, "\n")
+                # print(idic["name"], "==>", new_name, "\n")
                 idic["name"] = new_name
 
-    mod_astats(to_name_dic(df, "citied_name"), "institutions")
-    mod_astats(to_name_dic(named_sdf, "clean_name"), "sources")
+    mod_astats(to_name_dic(df, "citied_name", EntC.INSTITUTIONS), EntC.INSTITUTIONS)
+    mod_astats(to_name_dic(named_sdf, "clean_name", EntC.SOURCES), EntC.SOURCES)
 
     (oa_root / StowC.pruned_cache / ComC.A_STAT_PATH).with_suffix(
         ".json.gz"

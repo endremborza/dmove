@@ -2,8 +2,11 @@ import json
 
 import pandas as pd
 import polars as pl
-from inst_str_id import get_filter, oa_root, parse_id
 from tqdm import tqdm
+
+from pyscripts.rust_gen import ComC, EntC
+
+from .common import MAIN_NAME, get_last_filter, get_root, parse_id
 
 
 def get_best_q_by_year():
@@ -14,11 +17,14 @@ puby = "publication_year"
 
 if __name__ == "__main__":
 
-    work_filter = get_filter("14/works")
-    source_filter = get_filter("12/sources")
+    work_filter = get_last_filter(EntC.WORKS)
+    source_filter = get_last_filter(EntC.SOURCES)
+    adf = pd.read_csv(
+        "s3://tmp-borza-public-cyx/metascience/areas.csv.gz"
+    ).drop_duplicates()
 
     sodf = (
-        pd.read_csv(oa_root / "entity-csvs/sources/ids.csv.gz")
+        pd.read_csv(get_root(EntC.SOURCES) / "ids.csv.gz")
         .assign(id=lambda df: df["openalex"].pipe(parse_id))
         .loc[lambda df: df["id"].isin(source_filter), :]
         .set_index("id")
@@ -32,6 +38,9 @@ if __name__ == "__main__":
         ]
     ).drop_duplicates()
 
+    _issns.merge(adf).drop(_isc, axis=1).drop_duplicates().assign(
+        id=lambda df: ComC.ID_PREFIX + "S" + df["id"].astype(str)
+    ).to_csv(get_root(EntC.SOURCES) / f"{ComC.AREA_FIELDS}.csv.gz", index=False)
     q_matched_df = (
         get_best_q_by_year()
         .select(
@@ -47,13 +56,8 @@ if __name__ == "__main__":
     )
 
     w_dfs = []
-    for wdf in tqdm(
-        pd.read_csv(
-            oa_root / "entity-csvs/works/main.csv.gz",
-            chunksize=1_000_000,
-            usecols=["id", puby],
-        )
-    ):
+    wmp = get_root(EntC.WORKS) / MAIN_NAME
+    for wdf in tqdm(pd.read_csv(wmp, chunksize=1_000_000, usecols=["id", puby])):
         w_dfs.append(
             pl.from_pandas(
                 wdf.dropna()
@@ -67,12 +71,9 @@ if __name__ == "__main__":
 
     lodfs = []
 
+    wlp = get_root(EntC.WORKS) / "locations.csv.gz"
     for lodfr in tqdm(
-        pd.read_csv(
-            oa_root / "entity-csvs/works/locations.csv.gz",
-            chunksize=500_000,
-            usecols=["parent_id", "source"],
-        )
+        pd.read_csv(wlp, chunksize=500_000, usecols=["parent_id", "source"])
     ):
 
         lodfs.append(
@@ -93,5 +94,5 @@ if __name__ == "__main__":
         .sort("best_q")
         .unique("id", keep="first")
         .to_pandas()
-        .to_csv(oa_root / "entity-csvs/works/qs.csv.gz", index=False)
+        .to_csv(get_root(EntC.WORKS) / f"{ComC.QS}.csv.gz", index=False)
     )

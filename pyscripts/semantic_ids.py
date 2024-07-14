@@ -5,16 +5,42 @@ from string import ascii_lowercase
 import pandas as pd
 from unidecode import unidecode
 
-from .common import MAIN_NAME, insts, oa_root, parse_id, read_p_gz
-from .rust_gen import ComC, StowC
+from .common import get_filtered_main_df, load_map, oa_root, read_p_gz
+from .rust_gen import ComC, EntC, StowC
 
 
-def to_name_dic(df, k):
-    # TODO: replace with get_map
+def to_name_dic(df, k, entity_type):
+    id_map = load_map(entity_type)
     return (
-        df.reset_index()
-        .assign(i=lambda df: list(map(str, range(1, df.shape[0] + 1))))
+        df.assign(i=lambda df: [str(id_map[i]) for i in df.index])
         .set_index("i")[k]
+        .to_dict()
+    )
+
+
+def get_author_semantic_ids():
+    astats = read_p_gz(oa_root / StowC.cache / ComC.A_STAT_PATH)
+    adic = astats[EntC.AUTHORS]
+
+    return (
+        pd.DataFrame(adic.values(), index=adic.keys())["name"]
+        .str.replace(".", "")
+        .str.replace("'", "")
+        .str.strip()
+        .str.replace(" ", "-")
+        .str.lower()
+        .apply(unidecode)
+        .sort_values()
+        .to_frame()
+        .assign(
+            d=lambda df: df["name"].shift(),
+            dename=lambda df: df["name"] == df["d"],
+            suff=lambda df: df.groupby("name")["dename"].cumsum(),
+            rname=lambda df: df["name"].where(
+                df["suff"] == 0, df["name"] + "-" + (df["suff"] + 1).astype(str)
+            ),
+        )
+        .sort_values("suff")["rname"]
         .to_dict()
     )
 
@@ -28,11 +54,7 @@ def get_country_semantic_ids():
 
 
 def get_inst_semantic_ids():
-    df = (
-        pd.read_csv(oa_root / StowC.entity_csvs / ComC.INSTS / MAIN_NAME)
-        .assign(id=lambda df: df["id"].pipe(parse_id))
-        .loc[lambda df: df["id"].isin(insts), :]
-    )
+    df = get_filtered_main_df(EntC.INSTITUTIONS)
 
     dn_cols = ["display_name_acronyms", "display_name_alternatives", "u_of", "x_u"]
 
@@ -110,4 +132,4 @@ def get_inst_semantic_ids():
     )
     return shortname_df.drop_duplicates(subset=["id"]).set_index("id").loc[
         df["id"].values, :
-    ].pipe(to_name_dic, "alt_name") | {"0": "unknown"}
+    ].pipe(to_name_dic, "alt_name", EntC.INSTITUTIONS) | {"0": "unknown"}

@@ -1,17 +1,8 @@
 
 class ComC:
-    WORKS = "works"
-    AUTHORS = "authors"
-    PUBLISHERS = "publishers"
-    SOURCES = "sources"
-    INSTS = "institutions"
     COUNTRIES = "countries"
-    CONCEPTS = "concepts"
-    TOPICS = "topics"
-    DOMAINS = "domains"
-    FIELDS = "fields"
-    SUB_FIELDS = "subfields"
     QS = "qs"
+    AREA_FIELDS = "area-fields"
     BUILD_LOC = "qc-builds"
     A_STAT_PATH = "attribute-statics"
     QC_CONF = "qc-specs"
@@ -26,4 +17,17 @@ class StowC:
     var_atts = "var-atts"
     cache = "cache"
     pruned_cache = "pruned-cache"
+
+
+class EntC:
+    SOURCES = "sources"
+    PUBLISHERS = "publishers"
+    AUTHORS = "authors"
+    TOPICS = "topics"
+    FIELDS = "fields"
+    DOMAINS = "domains"
+    SUBFIELDS = "subfields"
+    CONCEPTS = "concepts"
+    INSTITUTIONS = "institutions"
+    WORKS = "works"
 
