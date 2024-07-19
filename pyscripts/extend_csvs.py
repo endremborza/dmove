@@ -8,9 +8,12 @@ from pyscripts.rust_gen import ComC, EntC
 
 from .common import MAIN_NAME, get_last_filter, get_root, parse_id
 
+# link_frame = "https://tmp-borza-public-cyx.s3.amazonaws.com/{}.csv.gz"
+link_frame = "s3://tmp-borza-public-cyx/{}.csv.gz"
+
 
 def get_best_q_by_year():
-    return pl.read_csv("s3://tmp-borza-public-cyx/metascience/q-by-year.csv.gz")
+    return pl.read_csv(link_frame.format("metascience/q-by-year"))
 
 
 puby = "publication_year"
@@ -19,9 +22,7 @@ if __name__ == "__main__":
 
     work_filter = get_last_filter(EntC.WORKS)
     source_filter = get_last_filter(EntC.SOURCES)
-    adf = pd.read_csv(
-        "s3://tmp-borza-public-cyx/metascience/areas.csv.gz"
-    ).drop_duplicates()
+    adf = pd.read_csv(link_frame.format("metascience/areas")).drop_duplicates()
 
     sodf = (
         pd.read_csv(get_root(EntC.SOURCES) / "ids.csv.gz")
