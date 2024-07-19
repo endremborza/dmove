@@ -11,7 +11,7 @@ download-snapshot:
 	aws s3 sync "s3://openalex" $(OA_SNAPSHOT) --no-sign-request
 
 to-csv: 
-	cargo run --release -- $@ $(OA_ROOT) $(OA_SNAPSHOT)
+	cargo run --release -- $@ $(OA_ROOT) $(OA_SNAPSHOT)/data
 
 filter fix-atts var-atts build-qcs prune-qcs agg-qcs packet-qcs:
 	cargo run --release -- $@ $(OA_ROOT) 
