@@ -146,7 +146,6 @@ macro_rules! create_complex_writers {
 
     };
 }
-
 macro_rules! macwrite {
     ($inp:ident, $outp:ident, $n:ident, $($modname:ident),*) => {
         $(
