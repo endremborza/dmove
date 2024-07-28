@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 from pyscripts.rust_gen import ComC, EntC
 
-from .common import MAIN_NAME, get_last_filter, get_root, parse_id
+from .common import get_last_filter, get_root, iter_dfs, parse_id
 
 
 def get_best_q_by_year():
@@ -56,8 +56,7 @@ if __name__ == "__main__":
     )
 
     w_dfs = []
-    wmp = get_root(EntC.WORKS) / MAIN_NAME
-    for wdf in tqdm(pd.read_csv(wmp, chunksize=1_000_000, usecols=["id", puby])):
+    for wdf in tqdm(iter_dfs(EntC.WORKS, cols=["id", puby])):
         w_dfs.append(
             pl.from_pandas(
                 wdf.dropna()
