@@ -12,8 +12,11 @@ from .rust_gen import EntC, StowC
 load_dotenv()
 
 
-MAIN_NAME = "main.csv.gz"
+MAIN_NAME = "main"
 COMPLETE_FILTER = "all"
+DN = "display_name"
+IDC = "id"
+PARID = "parent_id"
 
 oa_root = Path(os.environ["OA_ROOT"])
 inst_root = oa_root / StowC.entity_csvs / EntC.INSTITUTIONS
@@ -41,10 +44,21 @@ def get_last_filter(entity):
 
 def get_filtered_main_df(ent: str):
     return (
-        pd.read_csv(get_root(ent) / MAIN_NAME)
+        read_full_df(ent)
         .assign(id=lambda df: df["id"].pipe(parse_id))
         .loc[lambda df: df["id"].isin(get_last_filter(ent)), :]
     )
+
+
+def iter_dfs(ent: str, sub: str = MAIN_NAME, chunck: int = 1_000_000, cols=None):
+    for _df in pd.read_csv(
+        get_root(ent) / f"{sub}.csv.gz", chunksize=chunck, usecols=cols
+    ):
+        yield _df
+
+
+def read_full_df(ent: str, sub: str = MAIN_NAME, cols=None):
+    return pd.concat(iter_dfs(ent, sub, cols=cols))
 
 
 def load_map(kind):
