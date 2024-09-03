@@ -29,25 +29,26 @@ where
     where
         I: Iterator<Item = T>,
     {
+        let n_threads: usize = std::thread::available_parallelism().unwrap().into();
+        self.para_n(in_v, n_threads)
+    }
+    fn para_n<I>(self, in_v: I, n: usize) -> Arc<Self>
+    where
+        I: Iterator<Item = T>,
+    {
         let arced_self = Arc::new(self);
-        para_run::<Self, T, _>(in_v, arced_self.clone());
+        para_run::<Self, T, _>(in_v, arced_self.clone(), n);
         arced_self
     }
 }
 
-pub enum QueIn<T> {
-    Go(T),
-    Poison,
-}
-
-pub fn para_run<W, T, I>(in_v: I, setup: Arc<W>)
+pub fn para_run<W, T, I>(in_v: I, setup: Arc<W>, n_threads: usize)
 where
     W: Worker<T>,
     I: Iterator<Item = T>,
     T: Send,
     Arc<W>: Send,
 {
-    let n_threads: usize = std::thread::available_parallelism().unwrap().into();
     let capacity = n_threads * 100;
 
     let (sender, r) = bounded(capacity);
@@ -60,22 +61,22 @@ where
         }
 
         for e in in_v {
-            sender.send(QueIn::Go(e)).unwrap();
+            sender.send(Some(e)).unwrap();
         }
         for _ in 0..(n_threads) {
-            sender.send(QueIn::Poison).unwrap();
+            sender.send(None).unwrap();
         }
     });
 }
 
-fn subf<W, T>(r: Receiver<QueIn<T>>, s: Arc<W>)
+fn subf<W, T>(r: Receiver<Option<T>>, s: Arc<W>)
 where
     W: Worker<T>,
     T: Send,
     Arc<W>: Send,
 {
     loop {
-        if let QueIn::Go(qc_in) = r.recv().unwrap() {
+        if let Some(qc_in) = r.recv().unwrap() {
             s.proc(qc_in);
         } else {
             break;

@@ -1,7 +1,10 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::common::{oa_id_parse, BigId, IdStruct, ParsedId};
+use crate::{
+    add_strict_parsed_id_traits,
+    common::{field_id_parse, oa_id_parse, BigId, IdStruct, ParsedId},
+};
 
 macro_rules! add_id_traits {
     ($($struct:ident),*) => {
@@ -37,15 +40,11 @@ add_id_traits!(
     SubField
 );
 
+add_strict_parsed_id_traits!(Institution);
+
 impl<T: IdTrait> IdTrait for IdCountDecorated<T> {
     fn get_id(&self) -> String {
         self.child.get_id()
-    }
-}
-
-impl<T: IdTrait> ParsedId for T {
-    fn get_parsed_id(&self) -> BigId {
-        oa_id_parse(&self.get_id().clone())
     }
 }
 
@@ -157,7 +156,7 @@ pub struct Institution {
     id: String,
     ror: Option<String>,
     display_name: Option<String>,
-    country_code: Option<String>,
+    pub country_code: Option<String>,
     #[serde(rename = "type")]
     inst_type: Option<String>,
     homepage_url: Option<String>,
@@ -326,6 +325,12 @@ pub struct RelatedWork {
     related_work_id: String,
 }
 
+impl ParsedId for FieldLike {
+    fn get_parsed_id(&self) -> BigId {
+        field_id_parse(&self.id)
+    }
+}
+
 impl From<String> for ReferencedWork {
     fn from(value: String) -> Self {
         Self {
@@ -405,7 +410,10 @@ where
 }
 
 pub mod post {
-    use super::{Deserialize, IdTrait};
+    use crate::add_strict_parsed_id_traits;
+
+    use super::{oa_id_parse, BigId, Deserialize, IdTrait, ParsedId};
+    use crate::common::field_id_parse;
 
     #[derive(Deserialize, Debug)]
     pub struct Authorship {
@@ -431,5 +439,28 @@ pub mod post {
         pub cited_by_count: Option<u32>,
     }
 
+    #[derive(Deserialize, Debug)]
+    pub struct Topic {
+        pub id: String,
+        pub display_name: String,
+        pub subfield: String,
+        pub field: String,
+        pub domain: String,
+    }
+
+    #[derive(Deserialize, Debug)]
+    pub struct SubField {
+        pub id: String,
+        pub display_name: String,
+        pub field: String,
+    }
+
     add_id_traits!(Author);
+    add_strict_parsed_id_traits!(Author, Topic);
+
+    impl ParsedId for SubField {
+        fn get_parsed_id(&self) -> BigId {
+            field_id_parse(&self.id)
+        }
+    }
 }

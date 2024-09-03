@@ -4,10 +4,13 @@ use std::path::PathBuf;
 
 use hashbrown::{HashMap, HashSet};
 
-use crate::common::{BigId, Stowage};
-
+use crate::common::{
+    get_uscale, Entity, MainBuilder, MetaInput, MetaIntegrator, SomeElement, BASIC_TRAIT,
+};
+pub type BigId = u64;
 const ID_TYPE_SIZE: usize = std::mem::size_of::<BigId>();
 const ID_RECORD_SIZE: usize = ID_TYPE_SIZE * 2;
+
 pub type LoadedIdMap = HashMap<BigId, BigId>;
 type IdRecord = [u8; ID_RECORD_SIZE];
 
@@ -15,38 +18,100 @@ pub struct IdMap {
     map_buffer: PathBuf,
     extensions: Vec<IdRecord>,
     extension_set: HashSet<BigId>,
-    pub current_total: u64,
-    filtered_ids: Option<HashSet<BigId>>,
+    pub current_non_null_count: u64,
 }
 
-pub fn get_idmap(stowage: &Stowage, entity_name: &str) -> IdMap {
-    IdMap::new(stowage.key_stores.join(entity_name))
+pub struct IdMappedEntityBuilder {
+    map: IdMap,
 }
 
-//IDS start with one
+pub struct EntityBuilder {
+    n: usize,
+}
+
+pub trait IdMappedEntity: Entity {
+    fn read(parent_dir: &PathBuf) -> IdMap {
+        IdMap::new(parent_dir.join(Self::NAME))
+    }
+}
+
+impl MetaIntegrator<BigId> for IdMappedEntityBuilder {
+    fn setup(builder: &MainBuilder, name: &str) -> Self {
+        let map = IdMap::new(builder.parent_root.join(name));
+        Self { map }
+    }
+
+    fn add_elem(&mut self, e: &BigId) {
+        self.map.push(*e);
+    }
+
+    fn add_elem_owned(&mut self, e: BigId) {
+        self.map.push(e);
+    }
+
+    fn post(mut self) -> MetaInput<()> {
+        self.map.extend();
+        let n = self.map.current_non_null_count as usize + 1;
+        MetaInput {
+            n,
+            type_overwrite: Some(get_uscale(n)),
+            meta_lines_input: (),
+        }
+    }
+}
+
+impl MetaIntegrator<usize> for EntityBuilder {
+    fn setup(_builder: &MainBuilder, _name: &str) -> Self {
+        Self { n: 0 }
+    }
+
+    fn add_elem(&mut self, _e: &usize) {
+        self.n += 1;
+    }
+
+    fn post(self) -> MetaInput<()> {
+        let n = self.n;
+        MetaInput {
+            n,
+            type_overwrite: Some(get_uscale(n)),
+            meta_lines_input: (),
+        }
+    }
+}
+
+impl SomeElement<IdMappedEntityBuilder> for BigId {
+    type MetaInputType = ();
+    fn main_trait() -> &'static str {
+        stringify!(IdMappedEntity)
+    }
+}
+
+impl SomeElement<EntityBuilder> for usize {
+    type MetaInputType = ();
+    fn main_trait() -> &'static str {
+        BASIC_TRAIT
+    }
+}
+
+//NOTE: IDS start with one
 impl IdMap {
     pub fn new<T>(id_map_path: T) -> Self
     where
         PathBuf: From<T>,
     {
         let map_buffer = PathBuf::from(id_map_path);
-        let mut current_total: u64 = 0;
+        let mut current_non_null_count: u64 = 0;
         if !map_buffer.is_file() {
             File::create(&map_buffer).unwrap();
         } else {
-            current_total = file_record_count(&File::open(&map_buffer).unwrap());
+            current_non_null_count = file_record_count(&File::open(&map_buffer).unwrap());
         }
         Self {
             map_buffer,
             extensions: vec![],
-            current_total,
+            current_non_null_count,
             extension_set: HashSet::new(),
-            filtered_ids: None,
         }
-    }
-
-    pub fn set_filter(&mut self, ids: Option<HashSet<BigId>>) {
-        self.filtered_ids = ids;
     }
 
     pub fn extend(&mut self) {
@@ -70,22 +135,23 @@ impl IdMap {
     }
 
     pub fn push(&mut self, id: BigId) {
-        if let Some(fids) = &self.filtered_ids {
-            if !fids.contains(&id) {
-                return ();
-            }
-        }
         if let None = self.get(&id) {
             if !self.extension_set.contains(&id) {
                 self.extension_set.insert(id);
-                self.current_total += 1; // determined here that first id is 1 not 0
+                self.current_non_null_count += 1; // determined here that first id is 1 not 0
                 let mut rec = [0; ID_RECORD_SIZE];
                 rec[0..ID_TYPE_SIZE].copy_from_slice(&id.to_be_bytes());
                 rec[ID_TYPE_SIZE..ID_RECORD_SIZE]
-                    .copy_from_slice(&self.current_total.to_be_bytes());
+                    .copy_from_slice(&self.current_non_null_count.to_be_bytes());
                 self.extensions.push(rec);
             }
         }
+    }
+    pub fn push_many<'a, I>(&mut self, iter: I)
+    where
+        I: Iterator<Item = &'a BigId>,
+    {
+        iter.for_each(|id| self.push(*id))
     }
 
     pub fn get(&mut self, k: &BigId) -> Option<BigId> {
@@ -126,7 +192,7 @@ impl IdMap {
 
     pub fn iter_ids(&self, include_unknown: bool) -> std::ops::Range<BigId> {
         let start = if include_unknown { 0 } else { 1 };
-        start..self.current_total + 1
+        start..self.current_non_null_count + 1
     }
 
     pub fn to_map(&self) -> LoadedIdMap {

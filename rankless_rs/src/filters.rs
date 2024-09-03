@@ -10,8 +10,7 @@ use serde::{de::DeserializeOwned, Deserialize};
 use crate::{
     add_strict_parsed_id_traits,
     common::{oa_id_parse, BigId, ParsedId, Stowage},
-    oa_csv_writers::{authors, institutions, sources, works},
-    oa_entity_mapping::make_ids,
+    csv_writers::{authors, institutions, sources, works},
     oa_structs::{
         post::{Author, Authorship, Location},
         ReferencedWork,
@@ -155,8 +154,7 @@ pub fn filter_setup(stowage: &Stowage) -> io::Result<()> {
     filter_step::<Location>(stowage, [sources::C, works::C], 12)?;
     filter_step::<Authorship>(stowage, [institutions::C, works::C], 13)?;
     filter_step::<PersonAuthorship>(stowage, [works::C, authors::C], 14)?;
-    author_filter(stowage, 20)?;
-    make_ids(stowage)
+    author_filter(stowage, 20)
 }
 
 pub fn get_last_filter(stowage: &Stowage, entity_type: &str) -> Option<HashSet<u64>> {

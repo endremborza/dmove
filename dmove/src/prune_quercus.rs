@@ -22,18 +22,19 @@ pub fn prune(stowage_owned: Stowage) -> io::Result<()> {
     let stowage = &stowage_arc;
     let qc_confs = Arc::new(read_cache::<FullJsSpec>(stowage, QC_CONF));
     let astats: Arc<AttributeStaticMap> = Arc::new(read_cache(stowage, A_STAT_PATH));
-    let mut spawned_threads = Vec::new();
+    // let mut spawned_threads = Vec::new();
     for (filter_name, qc_kind_dir) in stowage.iter_cached_qc_locs() {
         let stclone = stowage_arc.clone();
         let qcclone = qc_confs.clone();
         let aclone = astats.clone();
-        spawned_threads.push(thread::spawn(move || {
-            write_prunes(stclone, aclone, qcclone, qc_kind_dir, filter_name)
-        }))
+        let pthread =
+            thread::spawn(move || write_prunes(stclone, aclone, qcclone, qc_kind_dir, filter_name));
+        pthread.join().unwrap();
+        // spawned_threads.push(pthread);
     }
-    for done_thread in spawned_threads {
-        done_thread.join().unwrap();
-    }
+    // for done_thread in spawned_threads {
+    // done_thread.join().unwrap();
+    // }
 
     Ok(())
 }
@@ -53,7 +54,7 @@ fn write_prunes(
     for qc_file in fs::read_dir(qc_kind_dir.path())
         .unwrap()
         .tqdm()
-        .desc(Some(qc_kind_name))
+        .desc(Some(format!("{}/{}", qc_kind_name, filter_kind_name)))
     {
         let qcp = qc_file.unwrap().path();
         let qc_pack: QP4 = read_buf_path(&qcp.to_str().unwrap()).unwrap();
@@ -91,16 +92,15 @@ pub fn prune_qc(qc: &mut Quercus, astats: &AttributeStaticMap, depth: usize, qc_
     let entity_type = bif.attribute_kind.clone();
     for (k, child) in &qc.children {
         top_weights.push((k, child.weight));
-        let spec_base = astats[&entity_type]
+        let child_spec = match astats[&entity_type]
             .get(k)
             .expect(&format!("{}: {} at {}", entity_type, k, depth))
             .spec_baselines
             .get(&bif.description)
-            .expect(&format!(
-                "missing for {} from {}, ->{}<- at {}",
-                k, entity_type, bif.description, depth
-            ));
-        let child_spec = f64::from(child.weight) / f64::from(qc.weight) / spec_base;
+        {
+            Some(spec_base) => f64::from(child.weight) / f64::from(qc.weight) / spec_base,
+            None => -1.0,
+        };
         top_specs.push((k, child_spec));
     }
     top_weights.sort_by(|l, r| r.1.partial_cmp(&l.1).unwrap()); // this is reverse sorting

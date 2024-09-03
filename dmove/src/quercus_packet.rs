@@ -1,21 +1,14 @@
 use csv::Writer;
-use flate2::bufread::GzEncoder;
-use flate2::Compression;
+use flate2::{bufread::GzEncoder, Compression};
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::fs::{read_dir, DirEntry};
-use std::io::prelude::*;
-use std::io::{self, Cursor};
+use std::fs::{read_dir, DirEntry, File};
+use std::io::{self, prelude::*, Cursor};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tqdm::Iter;
 
-use crate::para::Worker;
-use crate::{
-    common::{read_js_path, Stowage},
-    quercus::Quercus,
-};
+use crate::{para::Worker, quercus::Quercus};
 
 pub type QP4 = QuercusPacket<Arc<[QP3]>>;
 type QP3 = QuercusPacket<Arc<[QP2]>>;

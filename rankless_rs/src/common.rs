@@ -11,6 +11,8 @@ use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tqdm::*;
 
+use dmove::{Entity, FixedAttributeElement, FixedSizeAttribute, IdMap, IdMappedEntity};
+
 pub type BigId = u64;
 pub type StowReader = Reader<BufReader<GzDecoder<File>>>;
 
@@ -131,10 +133,6 @@ impl Stowage {
         self.get_reader(format!("{}/{}", entity, sub))
     }
 
-    pub fn get_fix_writer(&self, att_name: &str) -> File {
-        File::create(self.fix_atts.join(att_name)).unwrap()
-    }
-
     pub fn get_fix_reader(&self, att_name: &str) -> BufReader<File> {
         BufReader::new(File::open(self.fix_atts.join(att_name)).unwrap())
     }
@@ -171,6 +169,18 @@ impl Stowage {
 
     pub fn iter_pruned_qc_locs(&self) -> QcPathIter {
         QcPathIter::new(&self.pruned_cache)
+    }
+
+    pub fn get_idmap<E: IdMappedEntity>(&self) -> IdMap {
+        E::read(&self.key_stores)
+    }
+
+    pub fn get_fix_att<E>(&self) -> Box<[E::T]>
+    where
+        E: FixedSizeAttribute,
+        <E as Entity>::T: FixedAttributeElement,
+    {
+        E::read(&self.fix_atts)
     }
 }
 
@@ -311,4 +321,11 @@ pub fn read_cache<T: DeserializeOwned>(stowage: &Stowage, fname: &str) -> T {
             .unwrap(),
     )
     .expect(&format!("tried reading {}", fname))
+}
+
+pub fn short_string_to_u64(input: &str) -> BigId {
+    let mut padded_input = [0u8; 8];
+    let l = input.len().min(8);
+    padded_input[..l].copy_from_slice(&input.as_bytes()[..l]);
+    BigId::from_le_bytes(padded_input)
 }

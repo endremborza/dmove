@@ -8,8 +8,8 @@ use tqdm::Iter;
 
 use crate::oa_structs::{
     Ancestor, AssociatedInstitution, Author, Authorship, Biblio, Concept, FieldLike, Geo,
-    IdCountDecorated, IdTrait, Institution, Location, OpenAccess, RelatedConcept, Source, SubField,
-    Topic, Work, WorkTopic,
+    IdCountDecorated, IdTrait, Institution, Location, OpenAccess, Publisher, RelatedConcept,
+    Source, SubField, Topic, Work, WorkTopic,
 };
 
 type GzInner = GzEncoder<BufWriter<File>>;
@@ -58,6 +58,7 @@ macro_rules! create_complex_writers {
 
             use super::*;
 
+            #[allow(dead_code)]
             pub const C: &str = stringify!($mod_name);
 
             #[allow(dead_code, non_upper_case_globals)]
@@ -115,7 +116,6 @@ macro_rules! create_complex_writers {
             pub fn write(
                 in_root_str: &str,
                 out_root_str: &str,
-                take_n: Option<usize>,
             ) -> io::Result<()> {
                     let slug = stringify!($mod_name);
                     let mut gz_files: Vec<PathBuf> = vec![];
@@ -129,13 +129,7 @@ macro_rules! create_complex_writers {
                         let file_gz = File::open(gz_path)?;
                         let gz_decoder = GzDecoder::new(file_gz);
                         let reader = BufReader::new(gz_decoder);
-                        let mut liter: Box<dyn Iterator<Item = Result<String, std::io::Error>>> =
-                            Box::new(reader.lines());
-                        if let Some(n) = take_n {
-                            liter = Box::new(liter.take(n));
-                        }
-
-                        for line in liter {
+                        for line in reader.lines() {
                             writer.write_line(&line.unwrap());
                         }
                     }
@@ -147,20 +141,20 @@ macro_rules! create_complex_writers {
     };
 }
 macro_rules! macwrite {
-    ($inp:ident, $outp:ident, $n:ident, $($modname:ident),*) => {
+    ($inp:ident, $outp:ident, $($modname:ident),*) => {
         $(
-            $modname::write($inp, $outp, $n)?;
+            $modname::write($inp, $outp)?;
         )*
     };
 }
 
 create_complex_writers!(
     Source - sources;;;,
-    // Publisher - publishers;;;,
+    Publisher - publishers;;;,
     Author - authors;;;,
     Topic - topics;;;,
     FieldLike - fields;;;,
-    // FieldLike - domains;;;,
+    FieldLike - domains;;;,
     SubField - subfields;;;,
     Concept - concepts; ancestors => Ancestor & related_concepts => RelatedConcept;;,
     Institution - institutions; associated_institution => AssociatedInstitution; geo -> Geo;,
@@ -201,27 +195,26 @@ fn deserialize_verbose<T: DeserializeOwned>(s: &str) -> T {
     match result {
         Ok(r) => return r,
         Err(err) => {
-            println!("{:?}", err);
-            println!("{}", s);
-            panic!("{}", err);
+            println!("err: {:?}", err);
+            println!("s: {}", s);
+            panic!("verbose err: {}", err);
         }
     }
 }
 
-pub fn write_csvs(in_root_str: &str, out_root_str: &str, n: Option<usize>) -> io::Result<()> {
+pub fn write_csvs(in_root_str: &str, out_root_str: &str) -> io::Result<()> {
     macwrite!(
         in_root_str,
         out_root_str,
-        n,
         fields,
-        // domains,
+        domains,
         subfields,
         topics,
         institutions,
         concepts,
         works,
         authors,
-        // publishers,
+        publishers,
         sources
     );
     Ok(())
