@@ -1,7 +1,9 @@
 [workspace]
 members = [
     "dmove",
+    "dmove_macro",
     "rankless_rs",
+    "rankless_server",
 ]
 package = { version = "0.1.0", edition = "2021" }
 resolver = "2"
