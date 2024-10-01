@@ -1,7 +1,6 @@
 
 class ComC:
     COUNTRIES = "countries"
-    QS = "qs"
     AREA_FIELDS = "area-fields"
     BUILD_LOC = "qc-builds"
     A_STAT_PATH = "attribute-statics"
@@ -12,9 +11,6 @@ class ComC:
 class StowC:
     entity_csvs = "entity-csvs"
     filter_steps = "filter-steps"
-    key_stores = "key-stores"
-    fix_atts = "fix-atts"
-    var_atts = "var-atts"
     cache = "cache"
     pruned_cache = "pruned-cache"
 
@@ -30,4 +26,16 @@ class EntC:
     CONCEPTS = "concepts"
     INSTITUTIONS = "institutions"
     WORKS = "works"
+
+
+class AttC:
+    ancestors = "ancestors"
+    related_concepts = "related_concepts"
+    associated_institution = "associated_institution"
+    geo = "geo"
+    topics = "topics"
+    locations = "locations"
+    authorships = "authorships"
+    biblio = "biblio"
+    open_access = "open_access"
 
