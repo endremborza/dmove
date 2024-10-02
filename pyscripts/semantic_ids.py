@@ -5,7 +5,14 @@ from string import ascii_lowercase
 import pandas as pd
 from unidecode import unidecode
 
-from .common import get_filtered_main_df, load_map, oa_root, read_p_gz
+from .common import (
+    DN,
+    get_filtered_main_df,
+    load_map,
+    oa_persistent,
+    oa_root,
+    read_p_gz,
+)
 from .rust_gen import ComC, EntC, StowC
 
 
@@ -19,19 +26,19 @@ def to_name_dic(df, k, entity_type):
 
 
 def get_author_semantic_ids():
-    astats = read_p_gz(oa_root / StowC.cache / ComC.A_STAT_PATH)
-    adic = astats[EntC.AUTHORS]
+    df = get_filtered_main_df(EntC.AUTHORS)
 
     return (
-        pd.DataFrame(adic.values(), index=adic.keys())["name"]
-        .str.replace(".", "")
-        .str.replace("'", "")
-        .str.strip()
-        .str.replace(" ", "-")
-        .str.lower()
-        .apply(unidecode)
-        .sort_values()
-        .to_frame()
+        df.assign(
+            name=lambda df: df[DN]
+            .str.replace(".", "")
+            .str.replace("'", "")
+            .str.strip()
+            .str.replace(" ", "-")
+            .str.lower()
+            .apply(unidecode),
+        )
+        .sort_values(["name"], ascending=False)  # TODO: better sorting (e.g. citations)
         .assign(
             d=lambda df: df["name"].shift(),
             dename=lambda df: df["name"] == df["d"],

@@ -1,0 +1,9 @@
+[lib]
+proc-macro = true
+
+[package]
+name = "dmove-macro"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

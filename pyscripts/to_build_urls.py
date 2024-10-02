@@ -1,12 +1,8 @@
 import json
-import os
-from pathlib import Path
 
 from pyscripts.rust_gen import ComC, EntC, StowC
 
-from .common import Keys, load_map, oa_root, read_p_gz
-
-app_root = Path(os.environ["RANKLESS_APP_ROOT"]) / "src/lib/assets/data"
+from .common import Keys, app_root, load_map, oa_root, read_p_gz
 
 intro_ids = [
     241749,
@@ -36,19 +32,19 @@ def main():
         {
             "entity_type": ComC.COUNTRIES,
             "prefix": "🌍",
-            "default_tree": "qc-2c",
+            "default_tree": f"qc-{ComC.COUNTRIES}-3",
             "start_sentence": "Scholars in",
         },
         {
             "entity_type": EntC.INSTITUTIONS,
             "prefix": "🏛",
-            "default_tree": "qc-2",  # 3!!
+            "default_tree": f"qc-{EntC.INSTITUTIONS}-3",
             "start_sentence": "Scholars at",
         },
         {
             "entity_type": EntC.AUTHORS,
             "prefix": "👤",
-            "default_tree": "qca-2",
+            "default_tree": f"qc-{EntC.AUTHORS}-2",
             "start_sentence": "Papers of",
         },
     ]

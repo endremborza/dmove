@@ -10,7 +10,7 @@ from .common import (
     COMPLETE_FILTER,
     Keys,
     get_filtered_main_df,
-    inst_root,
+    get_root,
     load_map,
     oa_root,
     parse_id,
@@ -70,7 +70,10 @@ def main():
     df = (
         get_filtered_main_df(EntC.INSTITUTIONS)
         .merge(
-            pd.read_csv(inst_root / "geo.csv.gz", usecols=["parent_id", "city"])
+            pd.read_csv(
+                get_root(EntC.INSTITUTIONS) / "geo.csv.gz",
+                usecols=["parent_id", "city"],
+            )
             .assign(id=lambda df: df["parent_id"].pipe(parse_id))
             .drop("parent_id", axis=1),
             how="left",

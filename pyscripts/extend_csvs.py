@@ -2,11 +2,10 @@ import json
 
 import pandas as pd
 import polars as pl
-from tqdm import tqdm
 
 from pyscripts.rust_gen import ComC, EntC
 
-from .common import get_last_filter, get_root, iter_dfs, parse_id
+from .common import PUBY, get_csv_path, get_last_filter, get_root, parse_id
 
 # link_frame = "https://tmp-borza-public-cyx.s3.amazonaws.com/{}.csv.gz"
 link_frame = "s3://tmp-borza-public-cyx/{}.csv.gz"
@@ -15,8 +14,6 @@ link_frame = "s3://tmp-borza-public-cyx/{}.csv.gz"
 def get_best_q_by_year():
     return pl.read_csv(link_frame.format("metascience/q-by-year"))
 
-
-puby = "publication_year"
 
 if __name__ == "__main__":
 
@@ -47,7 +44,7 @@ if __name__ == "__main__":
         .select(
             [
                 pl.col(_isc),
-                pl.col("year").cast(pl.UInt16).alias(puby),
+                pl.col("year").cast(pl.UInt16).alias(PUBY),
                 pl.col("best_q").str.slice(1, None).cast(pl.UInt8),
             ]
         )
@@ -55,44 +52,46 @@ if __name__ == "__main__":
         .drop(_isc)
         .unique()
     )
+    q_matched_df.to_pandas().to_csv(get_csv_path(EntC.SOURCES, ComC.QS), index=False)
 
-    w_dfs = []
-    for wdf in tqdm(iter_dfs(EntC.WORKS, cols=["id", puby])):
-        w_dfs.append(
-            pl.from_pandas(
-                wdf.dropna()
-                .assign(id=lambda df: df["id"].pipe(parse_id))
-                .loc[lambda df: df["id"].isin(work_filter)],
-                schema_overrides={puby: pl.UInt16},
-            )
-        )
 
-    full_ywdf = pl.concat(w_dfs).sort("id")
-
-    lodfs = []
-
-    wlp = get_root(EntC.WORKS) / "locations.csv.gz"
-    for lodfr in tqdm(
-        pd.read_csv(wlp, chunksize=500_000, usecols=["parent_id", "source"])
-    ):
-
-        lodfs.append(
-            pl.from_pandas(lodfr.dropna().apply(parse_id))
-            .rename({"parent_id": "id"})
-            .join(full_ywdf, on="id")
-            .unique()
-            .join(
-                q_matched_df.rename({"id": "source"}), how="left", on=["source", puby]
-            )
-            .fill_null(5)
-        )
-
-    (
-        pl.concat(lodfs)
-        .drop(puby)
-        .with_columns(pl.col("best_q").replace(0, 5))
-        .sort("best_q")
-        .unique("id", keep="first")
-        .to_pandas()
-        .to_csv(get_root(EntC.WORKS) / f"{ComC.QS}.csv.gz", index=False)
-    )
+#     w_dfs = []
+#     for wdf in tqdm(iter_dfs(EntC.WORKS, cols=["id", PUBY])):
+#         w_dfs.append(
+#             pl.from_pandas(
+#                 wdf.dropna()
+#                 .assign(id=lambda df: df["id"].pipe(parse_id))
+#                 .loc[lambda df: df["id"].isin(work_filter)],
+#                 schema_overrides={PUBY: pl.UInt16},
+#             )
+#         )
+#
+#     full_ywdf = pl.concat(w_dfs).sort("id")
+#
+#     lodfs = []
+#
+#     wlp = get_root(EntC.WORKS) / "locations.csv.gz"
+#     for lodfr in tqdm(
+#         pd.read_csv(wlp, chunksize=500_000, usecols=["parent_id", "source"])
+#     ):
+#
+#         lodfs.append(
+#             pl.from_pandas(lodfr.dropna().apply(parse_id))
+#             .rename({"parent_id": "id"})
+#             .join(full_ywdf, on="id")
+#             .unique()
+#             .join(
+#                 q_matched_df.rename({"id": "source"}), how="left", on=["source", PUBY]
+#             )
+#             .fill_null(5)
+#         )
+#
+#     (
+#         pl.concat(lodfs)
+#         .drop(PUBY)
+#         .with_columns(pl.col("best_q").replace(0, 5))
+#         .sort("best_q")
+#         .unique("id", keep="first")
+#         .to_pandas()
+#         .to_csv(get_csv_path(EntC.WORKS, ComC.QS), index=False)
+#     )

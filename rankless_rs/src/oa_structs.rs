@@ -2,9 +2,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::{
-    add_strict_parsed_id_traits,
-    common::{field_id_parse, oa_id_parse, BigId, IdStruct, ParsedId},
+    add_parent_parsed_id_traits, add_parsed_id_traits, add_strict_parsed_id_traits,
+    common::{field_id_parse, oa_id_parse, short_string_to_u64, ParsedId},
 };
+
+use dmove::BigId;
 
 macro_rules! add_id_traits {
     ($($struct:ident),*) => {
@@ -28,6 +30,10 @@ pub trait IdTrait {
     fn get_id(&self) -> String;
 }
 
+pub trait Named {
+    fn get_name(&self) -> String;
+}
+
 add_id_traits!(
     Author,
     Concept,
@@ -40,12 +46,25 @@ add_id_traits!(
     SubField
 );
 
-add_strict_parsed_id_traits!(Institution);
+add_strict_parsed_id_traits!(Institution, Work, NamedEntity);
+add_parsed_id_traits!(IdStruct);
+add_parent_parsed_id_traits!(ReferencedWork, WorkTopic);
 
 impl<T: IdTrait> IdTrait for IdCountDecorated<T> {
     fn get_id(&self) -> String {
         self.child.get_id()
     }
+}
+
+#[derive(Deserialize)]
+pub struct IdStruct {
+    pub id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct NamedEntity {
+    id: String,
+    pub display_name: String,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -229,12 +248,12 @@ pub struct Work {
     doi: Option<String>,
     title: Option<String>,
     display_name: Option<String>,
-    publication_year: Option<u16>,
+    pub publication_year: Option<u16>,
     publication_date: Option<String>,
     #[serde(rename = "type")]
-    work_type: Option<String>,
+    pub work_type: Option<String>,
     cited_by_count: Option<u64>,
-    is_retracted: Option<bool>,
+    pub is_retracted: Option<bool>,
     is_paratext: Option<bool>,
     // #[serde(deserialize_with = "deserialize_list_of_strings", skip_serializing)]
     // pub related_works: Option<Vec<RelatedWork>>,
@@ -331,6 +350,30 @@ impl ParsedId for FieldLike {
     }
 }
 
+impl ParsedId for Geo {
+    fn get_parsed_id(&self) -> BigId {
+        short_string_to_u64(&self.country_code.clone().unwrap_or("".to_string()))
+    }
+}
+
+impl Named for NamedEntity {
+    fn get_name(&self) -> String {
+        self.display_name.clone()
+    }
+}
+
+impl Named for FieldLike {
+    fn get_name(&self) -> String {
+        self.display_name.clone()
+    }
+}
+
+impl Named for Geo {
+    fn get_name(&self) -> String {
+        self.country.clone().unwrap_or("".to_string())
+    }
+}
+
 impl From<String> for ReferencedWork {
     fn from(value: String) -> Self {
         Self {
@@ -410,7 +453,7 @@ where
 }
 
 pub mod post {
-    use crate::add_strict_parsed_id_traits;
+    use crate::{add_parent_parsed_id_traits, add_strict_parsed_id_traits};
 
     use super::{oa_id_parse, BigId, Deserialize, IdTrait, ParsedId};
     use crate::common::field_id_parse;
@@ -442,16 +485,16 @@ pub mod post {
     #[derive(Deserialize, Debug)]
     pub struct Topic {
         pub id: String,
-        pub display_name: String,
+        // pub display_name: String,
         pub subfield: String,
-        pub field: String,
-        pub domain: String,
+        // pub field: String,
+        // pub domain: String,
     }
 
     #[derive(Deserialize, Debug)]
     pub struct SubField {
         pub id: String,
-        pub display_name: String,
+        // pub display_name: String,
         pub field: String,
     }
 
@@ -463,4 +506,6 @@ pub mod post {
             field_id_parse(&self.id)
         }
     }
+
+    add_parent_parsed_id_traits!(Location, Authorship);
 }

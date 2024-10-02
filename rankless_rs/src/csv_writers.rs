@@ -6,6 +6,7 @@ use std::io::{self, BufRead, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use tqdm::Iter;
 
+use crate::common::Stowage;
 use crate::oa_structs::{
     Ancestor, AssociatedInstitution, Author, Authorship, Biblio, Concept, FieldLike, Geo,
     IdCountDecorated, IdTrait, Institution, Location, OpenAccess, Publisher, RelatedConcept,
@@ -202,7 +203,8 @@ fn deserialize_verbose<T: DeserializeOwned>(s: &str) -> T {
     }
 }
 
-pub fn write_csvs(in_root_str: &str, out_root_str: &str) -> io::Result<()> {
+pub fn write_csvs(in_root_str: &str, stowage: &Stowage) -> io::Result<()> {
+    let out_root_str = &stowage.get_out_csv_path();
     macwrite!(
         in_root_str,
         out_root_str,

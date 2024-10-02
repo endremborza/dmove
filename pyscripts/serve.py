@@ -1,11 +1,8 @@
 import os
 from http.server import HTTPServer, SimpleHTTPRequestHandler, test
 
-from dotenv import load_dotenv
-
+from .common import serve_path
 from .merge_files import suffix
-
-load_dotenv()
 
 
 class CORSRequestHandler(SimpleHTTPRequestHandler):
@@ -24,7 +21,6 @@ class CORSRequestHandler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    serve_path = os.environ["OA_ROOT"] + "/pruned-cache"
     print(f"serving {serve_path}")
 
     pre_dir = os.getcwd()

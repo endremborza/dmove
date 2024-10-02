@@ -6,6 +6,7 @@ S3_LOC := s3://tmp-borza-public-cyx/$(QV)
 TEST_DIR := /tmp/dmove-test
 ACT_OA_ROOT := $(OA_ROOT)
 ACT_OA_SNAPSHOT := $(OA_SNAPSHOT)
+RANKLESS_ENV = full
 
 export
 
@@ -14,12 +15,19 @@ hello:
 
 download-snapshot:
 	aws s3 sync "s3://openalex" $(OA_SNAPSHOT) --no-sign-request
+	# aws s3 sync "s3://openalex" /volume2/alpha-share-solid/oa-snapshot-2024-09 --no-sign-request
 
 to-csv: 
 	cargo run --release -p rankless-rs -- $@ $(ACT_OA_ROOT) $(ACT_OA_SNAPSHOT)/data
 
-filter make-ids fix-atts var-atts build-qcs prune-qcs agg-qcs packet-qcs:
+
+filter entity_mapping init_atts derive_links1 derive_links2:
+	export RANKLESS_ENV
 	cargo run --release -p rankless-rs -- $@ $(ACT_OA_ROOT) 
+
+run-server:
+	export RANKLESS_ENV
+	cargo run --release -p rankless-server -- $@ $(ACT_OA_ROOT) 
 
 serve extend_csvs post_agg common:
 	export ACT_OA_ROOT=$(ACT_OA_ROOT)
@@ -39,13 +47,16 @@ micro-%: ACT_OA_SNAPSHOT = $(OA_TEST_ROOT)/micro-snapshot
 
 nano-%: ACT_OA_ROOT = $(OA_TEST_ROOT)/nano-root
 nano-%: ACT_OA_SNAPSHOT = $(OA_TEST_ROOT)/nano-snapshot
+nano-%: RANKLESS_ENV = nano
 
-complete: common to-csv filter extend_csvs make-ids fix-atts var-atts build-qcs prune-qcs agg-qcs #post_agg
+complete: common to-csv filter extend_csvs entity_mapping init_atts derive_links1 derive_links2 #post_agg
 	@echo Complete
 
 mini-test: nuke complete
 micro-test: nuke complete
 nano-test: nuke complete
+
+nano-server: run-server
 
 
 profile:
@@ -60,12 +71,11 @@ profile:
 nuke:
 	rm -rf $(ACT_OA_ROOT)
 
-clean-keys:
-	rm -rf $(OA_ROOT)/key-stores
-
 clean-filters:
 	rm -rf $(OA_ROOT)/filter-steps
 
 clean-cache:
 	rm -rf $(OA_ROOT)/cache
 
+quiet-build:
+	RUSTFLAGS="$RUSTFLAGS -A dead_code -A non_snake_case -A unused_variables" cargo build

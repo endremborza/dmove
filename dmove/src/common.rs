@@ -1,45 +1,125 @@
 use std::{
-    collections::HashSet,
     fs::File,
     io::{self, Write},
     path::PathBuf,
     rc::Rc,
     sync::Arc,
-    u8,
 };
+
+use dmove_macro::{def_me_struct, derive_meta_trait};
+use hashbrown::HashSet;
+
+use crate::FixedAttributeElement;
 
 pub const MAX_BUF: usize = 0x1000;
 pub const MAX_NUMBUF: usize = 0x10;
 
 const PACK_NAME: &'static str = "dmove";
-pub const BASIC_TRAIT: &'static str = "Entity";
-pub const LINK_TRAIT: &'static str = "Link";
+
+pub type BigId = u64;
 
 pub struct MainBuilder {
-    pub struct_defs: Vec<String>,
-    pub prefix_imports: HashSet<String>,
+    pub meta_elems: Vec<MetaElem>,
+    pub definables: HashSet<String>,
     pub parent_root: PathBuf,
 }
 
-pub struct MetaInput<T> {
-    pub n: usize,
-    pub type_overwrite: Option<String>,
-    //TODO: make a kind that overwrites possibly string to cat, based on nunique
-    pub meta_lines_input: T,
+pub trait BackendLoading<E>
+where
+    E: Entity,
+{
+    fn load_backend(path: &PathBuf) -> Self;
 }
 
+pub trait EntityMutableMapperBackend<E, MM>
+where
+    E: Entity + MappableEntity<MM>,
+{
+    fn get_via_mut(&mut self, k: &E::KeyType) -> Option<E::T>;
+}
+
+pub trait EntityImmutableMapperBackend<E, MM>
+where
+    E: Entity + MappableEntity<MM>,
+{
+    fn get_via_immut(&self, k: &E::KeyType) -> Option<E::T>;
+    //TODO: offer unsafe/unchecked, faster options
+}
+
+pub trait EntityImmutableRefMapperBackend<E, MM>
+where
+    E: Entity + MappableEntity<MM>,
+{
+    fn get_ref_via_immut(&self, k: &E::KeyType) -> Option<&E::T>;
+    //TODO: offer unsafe/unchecked, faster options
+}
+
+pub trait EntityMutablIterateLinksBackend<E, I>
+where
+    E: Entity,
+{
+    fn links(&mut self) -> Option<E::T>;
+}
+
+def_me_struct!();
+
+#[derive_meta_trait]
 pub trait Entity {
     type T;
-    type FullT;
     const N: usize;
     const NAME: &'static str;
 }
 
-pub trait Link<S: Entity, T: Entity>: Entity {}
-
-pub trait TargetGetter<S: Entity, T: Entity>: Entity {
-    fn get(i: <Self as Entity>::T) -> <T as Entity>::T;
+#[derive_meta_trait]
+pub trait NamespacedEntity: Entity {
+    const NS: &str;
 }
+
+#[derive_meta_trait]
+pub trait MappableEntity<Marker>: Entity {
+    //mapped usize with Self marker means compact entity, currently
+    type KeyType;
+}
+
+#[derive_meta_trait]
+pub trait VariableSizeAttribute: Entity {
+    type SizeType: ByteArrayInterface + UnsignedNumber;
+    // type LargestBuffer;
+    // const LARGEST: usize;
+    // on non inmemory thing: have type for offset (with divisor divided)
+    // store largest size, so that it can be read without vec
+}
+
+#[derive_meta_trait]
+pub trait FixedSizeAttribute: Entity
+where
+    <Self as Entity>::T: FixedAttributeElement,
+{
+}
+
+#[derive_meta_trait]
+pub trait Link: Entity {
+    type Source: Entity;
+    type Target: Entity;
+}
+
+#[derive_meta_trait]
+pub trait UnitLinkAttribute: Entity + Link {}
+
+#[derive_meta_trait]
+pub trait PluraLinkAttribute: Entity + Link {}
+
+// pub trait HierarchalEntityElement: Iterator<Item = Self::ChildType> {
+//     //sometimes reference
+//     //iteration might be enogh :/
+//     type ChildType;
+// }
+
+//LinkCompactEntityToData
+//LinkDataToCompactEntity
+//LinkDataToCompactEntities
+//LinkCompactEntitiesToData
+//LinkCompactEntit(ies)ToData(andCompactEntity(es))
 
 pub trait ByteArrayInterface {
     fn to_bytes(&self) -> Box<[u8]>;
@@ -49,17 +129,11 @@ pub trait ByteArrayInterface {
 pub trait UnsignedNumber {
     fn to_usize(&self) -> usize;
     fn from_usize(n: usize) -> Self;
+    fn cast_big_id(n: BigId) -> Self;
+    fn lift(&self) -> Self;
 }
 
-pub trait SomeElement<Marker> {
-    type MetaInputType;
-    fn main_trait() -> &'static str;
-    fn trait_impl_innards(_i: Self::MetaInputType) -> Vec<[String; 2]> {
-        Vec::new()
-    }
-}
-
-pub trait MetaIntegrator<T: SomeElement<Self>>
+pub trait MetaIntegrator<T>
 where
     Self: Sized,
 {
@@ -67,12 +141,13 @@ where
 
     fn add_elem(&mut self, e: &T);
 
-    fn post(self) -> MetaInput<T::MetaInputType>;
+    fn post(self, _builder: &mut MainBuilder) {}
 
     fn add_elem_owned(&mut self, e: T) {
         self.add_elem(&e)
     }
 
+    //adding just one in the body of an iteration is a limit
     fn add_iter<'a, I>(builder: &mut MainBuilder, elems: I, name: &str)
     where
         I: Iterator<Item = &'a T>,
@@ -96,92 +171,66 @@ where
         let mut s = Self::setup(builder, name);
         for e in elems {
             c(&mut s, e);
-            // s.add_elem(e);
         }
-        let meta_input = s.post();
-
-        let type_name = meta_input.type_overwrite.unwrap_or(get_type_name::<T>());
-
-        builder.struct_defs.push(Self::get_meta_lines(
-            name,
-            &type_name,
-            meta_input.n,
-            meta_input.meta_lines_input,
-        ));
-        builder.prefix_imports.insert(T::main_trait().to_string());
-    }
-
-    fn get_meta_lines(
-        entity_name: &str,
-        type_name: &str,
-        n: usize,
-        lines_input: T::MetaInputType,
-    ) -> String {
-        let camel_entity = camel_case(entity_name);
-
-        let mut blocks = vec![
-            format!("pub struct {};", camel_entity),
-            format!(
-                "impl {} for {} {{
-    type T = {};
-    const N: usize = {};
-    type FullT = [{}; {}];
-    const NAME: &'static str = \"{}\";
-}}",
-                BASIC_TRAIT, camel_entity, type_name, n, type_name, n, entity_name
-            ),
-        ];
-        let trait_name = T::main_trait();
-        if trait_name != BASIC_TRAIT {
-            let spec_innards = T::trait_impl_innards(lines_input)
-                .iter()
-                .map(|e| format!("    {} = {};", e[0], e[1]))
-                .collect::<Vec<String>>()
-                .join("\n");
-
-            blocks.push(format!(
-                "impl {} for {} {{{}}}",
-                trait_name, camel_entity, spec_innards
-            ));
-        }
-        blocks.join("\n\n")
+        s.post(builder);
     }
 }
 
 impl MainBuilder {
     pub fn new(parent_root: &PathBuf) -> Self {
-        let mut prefix_imports = HashSet::new();
-        prefix_imports.insert(BASIC_TRAIT.to_string());
         Self {
             parent_root: parent_root.to_path_buf(),
-            struct_defs: Vec::new(),
-            prefix_imports,
+            meta_elems: Vec::new(),
+            definables: HashSet::new(),
         }
     }
 
+    pub fn add_simple_etrait(&mut self, name: &str, type_name: &str, n: usize) -> String {
+        let camel_name = camel_case(&name);
+        self.meta_elems
+            .push(EntityTraitMeta::meta(&camel_name, type_name, n, name));
+        self.meta_elems
+            .push(MappableEntityTraitMeta::meta(&camel_name, "Self", "usize"));
+        self.definables.insert(camel_name.clone());
+        camel_name
+    }
+
+    pub fn add_scaled_compact_entity(&mut self, name: &str, n: usize) -> String {
+        self.add_simple_etrait(name, &get_uscale(n), n)
+    }
+
+    pub fn declare_ns(&mut self, name: &str, ns: &str) {
+        self.meta_elems
+            .push(NamespacedEntityTraitMeta::meta(&camel_case(name), ns))
+    }
+
+    pub fn declare_link<S, T>(&mut self, name: &str) {
+        self.meta_elems.push(LinkTraitMeta::meta(
+            &camel_case(name),
+            &get_type_name::<S>(),
+            &get_type_name::<T>(),
+        ))
+    }
+
     pub fn write_code(&self, path: &str) -> io::Result<usize> {
+        let mut imports: HashSet<String> = HashSet::new();
+        self.meta_elems.iter().for_each(|me| {
+            me.importables.iter().for_each(|i| {
+                imports.insert(i.clone());
+            })
+        });
         let mut all_defs = vec![format!(
             "use {}::{{{}}};",
             PACK_NAME,
-            self.prefix_imports
-                .iter()
-                .map(|e| e.to_owned())
-                .collect::<Vec<String>>()
-                .join(", ")
+            imports.into_iter().collect::<Vec<String>>().join(", ")
         )];
-        all_defs.extend(self.struct_defs.clone());
+        all_defs.extend(
+            self.definables
+                .iter()
+                .map(|e| format!("pub struct {} {{ }}", e)),
+        );
+        all_defs.extend(self.meta_elems.iter().map(|e| e.impl_str.clone()));
         File::create(path)?.write(&all_defs.join("\n\n").into_bytes())
-    }
-
-    pub fn declare_link<S: Entity, T: Entity>(&mut self, name: &str) {
-        self.prefix_imports.insert(LINK_TRAIT.to_string());
-        self.struct_defs.push(format!(
-            "impl {}<{},{}> for {} {{}}",
-            LINK_TRAIT,
-            get_type_name::<S>(),
-            get_type_name::<T>(),
-            camel_case(name)
-        ))
     }
 }
 
@@ -195,14 +244,19 @@ impl ByteArrayInterface for String {
     }
 }
 
-impl<S, T, A> TargetGetter<S, T> for A
+impl<F, L> ByteArrayInterface for (F, L)
 where
-    A: Link<S, T> + Entity<T = <T as Entity>::T>,
-    T: Entity,
-    S: Entity,
+    F: Sized + ByteArrayInterface,
+    L: ByteArrayInterface,
 {
-    fn get(i: <Self as Entity>::T) -> <T as Entity>::T {
-        i
+    fn to_bytes(&self) -> Box<[u8]> {
+        let mut o = self.0.to_bytes().to_vec();
+        o.extend(self.1.to_bytes());
+        o.into()
+    }
+    fn from_bytes(buf: &[u8]) -> Self {
+        let fsize = size_of::<F>();
+        (F::from_bytes(&buf[..fsize]), L::from_bytes(&buf[fsize..]))
     }
 }
 
@@ -234,21 +288,6 @@ macro_rules! iter_ba_impl {
     };
 }
 
-#[macro_export]
-macro_rules! some_elem_impl {
-    ($builder:ident, $elem_trait:ident, $trait:ident) => {
-        impl<T> SomeElement<$builder> for T
-        where
-            T: $elem_trait,
-        {
-            type MetaInputType = ();
-            fn main_trait() -> &'static str {
-                stringify!($trait)
-            }
-        }
-    };
-}
-
 macro_rules! uint_impl {
      ($($t:ty),*) => {
         $(impl UnsignedNumber for $t {
@@ -258,6 +297,14 @@ macro_rules! uint_impl {
 
             fn to_usize(&self) -> usize {
                 *self as usize
+            }
+
+            fn cast_big_id(n: BigId) -> Self {
+                n as Self
+            }
+
+            fn lift(&self) -> Self {
+                *self
             }
         })*
     };
@@ -306,7 +353,8 @@ pub fn get_uscale(n: usize) -> String {
     "u128".to_string()
 }
 
-fn get_type_name<T>() -> String {
+pub fn get_type_name<T>() -> String {
+    //needs to import it if it is from this lib
     clean_name(std::any::type_name::<T>().to_string())
 }
 
@@ -353,10 +401,11 @@ fn clean_name(base_name: String) -> String {
         clean_blocks.push(clean_elem);
     }
 
-    if clean_blocks[0] == "alloc" {
+    let root = &clean_blocks[0];
+    if root == "alloc" || root == PACK_NAME {
         return clean_blocks.last().unwrap().to_string();
     }
-    if clean_blocks.len() > 1 {
+    if clean_blocks.len() > 1 && root != "std" {
         clean_blocks[0] = "crate".to_string();
     }
     clean_blocks.join("::").to_string()

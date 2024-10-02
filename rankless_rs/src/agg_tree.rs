@@ -1,6 +1,5 @@
 use core::panic;
 use std::collections::BinaryHeap;
-use std::ops::AddAssign;
 
 use dmove::{Entity, EntityImmutableRefMapperBackend, MappableEntity, UnsignedNumber};
 use hashbrown::HashMap;
@@ -8,8 +7,8 @@ use hashbrown::HashMap;
 use crate::common::{BackendSelector, IterCompactElement, QuickestBox, QuickestVBox, Stowage};
 use crate::gen_derived_links1::{WorkInstitutions, WorkSubfields, WorksCiting};
 use crate::gen_derived_links2::AuthorWorks;
+use crate::gen_entity_mapping::{Authors, Subfields, Topics, Works};
 use crate::gen_init_links::{TopicSubfields, WorkTopics, WorkYears};
-use crate::gen_init_units::{Authors, Subfields, Topics, Works};
 
 struct AggTreePrep<PrepT, ChildPrepT> {
     pub id: usize,
@@ -75,14 +74,11 @@ impl ManualAuthorTree1 {
     }
 }
 
-type R0TT = (u8, (u8, (u8, (u16, (u16, u16)))));
-
 type R0T = (u8, u8, u8, u16, u16, u16);
 type R1T = (u8, u8, u16, u16, u16);
 type R2T = (u8, u16, u16, u16);
 type R3T = (u16, u16, u16);
 type R4T = (u16, u16);
-// type R5T = Box<[u16]>;
 type R5T = u16;
 
 enum LeftRightOrderedTableBlock {
@@ -153,14 +149,26 @@ where
     }
 }
 
+impl<T, CT> AggTreePrep<T, CT> {
+    fn new_prepped(id: usize, prep: T) -> Self {
+        Self {
+            id,
+            children: Vec::new(),
+            prep,
+        }
+    }
+}
+
 type PreCollapseBlock = (<Works as Entity>::T, Vec<<Works as Entity>::T>);
 type PreCollapsePrep = Vec<PreCollapseBlock>;
-// type PostCollapsePrep = HashMap<<Works as Entity>::T, usize>;
+
 type PostCollapsePrep = LevelAgg;
+
 type PostCollapseAggTree = AggTreePrep<PostCollapsePrep, PostCollapsePrep>;
 type PreCollapseAggTree = AggTreePrep<PreCollapsePrep, PostCollapsePrep>;
 
 type PrepStack = (
+    PostCollapseAggTree,
     PreCollapseAggTree,
     PreCollapseAggTree,
     PreCollapseAggTree,
@@ -198,55 +206,76 @@ impl LeftRightOrderedTable {
     fn to_agg_tree_prep(self, id: usize) -> PostCollapseAggTree {
         use LeftRightOrderedTableBlock::*;
         //this is post because year is toOne on referenced
-        let mut root = PostCollapseAggTree::new(id);
         let mut self_iterator = self.0.into_vec().into_iter();
         let mut prep_stack =
             if let LeftRightOrderedTableBlock::New1(rec) = self_iterator.next().unwrap() {
-                new_stack_from_new1(rec)
+                (
+                    PostCollapseAggTree::new(id),
+                    PreCollapseAggTree::new(rec.0.to_usize()),
+                    PreCollapseAggTree::new(rec.1.to_usize()),
+                    PreCollapseAggTree::new(rec.2.to_usize()),
+                    PreCollapseAggTree::new_prepped(rec.3.to_usize(), vec![(rec.4, vec![rec.5])]),
+                )
             } else {
                 panic!("bad first row");
             };
         for block in self_iterator {
             match block {
                 New1(rec) => {
-                    let collapsed = consume_pre_collapse(prep_stack.2, prep_stack.3);
-                    let pre_collapsed = consume_pre_collapse(prep_stack.1, collapsed);
-                    let pre_pre_collapsed = consume_pre_collapse(prep_stack.0, pre_collapsed);
-
-                    root.children.push(collapse(pre_pre_collapsed));
+                    consume_full_rec(&mut prep_stack, rec);
                     //pack up all stacks to one
                     //if breakdown level is toOne kind from either refed or citing
-                    // new_stack_from_new1(rec)
+                    //that is why root is post thing and that is why we can just push
+                    //but push should also increase counts and change post prep things
+                    //so post should ingest the same way
                 }
                 New2(rec) => {
-                    let mut new_last = PreCollapseAggTree::new(rec.2.to_usize());
-                    add_rec(&mut new_last.prep, (rec.3, rec.4));
-                    let collapsed = consume_pre_collapse(prep_stack.2, prep_stack.3);
+                    let last = std::mem::replace(
+                        &mut prep_stack.4,
+                        PreCollapseAggTree::new_prepped(
+                            rec.2.to_usize(),
+                            vec![(rec.3, vec![rec.4])],
+                        ),
+                    );
+                    consume_pre_collapse(&mut prep_stack.3, last);
 
-                    let new_pre_last = PreCollapseAggTree::new(rec.1.to_usize());
-                    let pre_collapsed = consume_pre_collapse(prep_stack.1, collapsed);
+                    let plast = std::mem::replace(
+                        &mut prep_stack.3,
+                        PreCollapseAggTree::new(rec.1.to_usize()),
+                    );
+                    consume_pre_collapse(&mut prep_stack.2, plast);
 
-                    let new_pre_pre_last = PreCollapseAggTree::new(rec.0.to_usize());
-                    let pre_pre_collapsed = consume_pre_collapse(prep_stack.0, pre_collapsed);
-
-                    // (pre_pre_collapsed, new_pre_pre_last, new_pre_last, new_last)
+                    let pplast = std::mem::replace(
+                        &mut prep_stack.2,
+                        PreCollapseAggTree::new(rec.0.to_usize()),
+                    );
+                    consume_pre_collapse(&mut prep_stack.1, pplast);
                 }
                 New3(rec) => {
-                    let mut new_last = PreCollapseAggTree::new(rec.1.to_usize());
-                    add_rec(&mut new_last.prep, (rec.2, rec.3));
-                    let collapsed = consume_pre_collapse(prep_stack.2, prep_stack.3);
+                    let last = std::mem::replace(
+                        &mut prep_stack.4,
+                        PreCollapseAggTree::new_prepped(
+                            rec.1.to_usize(),
+                            vec![(rec.2, vec![rec.3])],
+                        ),
+                    );
+                    consume_pre_collapse(&mut prep_stack.3, last);
 
-                    let new_pre_last = PreCollapseAggTree::new(rec.0.to_usize());
-                    let pre_collapsed = consume_pre_collapse(prep_stack.1, collapsed);
-
-                    // (prep_stack.0, pre_collapsed, new_pre_last, new_last)
+                    let plast = std::mem::replace(
+                        &mut prep_stack.3,
+                        PreCollapseAggTree::new(rec.0.to_usize()),
+                    );
+                    consume_pre_collapse(&mut prep_stack.2, plast);
                 }
                 New4(rec) => {
-                    let mut new_last = PreCollapseAggTree::new(rec.0.to_usize());
-                    add_rec(&mut new_last.prep, (rec.1, rec.2));
-
-                    std::mem::swap(&mut prep_stack.3, &mut new_last);
-                    consume_pre_collapse(&mut prep_stack.2, new_last);
+                    let last = std::mem::replace(
+                        &mut prep_stack.4,
+                        PreCollapseAggTree::new_prepped(
+                            rec.0.to_usize(),
+                            vec![(rec.1, vec![rec.2])],
+                        ),
+                    );
+                    consume_pre_collapse(&mut prep_stack.3, last);
                 }
                 New5(rec) => {
                     add_rec(&mut prep_stack.3.prep, rec);
@@ -257,31 +286,41 @@ impl LeftRightOrderedTable {
                 }
             };
         }
-        root
+        consume_full_rec(&mut prep_stack, (0, 0, 0, 0, 0, 0));
+        prep_stack.0
     }
 }
 
-fn new_stack_from_new1(rec: R0T) -> PrepStack {
-    let mut new_last = PreCollapseAggTree::new(rec.3.to_usize());
-    add_rec(&mut new_last.prep, (rec.4, rec.5));
-    (
-        PreCollapseAggTree::new(rec.0.to_usize()),
-        // PostCollapseAggTree::new(rec.0.to_usize()),
-        PreCollapseAggTree::new(rec.1.to_usize()),
-        PreCollapseAggTree::new(rec.2.to_usize()),
-        new_last,
-    )
+fn consume_full_rec(prep_stack: &mut PrepStack, rec: R0T) {
+    let last = std::mem::replace(
+        &mut prep_stack.4,
+        PreCollapseAggTree::new_prepped(rec.3.to_usize(), vec![(rec.4, vec![rec.5])]),
+    );
+    consume_pre_collapse(&mut prep_stack.3, last);
+
+    let plast = std::mem::replace(&mut prep_stack.3, PreCollapseAggTree::new(rec.2.to_usize()));
+    consume_pre_collapse(&mut prep_stack.2, plast);
+
+    let pplast = std::mem::replace(&mut prep_stack.2, PreCollapseAggTree::new(rec.1.to_usize()));
+    consume_pre_collapse(&mut prep_stack.1, pplast);
+
+    let ppplast = std::mem::replace(&mut prep_stack.1, PreCollapseAggTree::new(rec.0.to_usize()));
+    consume_post_collapse(&mut prep_stack.0, ppplast);
 }
 
 fn add_rec(prep: &mut PreCollapsePrep, rec: R4T) {
     prep.push((rec.0, vec![rec.1]))
 }
 
+fn consume_post_collapse(tree: &mut PostCollapseAggTree, child: PreCollapseAggTree) {
+    tree.children.push(collapse(child));
+}
+
 fn consume_pre_collapse(tree: &mut PreCollapseAggTree, child: PreCollapseAggTree) {
     let mut child_prep = PostCollapsePrep::init_empty();
     let child_iter = child.prep.into_iter().map(|e| child_prep.ingest(e));
-    merge_sorted_iters(tree.prep, child_iter, |l, r| {
-        (l.0, merge_sorted_vecs(l.1, r.1))
+    merge_sorted_iter_into_vec(&mut tree.prep, child_iter, |l, r| {
+        merge_sorted_vecs(&mut l.1, r.1);
     });
 
     tree.children.push(PostCollapseAggTree {
@@ -306,43 +345,44 @@ fn collapse(tree: PreCollapseAggTree) -> PostCollapseAggTree {
 fn merge_sorted_iter_into_vec<RI, T, F>(left_vec: &mut Vec<T>, mut right_iter: RI, merging_fun: F)
 where
     T: PartialOrd,
-    F: Fn(T, T) -> T,
+    F: Fn(&mut T, T),
     RI: Iterator<Item = T>,
 {
-    let mut out = Vec::new();
-    'outer: while let (Some(mut left_elem), Some(mut right_elem)) =
-        (left_iter.next(), right_iter.next())
-    {
-        if left_elem == right_elem {
-            out.push(merging_fun(left_elem, right_elem));
+    //TODO: this needs testing
+    let mut i = 0;
+    let n = left_vec.len();
+    'outer: while let Some(mut right_elem) = right_iter.next() {
+        if i >= n {
+            break 'outer;
+        }
+        let mut left_elem = &mut left_vec[i];
+        if left_elem == &right_elem {
+            merging_fun(left_elem, right_elem);
+            i += 1;
             continue;
         }
-        while left_elem < right_elem {
-            out.push(left_elem);
-            left_elem = match left_iter.next() {
-                Some(e) => e,
-                None => break 'outer,
+        while left_elem < &mut right_elem {
+            i += 1;
+            if i >= n {
+                break 'outer;
             }
+            left_elem = &mut left_vec[i];
         }
-        while right_elem < left_elem {
-            out.push(right_elem);
-            right_elem = match right_iter.next() {
-                Some(e) => e,
-                None => break,
-            }
+        if &right_elem < left_elem {
+            left_vec.insert(i, right_elem);
         }
+        i += 1;
     }
-    for e in left_iter.chain(right_iter) {
-        out.push(e)
+    for e in right_iter {
+        left_vec.push(e)
     }
-    out
 }
 
-fn merge_sorted_vecs<T>(left: Vec<T>, right: Vec<T>) -> Vec<T>
+fn merge_sorted_vecs<T>(left: &mut Vec<T>, right: Vec<T>)
 where
     T: PartialOrd,
 {
-    merge_sorted_iters(left.into_iter(), right.into_iter(), |l, _r| l)
+    merge_sorted_iter_into_vec(left, right.into_iter(), |_l, _r| {})
 }
 
 fn map_ref<'a, E, IF, K>(interface: &'a IF, key: &K) -> &'a E::T

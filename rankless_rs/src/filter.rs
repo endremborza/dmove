@@ -1,39 +1,29 @@
-use std::{
-    fs::{read_dir, File},
-    io::{self, Read, Write},
-    path::PathBuf,
-};
+use std::io;
 
 use hashbrown::{HashMap, HashSet};
 use serde::{de::DeserializeOwned, Deserialize};
 
 use crate::{
-    add_strict_parsed_id_traits,
-    common::{oa_id_parse, BigId, ParsedId, Stowage},
+    common::{oa_id_parse, ParsedId, Stowage},
     csv_writers::{authors, institutions, sources, works},
     oa_structs::{
         post::{Author, Authorship, Location},
-        ReferencedWork,
+        ReferencedWork, Work,
     },
 };
 
+use dmove::BigId;
+
 pub const START_YEAR: u16 = 1950;
+// pub const START_YEAR: u16 = env!("START_YEAR").parse().unwrap();
+pub const FINAL_YEAR: u16 = 2024;
 
 const FIX_AUTHORS: [BigId; 3] = [5064297795, 5005839111, 5078032253];
 
-#[derive(Deserialize, Debug)]
-pub struct PersonAuthorship {
-    pub parent_id: String,
-    pub author: String,
-}
-
 #[derive(Deserialize)]
-pub struct SWork {
-    pub id: String,
-    is_retracted: bool,
-    #[serde(rename = "type")]
-    work_type: String,
-    pub publication_year: Option<u16>,
+struct PersonAuthorship {
+    author: String,
+    parent_id: String,
 }
 
 trait FilterBase {
@@ -58,8 +48,6 @@ trait FilterBase {
     fn iter_edges(&self) -> Vec<[String; 2]>;
 }
 
-add_strict_parsed_id_traits!(SWork);
-
 impl Authorship {
     pub fn iter_insts(&self) -> Vec<String> {
         if let Some(instids) = &self.institutions {
@@ -75,7 +63,7 @@ impl FilterBase for Authorship {
     }
 
     fn get_min() -> usize {
-        700
+        env!("MIN_PAPERS_FOR_INST").parse().unwrap()
     }
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
@@ -111,7 +99,7 @@ impl FilterBase for Location {
     }
 
     fn get_min() -> usize {
-        200
+        env!("MIN_PAPERS_FOR_SOURCE").parse().unwrap()
     }
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
@@ -148,55 +136,27 @@ impl FilterBase for PersonAuthorship {
     }
 }
 
-pub fn filter_setup(stowage: &Stowage) -> io::Result<()> {
-    single_filter(stowage, 10)?;
-    filter_step::<ReferencedWork>(stowage, [works::C, works::C], 11)?;
-    filter_step::<Location>(stowage, [sources::C, works::C], 12)?;
-    filter_step::<Authorship>(stowage, [institutions::C, works::C], 13)?;
-    filter_step::<PersonAuthorship>(stowage, [works::C, authors::C], 14)?;
-    author_filter(stowage, 20)
-}
-
-pub fn get_last_filter(stowage: &Stowage, entity_type: &str) -> Option<HashSet<u64>> {
-    let mut out = None;
-
-    if !stowage.entity_csvs.join(entity_type).exists() {
-        println!("no such type {}", entity_type);
-        return None;
-    }
-    let dirs = match read_dir(&stowage.filter_steps) {
-        Err(_) => vec![],
-        Ok(rdir) => {
-            let mut v: Vec<PathBuf> = rdir.map(|e| e.unwrap().path()).collect();
-            v.sort();
-            v
-        }
-    };
-    for edir in dirs {
-        let maybe_path = edir.join(entity_type);
-        if maybe_path.exists() {
-            out = Some(maybe_path);
-        }
-    }
-    match out {
-        Some(pb) => Some(read_filter_set(pb)),
-        None => None,
-    }
+pub fn main(stowage: Stowage) -> io::Result<()> {
+    single_filter(&stowage, 10)?;
+    filter_step::<ReferencedWork>(&stowage, [works::C, works::C], 11)?;
+    filter_step::<Location>(&stowage, [sources::C, works::C], 12)?;
+    filter_step::<Authorship>(&stowage, [institutions::C, works::C], 13)?;
+    filter_step::<PersonAuthorship>(&stowage, [works::C, authors::C], 14)?;
+    author_filter(&stowage, 20)
 }
 
 fn single_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
-    let out_root = stowage.get_filter_dir(step_id);
-    filter_write::<SWork, _>(stowage, works::C, &out_root, |o| {
-        !o.is_retracted
-            & (o.work_type == "article")
+    filter_write::<Work, _>(stowage, step_id, works::C, |o| {
+        !o.is_retracted.unwrap_or(false)
+            & (o.work_type.as_deref().unwrap_or("") == "article")
             & (o.publication_year.unwrap_or(0) > START_YEAR)
+            & (o.publication_year.unwrap_or(0) <= FINAL_YEAR)
     })?;
     Ok(())
 }
 
 fn author_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
-    let out_root = stowage.get_filter_dir(step_id);
-    filter_write::<Author, _>(stowage, authors::C, &out_root, |o| {
+    filter_write::<Author, _>(stowage, step_id, authors::C, |o| {
         FIX_AUTHORS.contains(&o.get_parsed_id())
             | ((o.cited_by_count.unwrap_or(0) >= 50000) & (o.works_count.unwrap_or(0) >= 200))
     })?;
@@ -205,22 +165,22 @@ fn author_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
 
 fn filter_write<T, F>(
     stowage: &Stowage,
+    step_id: u8,
     entity_type: &str,
-    out_root: &PathBuf,
     closure: F,
 ) -> io::Result<()>
 where
     T: for<'de> Deserialize<'de> + ParsedId,
     F: Fn(&T) -> bool,
 {
-    let mut file = File::create(&out_root.join(entity_type))?;
-
-    for o in stowage.read_csv_objs::<T>(entity_type, "main") {
-        if closure(&o) {
-            file.write_all(&o.get_parsed_id().to_be_bytes())?;
-        }
-    }
-    Ok(())
+    stowage.write_filter(
+        step_id,
+        entity_type,
+        stowage
+            .read_csv_objs::<T>(entity_type, "main")
+            .filter(|o| closure(&o))
+            .map(|o| o.get_parsed_id()),
+    )
 }
 
 fn olen<T>(o: &Option<HashSet<T>>) -> String {
@@ -232,18 +192,19 @@ fn olen<T>(o: &Option<HashSet<T>>) -> String {
 
 fn filter_step<T>(stowage: &Stowage, types: [&'static str; 2], step_id: u8) -> io::Result<()>
 where
-    T: FilterBase + DeserializeOwned + core::fmt::Debug,
+    T: FilterBase + DeserializeOwned,
 {
     let [source_type, target_type] = types;
-    let [source_set_o, target_set_o] = types.map(|t| get_last_filter(stowage, t));
+    let [source_set_o, target_set_o] = types.map(|t| stowage.get_last_filter(t));
 
     println!(
-        "filtering {:?} - {:?} --> {:?}. pre-filtered to {} pre-filtered to {}",
+        "filtering {:?} - {:?} --> {:?}. pre-filtered to {} pre-filtered to {}\nMIN: {}",
         step_id,
         source_type,
         target_type,
         olen(&source_set_o),
         olen(&target_set_o),
+        T::get_min(),
     );
 
     let mut source_map: HashMap<u64, HashSet<u64>> = HashMap::new();
@@ -275,45 +236,9 @@ where
         }
     }
 
-    let out_root = stowage.get_filter_dir(step_id);
     if T::filter_targets() {
-        write_ids(&out_root.join(target_type), &mut taken_targets.iter())?;
+        stowage.write_filter(step_id, target_type, &mut taken_targets.into_iter())?;
     }
-    write_ids(&out_root.join(source_type), &mut taken_sources.iter())?;
-
-    println!(
-        "{}  -  min: {:?}, max: {:?}, {:?}: {:?}, {:?}: {:?}\n\n",
-        step_id,
-        T::get_min(),
-        T::get_max(),
-        source_type,
-        taken_sources.len(),
-        target_type,
-        taken_targets.len()
-    );
+    stowage.write_filter(step_id, source_type, &mut taken_sources.into_iter())?;
     Ok(())
-}
-
-fn write_ids<'a, T>(fname: &PathBuf, id_iter: T) -> io::Result<()>
-where
-    T: Iterator<Item = &'a u64>,
-{
-    let mut file = File::create(fname)?;
-    for e in id_iter {
-        file.write_all(&e.to_be_bytes())?;
-    }
-    Ok(())
-}
-
-fn read_filter_set(pb: PathBuf) -> HashSet<u64> {
-    let mut out = HashSet::new();
-    let mut br: [u8; 8] = [0; std::mem::size_of::<u64>()];
-    let mut file = File::open(pb).unwrap();
-    loop {
-        if let Err(_e) = file.read_exact(&mut br) {
-            break;
-        }
-        out.insert(u64::from_be_bytes(br));
-    }
-    out
 }

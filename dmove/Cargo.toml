@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+dmove-macro = {path = "../dmove_macro"}
 flate2 = "1.0"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive", "rc"] }

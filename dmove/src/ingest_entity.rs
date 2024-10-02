@@ -1,17 +1,18 @@
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::PathBuf;
 
 use hashbrown::{HashMap, HashSet};
 
 use crate::common::{
-    get_uscale, Entity, MainBuilder, MetaInput, MetaIntegrator, SomeElement, BASIC_TRAIT,
+    get_type_name, BackendLoading, BigId, Entity, EntityMutableMapperBackend, MainBuilder,
+    MappableEntity, MappableEntityTraitMeta, MetaIntegrator, UnsignedNumber,
 };
-pub type BigId = u64;
 const ID_TYPE_SIZE: usize = std::mem::size_of::<BigId>();
 const ID_RECORD_SIZE: usize = ID_TYPE_SIZE * 2;
 
-pub type LoadedIdMap = HashMap<BigId, BigId>;
+pub type LoadedIdMap<T> = HashMap<BigId, T>;
 type IdRecord = [u8; ID_RECORD_SIZE];
 
 pub struct IdMap {
@@ -21,24 +22,64 @@ pub struct IdMap {
     pub current_non_null_count: u64,
 }
 
-pub struct IdMappedEntityBuilder {
+pub struct Data64MappedEntityBuilder {
     map: IdMap,
+    name: String,
 }
 
-pub struct EntityBuilder {
-    n: usize,
-}
-
-pub trait IdMappedEntity: Entity {
-    fn read(parent_dir: &PathBuf) -> IdMap {
-        IdMap::new(parent_dir.join(Self::NAME))
+impl<E> BackendLoading<E> for IdMap
+where
+    E: Entity,
+    <E as Entity>::T: UnsignedNumber,
+{
+    fn load_backend(path: &PathBuf) -> Self {
+        IdMap::new(path.join(E::NAME))
     }
 }
 
-impl MetaIntegrator<BigId> for IdMappedEntityBuilder {
+impl<E> BackendLoading<E> for Range<E::T>
+where
+    E: Entity,
+    <E as Entity>::T: UnsignedNumber,
+{
+    fn load_backend(_path: &PathBuf) -> Self {
+        let end = <E as Entity>::T::from_usize(<E as Entity>::N);
+        let start = <E as Entity>::T::from_usize(0);
+        Range { start, end }
+    }
+}
+
+impl<E> BackendLoading<E> for LoadedIdMap<E::T>
+where
+    E: Entity,
+    <E as Entity>::T: UnsignedNumber,
+{
+    fn load_backend(path: &PathBuf) -> Self {
+        <IdMap as BackendLoading<E>>::load_backend(path).to_map()
+    }
+}
+
+impl<E, MM> EntityMutableMapperBackend<E, MM> for IdMap
+where
+    E: MappableEntity<MM> + Entity,
+    <E as Entity>::T: UnsignedNumber,
+    for<'a> &'a BigId: From<&'a <E as MappableEntity<MM>>::KeyType>,
+{
+    fn get_via_mut(&mut self, k: &E::KeyType) -> Option<E::T> {
+        match self.get(k.into()) {
+            Some(v) => Some(E::T::cast_big_id(v)),
+            None => None,
+        }
+    }
+}
+
+impl MetaIntegrator<BigId> for Data64MappedEntityBuilder {
     fn setup(builder: &MainBuilder, name: &str) -> Self {
         let map = IdMap::new(builder.parent_root.join(name));
-        Self { map }
+        Self {
+            map,
+            name: name.to_string(),
+        }
     }
 
     fn add_elem(&mut self, e: &BigId) {
@@ -49,47 +90,16 @@ impl MetaIntegrator<BigId> for IdMappedEntityBuilder {
         self.map.push(e);
     }
 
-    fn post(mut self) -> MetaInput<()> {
+    fn post(mut self, builder: &mut MainBuilder) {
         self.map.extend();
         let n = self.map.current_non_null_count as usize + 1;
-        MetaInput {
-            n,
-            type_overwrite: Some(get_uscale(n)),
-            meta_lines_input: (),
-        }
-    }
-}
-
-impl MetaIntegrator<usize> for EntityBuilder {
-    fn setup(_builder: &MainBuilder, _name: &str) -> Self {
-        Self { n: 0 }
-    }
-
-    fn add_elem(&mut self, _e: &usize) {
-        self.n += 1;
-    }
-
-    fn post(self) -> MetaInput<()> {
-        let n = self.n;
-        MetaInput {
-            n,
-            type_overwrite: Some(get_uscale(n)),
-            meta_lines_input: (),
-        }
-    }
-}
-
-impl SomeElement<IdMappedEntityBuilder> for BigId {
-    type MetaInputType = ();
-    fn main_trait() -> &'static str {
-        stringify!(IdMappedEntity)
-    }
-}
-
-impl SomeElement<EntityBuilder> for usize {
-    type MetaInputType = ();
-    fn main_trait() -> &'static str {
-        BASIC_TRAIT
+        let camel_name = builder.add_scaled_compact_entity(&self.name, n);
+        let mappable_type = get_type_name::<BigId>();
+        builder.meta_elems.push(MappableEntityTraitMeta::meta(
+            &camel_name,
+            &mappable_type,
+            &mappable_type,
+        ));
     }
 }
 
@@ -101,6 +111,7 @@ impl IdMap {
     {
         let map_buffer = PathBuf::from(id_map_path);
         let mut current_non_null_count: u64 = 0;
+        println!("reading/writing {:?}", map_buffer);
         if !map_buffer.is_file() {
             File::create(&map_buffer).unwrap();
         } else {
@@ -195,15 +206,19 @@ impl IdMap {
         start..self.current_non_null_count + 1
     }
 
-    pub fn to_map(&self) -> LoadedIdMap {
+    pub fn to_map<T>(&self) -> LoadedIdMap<T>
+    where
+        T: UnsignedNumber,
+    {
         let mut record_buffer = [0; ID_RECORD_SIZE];
         let mut br = BufReader::new(File::open(&self.map_buffer).unwrap());
         let mut out = HashMap::new();
         loop {
             if let Ok(_) = br.read_exact(&mut record_buffer) {
+                let val64 = BigId::from_be_bytes(record_buffer[ID_TYPE_SIZE..].try_into().unwrap());
                 out.insert(
                     BigId::from_be_bytes(record_buffer[..ID_TYPE_SIZE].try_into().unwrap()),
-                    BigId::from_be_bytes(record_buffer[ID_TYPE_SIZE..].try_into().unwrap()),
+                    T::cast_big_id(val64),
                 );
             } else {
                 break;
