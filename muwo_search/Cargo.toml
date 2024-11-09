@@ -1,0 +1,8 @@
+[package]
+name = "muwo-search"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+deunicode = "1.6.0"
+triple_accel = "0.4"
