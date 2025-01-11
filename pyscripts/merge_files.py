@@ -6,8 +6,7 @@ from itertools import groupby
 from pathlib import Path
 
 import brotli
-
-from .common import oa_root
+from ccl_science_data.common import oa_root
 
 merged_builds = Path(oa_root, "merged-cache", "qc-builds")
 

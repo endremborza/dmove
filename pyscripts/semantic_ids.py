@@ -3,17 +3,17 @@ import re
 from string import ascii_lowercase
 
 import pandas as pd
-from unidecode import unidecode
-
-from .common import (
+from ccl_science_data.common import (
     DN,
+    ComC,
+    EntC,
+    StowC,
     get_filtered_main_df,
     load_map,
-    oa_persistent,
     oa_root,
     read_p_gz,
 )
-from .rust_gen import ComC, EntC, StowC
+from unidecode import unidecode
 
 
 def to_name_dic(df, k, entity_type):
@@ -56,7 +56,7 @@ def get_country_semantic_ids():
     astats = read_p_gz(oa_root / StowC.cache / ComC.A_STAT_PATH)
     return {
         k: "-".join(ed["name"].lower().replace(".", " ").split())
-        for k, ed in astats[ComC.COUNTRIES].items()
+        for k, ed in astats[EntC.COUNTRIES].items()
     }
 
 
