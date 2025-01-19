@@ -1,5 +1,4 @@
 use dmove_macro::derive_tree_getter;
-use std::collections::BTreeSet;
 
 use crate::{
     agg_tree::{
@@ -10,91 +9,25 @@ use crate::{
     env_consts::START_YEAR,
     gen::a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Topics, Works},
     interfacing::{Getters, NumberedEntity, ET, NET},
-    tree_ids::{AttributeLabelUnion, AttributeLabels, LabelFiller, TreeIdSet},
+    tree_ids::AttributeLabelUnion,
+    tree_io::{
+        BreakdownSpec, CollapsedNode, SerChildren, SerTree, TreeQ, TreeResponse, TreeSpec,
+        POSSIBLE_YEAR_FILTERS,
+    },
 };
 
 use dmove::{Entity, UnsignedNumber};
 use dmove_macro::derive_tree_maker;
 use hashbrown::HashMap;
-use serde::{Deserialize, Serialize};
 
-const POSSIBLE_YEAR_FILTERS: YBT = [START_YEAR, 2010, 2015, 2020, 2021, 2022, 2023, 2024];
-
-pub type TreeSpecMap = HashMap<String, Vec<TreeSpec>>;
 type CollT<T> = <T as Collapsing>::Collapsed;
 type WT = ET<Works>;
-type YBT = [u16; 8];
 
 type FrTm<TM> = <<TM as TreeMaker>::SortedRec as SortedRecord>::FlatRecord;
 
-#[derive(Deserialize, Clone)]
-pub struct TreeQ {
-    year: Option<u16>,
-    eid: u16,
-    tid: Option<u8>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct CollapsedNode {
-    #[serde(rename = "linkCount")]
-    pub link_count: u32,
-    #[serde(rename = "sourceCount")]
-    source_count: u32,
-    #[serde(rename = "topSourceId")]
-    top_source: WT,
-    #[serde(rename = "topSourceLinks")]
-    top_cite_count: u32,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct SerTree {
-    #[serde(flatten)]
-    pub node: CollapsedNode,
-    pub children: Box<HashMap<u32, SerChild>>,
-}
-
-#[derive(Serialize)]
-pub struct TreeResponse {
-    tree: SerTree,
-    atts: AttributeLabels,
-}
-
-#[derive(Serialize)]
-pub struct TreeSpecs {
-    specs: TreeSpecMap,
-    #[serde(rename = "yearBreaks")]
-    year_breaks: YBT,
-}
-
-#[derive(Serialize)]
-pub struct TreeSpec {
-    #[serde(rename = "rootType")]
-    root_type: String,
-    pub breakdowns: Vec<BreakdownSpec>,
-}
-
-#[derive(Serialize)]
-pub struct BreakdownSpec {
-    #[serde(rename = "attributeType")]
-    pub attribute_type: String,
-    #[serde(rename = "specDenomInd")] //this is to know how deep to go back for spec calculation
-    //e.g a country->inst is the same resolver
-    pub spec_denom_ind: u8,
-    // description: String, // used to be for spec calculation -> separate for different kinds of
-    // breakdowns
-    #[serde(rename = "sourceSide")]
-    pub source_side: bool,
-}
-
-#[derive(Deserialize, Serialize)]
 struct IddCollNode<E: NumberedEntity> {
     id: NET<E>,
     node: CollapsedNode,
-}
-
-struct IddSerChild {
-    id: usize,
-    node: SerChild,
 }
 
 struct PrepNode(Vec<WorkTree>);
@@ -105,13 +38,6 @@ struct DisJTree<E: NumberedEntity, C: Collapsing>(AggTreeBase<NET<E>, CollapsedN
 
 struct DisJ<E: Entity, const N: usize, const S: bool>(E::T);
 struct IntX<E: Entity, const N: usize, const S: bool>(E::T);
-
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum SerChild {
-    Leaf(CollapsedNode),
-    Node(SerTree),
-}
 
 pub trait TreeGetter: NumberedEntity {
     #[allow(unused_variables)]
@@ -146,7 +72,6 @@ trait TreeMaker {
     type Root: NumberedEntity;
     type Stack;
     type RootTree: Into<SerTree>;
-    type NestedIds: LabelFiller;
 
     fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>>;
 
@@ -210,24 +135,6 @@ impl PrepNode {
     }
 }
 
-impl SerChild {
-    pub fn weight(&self) -> u32 {
-        match self {
-            Self::Leaf(cn) => cn.link_count,
-            Self::Node(n) => n.node.link_count,
-        }
-    }
-}
-
-impl TreeSpecs {
-    pub fn new(specs: TreeSpecMap) -> Self {
-        Self {
-            specs,
-            year_breaks: POSSIBLE_YEAR_FILTERS,
-        }
-    }
-}
-
 impl From<WT> for WorkTree {
     fn from(value: WT) -> Self {
         Self(value.into())
@@ -256,73 +163,47 @@ where
     }
 }
 
-impl<E, C> From<DisJTree<E, C>> for SerTree
+impl<E, C> Into<SerTree> for DisJTree<E, C>
 where
     E: NumberedEntity,
     C: Collapsing,
-    CollT<C>: Into<IddSerChild>,
+    Vec<CollT<C>>: Into<SerChildren>,
 {
-    fn from(value: DisJTree<E, C>) -> Self {
+    fn into(self) -> SerTree {
+        let children = Box::new(self.0.children.into());
+        SerTree {
+            node: self.0.node,
+            children,
+        }
+    }
+}
+
+impl<E, C> Into<SerChildren> for Vec<DisJTree<E, C>>
+where
+    E: NumberedEntity,
+    C: Collapsing + TopTree,
+    DisJTree<E, C>: Into<SerTree>,
+    // Vec<CollT<C>>: Into<SerChildren>,
+{
+    fn into(self) -> SerChildren {
         let mut children = HashMap::new();
-        for child in value.0.children.into_iter() {
-            let id_child: IddSerChild = child.into();
-            children.insert(id_child.id as u32, id_child.node);
+        for child in self.into_iter() {
+            children.insert(child.0.id.to_usize() as u32, child.into());
         }
-        Self {
-            node: value.0.node,
-            children: children.into(),
-        }
+        SerChildren::Nodes(children)
     }
 }
 
-impl<E, C> From<DisJTree<E, C>> for IddSerChild
-where
-    E: NumberedEntity,
-    C: Collapsing,
-    CollT<C>: Into<IddSerChild>,
-{
-    fn from(value: DisJTree<E, C>) -> Self {
-        let mut children = HashMap::new();
-        for child in value.0.children.into_iter() {
-            let id_child: IddSerChild = child.into();
-            children.insert(id_child.id as u32, id_child.node);
-        }
-        let tree = SerTree {
-            node: value.0.node,
-            children: children.into(),
-        };
-        IddSerChild {
-            id: value.0.id.to_usize(),
-            node: SerChild::Node(tree),
-        }
-    }
-}
-
-impl<E, C, TE, TC> Into<TreeIdSet<E, C>> for &DisJTree<TE, TC>
-where
-    C: InitEmpty,
-    E: NumberedEntity,
-    TE: NumberedEntity,
-    TC: Collapsing,
-    CollT<TC>: Into<IddSerChild>,
-    Vec<TC::Collapsed>: MergeWith<TreeIdSet<E, C>>,
-{
-    fn into(self) -> TreeIdSet<E, C> {
-        let mut o = TreeIdSet::init_empty();
-        self.0.children.merge_into(&mut o);
-        o
-    }
-}
-
-impl<E> Into<IddSerChild> for IddCollNode<E>
+impl<E> Into<SerChildren> for Vec<IddCollNode<E>>
 where
     E: NumberedEntity,
 {
-    fn into(self) -> IddSerChild {
-        IddSerChild {
-            id: self.id.to_usize(),
-            node: SerChild::Leaf(self.node),
+    fn into(self) -> SerChildren {
+        let mut leaves = HashMap::new();
+        for leaf in self.into_iter() {
+            leaves.insert(leaf.id.to_usize() as u32, leaf.node);
         }
+        SerChildren::Leaves(leaves)
     }
 }
 
@@ -337,7 +218,7 @@ impl<E, C> TopTree for DisJTree<E, C>
 where
     E: NumberedEntity,
     C: Collapsing,
-    CollT<C>: Into<IddSerChild>,
+    Vec<CollT<C>>: Into<SerChildren>,
 {
 }
 
@@ -356,19 +237,6 @@ impl InitEmpty for CollapsedNode {
 impl InitEmpty for PrepNode {
     fn init_empty() -> Self {
         Self(Vec::new())
-    }
-}
-
-impl<E, C> InitEmpty for TreeIdSet<E, C>
-where
-    C: InitEmpty,
-    E: NumberedEntity,
-{
-    fn init_empty() -> Self {
-        Self {
-            level: BTreeSet::new(),
-            child: C::init_empty(),
-        }
     }
 }
 
@@ -499,43 +367,6 @@ where
     }
 }
 
-impl<PE, E> MergeWith<TreeIdSet<PE, BTreeSet<NET<E>>>> for DisJTree<PE, IntXTree<E, WorkTree>>
-where
-    E: NumberedEntity,
-    PE: NumberedEntity,
-{
-    fn merge_into(&self, other: &mut TreeIdSet<PE, BTreeSet<NET<E>>>) {
-        let mut level_ext = BTreeSet::from_iter(self.0.children.iter().map(|e| e.id.lift()));
-        other.level.insert(self.0.id.lift());
-        other.child.append(&mut level_ext);
-    }
-}
-
-impl<E> MergeWith<TreeIdSet<E, ()>> for Vec<IddCollNode<E>>
-where
-    E: NumberedEntity,
-{
-    fn merge_into(&self, other: &mut TreeIdSet<E, ()>) {
-        let mut level_ext = BTreeSet::from_iter(self.iter().map(|e| e.id.lift()));
-        other.level.append(&mut level_ext);
-    }
-}
-
-impl<E, C, IDCC> MergeWith<TreeIdSet<E, IDCC>> for Vec<DisJTree<E, C>>
-where
-    E: NumberedEntity,
-    C: Collapsing + TopTree,
-    Vec<C::Collapsed>: MergeWith<IDCC>,
-{
-    fn merge_into(&self, ids: &mut TreeIdSet<E, IDCC>) {
-        let mut level_ext = BTreeSet::from_iter(self.iter().map(|e| {
-            e.0.children.merge_into(&mut ids.child);
-            e.0.id.lift()
-        }));
-        ids.level.append(&mut level_ext);
-    }
-}
-
 impl<C> FoldStackBase<C> for WorkTree {
     type StackElement = WorkTree;
     type LevelEntity = Works;
@@ -610,7 +441,6 @@ where
 fn tree_resp<T>(q: TreeQ, gets: &Getters, stats: &AttributeLabelUnion) -> TreeResponse
 where
     T: TreeMaker,
-    for<'a> &'a T::RootTree: Into<T::NestedIds>,
     <T::SortedRec as SortedRecord>::FlatRecord: Ord + Clone,
 {
     let tid = q.tid.unwrap_or(0);
@@ -634,12 +464,10 @@ where
     let full_tree: SerTree = read_buf_path(tree_path).unwrap();
 
     let bds = T::get_spec().breakdowns;
-    let tree_ids: T::NestedIds = (&root).into();
     let mut atts = HashMap::new();
-    tree_ids.fill(&mut atts, stats);
 
     let resp = TreeResponse {
-        tree: root.into(),
+        tree: full_tree,
         atts,
     };
     return resp;
@@ -1012,7 +840,7 @@ mod subfield_trees {}
 #[cfg(test)]
 mod tests {
 
-    use core::panic;
+    use std::ops::Deref;
 
     use super::*;
 
@@ -1091,10 +919,10 @@ mod tests {
     fn to_tree1() {
         let r = tree_resp::<Tree1>(q(), &Getters::fake(), &HashMap::new());
         println!("{}", to_string_pretty(&r).unwrap());
-
-        match &r.tree.children[&30] {
-            SerChild::Node(st) => match &st.children[&21] {
-                SerChild::Leaf(lone) => {
+        match &r.tree.children.deref() {
+            SerChildren::Nodes(nodes) => match &nodes[&30].children.deref() {
+                SerChildren::Leaves(leaves) => {
+                    let lone = &leaves[&21];
                     assert_eq!(lone.source_count, 2);
                     assert_eq!(lone.link_count, 2);
                 }
@@ -1103,16 +931,18 @@ mod tests {
             _ => panic!("wrong"),
         };
 
-        match &r.tree.children[&31] {
-            SerChild::Node(st) => match &st.children[&20] {
-                SerChild::Leaf(lone) => {
+        match &r.tree.children.deref() {
+            SerChildren::Nodes(nodes) => match &nodes[&31].children.deref() {
+                SerChildren::Leaves(leaves) => {
+                    let lone = &leaves[&20];
                     assert_eq!(lone.source_count, 1);
-                    assert_eq!(lone.top_source, 12);
+                    assert_eq!(lone.link_count, 12);
                 }
                 _ => panic!("no lone"),
             },
             _ => panic!("wrong"),
         };
+
         assert_eq!(r.tree.node.source_count, 5);
         assert_eq!(r.tree.node.link_count, 12);
         assert_eq!(r.tree.node.top_source, 13);
