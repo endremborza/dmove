@@ -1,3 +1,5 @@
+use std::fs::create_dir_all;
+
 use dmove_macro::derive_tree_getter;
 
 use crate::{
@@ -5,18 +7,20 @@ use crate::{
         merge_sorted_vecs, merge_sorted_vecs_fun, AggTreeBase, FoldStackBase, FoldingStackConsumer,
         HeapIterator, MinHeap, SortedRecord,
     },
-    common::{read_buf_path, InitEmpty},
+    common::{read_buf_path, write_buf_path, InitEmpty},
     env_consts::START_YEAR,
-    gen::a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Topics, Works},
-    interfacing::{Getters, NumberedEntity, ET, NET},
-    tree_ids::AttributeLabelUnion,
+    gen::a1_entity_mapping::{
+        Authors, Countries, Institutions, Qs, Sources, Subfields, Topics, Works,
+    },
+    interfacing::{Getters, NumberedEntity, NET},
+    prune_tree::prune,
+    tree_ids::{get_atts, AttributeLabelUnion},
     tree_io::{
-        BreakdownSpec, CollapsedNode, SerChildren, SerTree, TreeQ, TreeResponse, TreeSpec,
-        POSSIBLE_YEAR_FILTERS,
+        BreakdownSpec, BufSerChildren, BufSerTree, CollapsedNode, TreeQ, TreeResponse, TreeSpec,
     },
 };
 
-use dmove::{Entity, UnsignedNumber};
+use dmove::{Entity, UnsignedNumber, ET};
 use dmove_macro::derive_tree_maker;
 use hashbrown::HashMap;
 
@@ -41,24 +45,11 @@ struct IntX<E: Entity, const N: usize, const S: bool>(E::T);
 
 pub trait TreeGetter: NumberedEntity {
     #[allow(unused_variables)]
-    fn get_tree(
-        gets: &Getters,
-        stat_union: &AttributeLabelUnion,
-        q: TreeQ,
-    ) -> Option<TreeResponse> {
+    fn get_tree(gets: &Getters, att_union: &AttributeLabelUnion, q: TreeQ) -> Option<TreeResponse> {
         None
     }
 
     fn get_specs() -> Vec<TreeSpec>;
-
-    fn get_q(
-        tree_q: TreeQ,
-        gets: &Getters,
-        att_union: &AttributeLabelUnion,
-    ) -> Option<TreeResponse> {
-        todo!();
-        None
-    }
 }
 
 pub trait Collapsing {
@@ -71,7 +62,7 @@ trait TreeMaker {
     type SortedRec: SortedRecord;
     type Root: NumberedEntity;
     type Stack;
-    type RootTree: Into<SerTree>;
+    type RootTree: Into<BufSerTree>;
 
     fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>>;
 
@@ -80,10 +71,6 @@ trait TreeMaker {
         I: Iterator<Item = Self::SortedRec>;
 
     fn get_spec() -> TreeSpec;
-}
-
-trait MergeWith<T> {
-    fn merge_into(&self, other: &mut T);
 }
 
 trait Updater<C>
@@ -163,47 +150,50 @@ where
     }
 }
 
-impl<E, C> Into<SerTree> for DisJTree<E, C>
+impl<E, CE, GC> Into<BufSerTree> for DisJTree<E, IntXTree<CE, GC>>
 where
     E: NumberedEntity,
-    C: Collapsing,
-    Vec<CollT<C>>: Into<SerChildren>,
+    CE: NumberedEntity,
+    GC: Collapsing + TopTree,
+    DisJTree<CE, GC>: Into<BufSerTree>,
 {
-    fn into(self) -> SerTree {
-        let children = Box::new(self.0.children.into());
-        SerTree {
+    fn into(self) -> BufSerTree {
+        let mut map = HashMap::new();
+        for child in self.0.children {
+            map.insert(child.0.id.to_usize() as u32, child.into());
+        }
+        let children = Box::new(BufSerChildren::Nodes(map));
+        BufSerTree {
             node: self.0.node,
             children,
         }
     }
 }
 
-impl<E, C> Into<SerChildren> for Vec<DisJTree<E, C>>
+impl<E, CE> Into<BufSerTree> for DisJTree<E, IntXTree<CE, WorkTree>>
 where
     E: NumberedEntity,
-    C: Collapsing + TopTree,
-    DisJTree<E, C>: Into<SerTree>,
-    // Vec<CollT<C>>: Into<SerChildren>,
+    CE: NumberedEntity,
 {
-    fn into(self) -> SerChildren {
-        let mut children = HashMap::new();
-        for child in self.into_iter() {
-            children.insert(child.0.id.to_usize() as u32, child.into());
+    fn into(self) -> BufSerTree {
+        let children = Box::new(self.0.children.into());
+        BufSerTree {
+            node: self.0.node,
+            children,
         }
-        SerChildren::Nodes(children)
     }
 }
 
-impl<E> Into<SerChildren> for Vec<IddCollNode<E>>
+impl<E> Into<BufSerChildren> for Vec<IddCollNode<E>>
 where
     E: NumberedEntity,
 {
-    fn into(self) -> SerChildren {
+    fn into(self) -> BufSerChildren {
         let mut leaves = HashMap::new();
         for leaf in self.into_iter() {
             leaves.insert(leaf.id.to_usize() as u32, leaf.node);
         }
-        SerChildren::Leaves(leaves)
+        BufSerChildren::Leaves(leaves)
     }
 }
 
@@ -218,7 +208,7 @@ impl<E, C> TopTree for DisJTree<E, C>
 where
     E: NumberedEntity,
     C: Collapsing,
-    Vec<CollT<C>>: Into<SerChildren>,
+    Vec<CollT<C>>: Into<BufSerChildren>,
 {
 }
 
@@ -450,75 +440,142 @@ where
         .join(q.eid.to_string())
         .join(tid.to_string())
         .join(year.to_string());
-    if !tree_path.exists() {
+    let mut full_tree: BufSerTree = if !tree_path.exists() {
         //dump all trees for all years
         let eid = <NET<T::Root> as UnsignedNumber>::from_usize(q.eid.into());
         let heap = T::get_heap(eid, gets);
         let hither: HeapIterator<T::SortedRec> = heap.into();
         let root = T::get_root_tree(eid, hither);
-        let ser_tree: SerTree = root.into();
-        for year16 in POSSIBLE_YEAR_FILTERS.iter() {
+        let ser_tree: BufSerTree = root.into();
+        let year_parent = tree_path.parent().unwrap();
+        create_dir_all(year_parent).unwrap();
+        for period_id in (0..1) {
             println!("y");
+            let obj = &ser_tree;
+            // write_buf_path(obj, year_parent.join(year16.to_string())).unwrap();
         }
-    }
-    let full_tree: SerTree = read_buf_path(tree_path).unwrap();
+        write_buf_path(&ser_tree, year_parent.join(year.to_string())).unwrap();
+        ser_tree
+    } else {
+        read_buf_path(tree_path).unwrap()
+    };
 
     let bds = T::get_spec().breakdowns;
-    let mut atts = HashMap::new();
+    prune(&mut full_tree, stats, &bds);
+
+    let atts = get_atts(&full_tree, &bds, stats);
 
     let resp = TreeResponse {
-        tree: full_tree,
+        tree: full_tree.into(),
         atts,
     };
     return resp;
+}
+
+struct SciIter<'a> {
+    ref_sfs: &'a Box<[ET<Subfields>]>,
+    rsfi: usize,
+    cit_wids: &'a Box<[ET<Works>]>,
+    cwidi: usize,
+    cit_insts: Option<&'a Box<[ET<Institutions>]>>,
+    cinsti: usize,
+    gets: &'a Getters,
+}
+
+impl<'a> SciIter<'a> {
+    fn new(refed_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
+        let ref_sfs = gets.subfield(refed_wid);
+        let cit_wids = gets.citing(refed_wid);
+        Self {
+            ref_sfs,
+            rsfi: 0,
+            cit_wids,
+            cwidi: 0,
+            cit_insts: None,
+            cinsti: 0,
+            gets,
+        }
+    }
+}
+
+impl<'a> Iterator for SciIter<'a> {
+    type Item = (ET<Subfields>, ET<Countries>, ET<Institutions>, ET<Works>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.rsfi >= self.ref_sfs.len() {
+                return None;
+            }
+            if self.cwidi >= self.cit_wids.len() {
+                self.cwidi = 0;
+                self.rsfi += 1;
+                continue;
+            }
+            let cit_inst = if let Some(cit_insts) = self.cit_insts {
+                if self.cinsti >= cit_insts.len() {
+                    self.cinsti = 0;
+                    self.cwidi += 1;
+                    self.cit_insts = None;
+                    continue;
+                }
+                cit_insts[self.cinsti]
+            } else {
+                self.cit_insts = Some(self.gets.winsts(&self.cit_wids[self.cwidi]));
+                continue;
+            };
+            self.cinsti += 1;
+            return Some((
+                self.ref_sfs[self.rsfi],
+                self.gets.icountry(&cit_inst).lift(),
+                cit_inst,
+                self.cit_wids[self.cwidi],
+            ));
+        }
+    }
 }
 
 #[derive_tree_getter(Authors)]
 mod author_trees {
     use super::*;
 
-    // pub struct Tree1;
-    //
-    // #[derive_tree_maker]
-    // impl TreeMaker for Tree1 {
-    //     type StackBasis = (
-    //         DisJ<Authors>,
-    //         IntX<Years>,
-    //         IntX<Subfields>,
-    //         IntX<Subfields>,
-    //         IntX<Topics>,
-    //     );
-    //
-    //     fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
-    //         let mut heap = MinHeap::new();
-    //         for refed_wid in gets.aworks(&id) {
-    //             let refed_year = gets.year(refed_wid);
-    //             for refed_subfield in gets.subfield(refed_wid) {
-    //                 for citing_wid in gets.citing(refed_wid) {
-    //                     for citing_topic in gets.topic(citing_wid) {
-    //                         let citing_subfield = gets.tsuf(citing_topic);
-    //                         let record = (
-    //                             refed_year.lift(),
-    //                             refed_subfield.lift(),
-    //                             citing_subfield.lift(),
-    //                             citing_topic.lift(),
-    //                             refed_wid.lift(),
-    //                             citing_wid.lift(),
-    //                         );
-    //                         heap.push(record);
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         heap
-    //     }
-    // }
+    pub struct Tree1;
+
+    impl TreeMaker for Tree1 {
+        type StackBasis = (
+            IntX<Works, 0, true>,
+            IntX<Countries, 1, false>,
+            IntX<Institutions, 1, false>,
+        );
+
+        fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
+            let mut heap = MinHeap::new();
+            for refed_wid in gets.aworks(&id) {
+                for citing_wid in gets.citing(refed_wid) {
+                    for citing_inst in gets.winsts(citing_wid) {
+                        let citing_country = gets.icountry(citing_inst);
+                        let record = (
+                            refed_wid.lift(),
+                            citing_country.lift(),
+                            citing_inst.lift(),
+                            refed_wid.lift(),
+                            citing_wid.lift(),
+                        );
+                        heap.push(record);
+                    }
+                }
+            }
+            heap
+        }
+    }
 
     pub struct Tree2;
 
-    #[derive_tree_maker]
     impl TreeMaker for Tree2 {
-        type StackBasis = (IntX<Countries, 0, false>, IntX<Subfields, 1, false>);
+        type StackBasis = (
+            IntX<Countries, 0, false>,
+            IntX<Subfields, 1, false>,
+            IntX<Topics, 1, false>,
+        );
 
         fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
             let mut heap = MinHeap::new();
@@ -531,6 +588,7 @@ mod author_trees {
                             let record = (
                                 citing_country.lift(),
                                 citing_subfield.lift(),
+                                citing_topic.lift(),
                                 refed_wid.lift(),
                                 citing_wid.lift(),
                             );
@@ -546,8 +604,6 @@ mod author_trees {
 
 #[derive_tree_getter(Institutions)]
 mod inst_trees {
-
-    use crate::gen::a1_entity_mapping::Qs;
 
     use super::*;
 
@@ -792,7 +848,6 @@ mod inst_trees {
 
     pub struct TreeSCIS;
 
-    #[derive_tree_maker]
     impl TreeMaker for TreeSCIS {
         type StackBasis = (
             IntX<Subfields, 0, true>,
@@ -826,13 +881,44 @@ mod inst_trees {
             heap
         }
     }
-}
 
-#[derive_tree_getter(Sources)]
-mod source_trees {}
+    pub struct TreeSCISo;
+
+    impl TreeMaker for TreeSCISo {
+        type StackBasis = (
+            IntX<Subfields, 0, true>,
+            IntX<Countries, 1, false>,
+            IntX<Institutions, 1, false>,
+            IntX<Sources, 3, false>,
+        );
+        fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
+            let mut heap = MinHeap::new();
+            for refed_wid in gets.iworks(&id) {
+                for (refed_sf, citing_country, citing_inst, citing_wid) in
+                    SciIter::new(refed_wid, gets)
+                {
+                    for citing_source in gets.sources(&citing_wid) {
+                        heap.push((
+                            refed_sf.lift(),
+                            citing_country.lift(),
+                            citing_inst.lift(),
+                            citing_source.lift(),
+                            refed_wid.lift(),
+                            citing_wid.lift(),
+                        ))
+                    }
+                }
+            }
+            heap
+        }
+    }
+}
 
 #[derive_tree_getter(Countries)]
 mod country_trees {}
+
+#[derive_tree_getter(Sources)]
+mod source_trees {}
 
 #[derive_tree_getter(Subfields)]
 mod subfield_trees {}
@@ -840,9 +926,9 @@ mod subfield_trees {}
 #[cfg(test)]
 mod tests {
 
-    use std::ops::Deref;
-
     use super::*;
+    use crate::tree_io::JsSerChildren;
+    use std::ops::Deref;
 
     use serde_json::to_string_pretty;
 
@@ -920,8 +1006,8 @@ mod tests {
         let r = tree_resp::<Tree1>(q(), &Getters::fake(), &HashMap::new());
         println!("{}", to_string_pretty(&r).unwrap());
         match &r.tree.children.deref() {
-            SerChildren::Nodes(nodes) => match &nodes[&30].children.deref() {
-                SerChildren::Leaves(leaves) => {
+            JsSerChildren::Nodes(nodes) => match &nodes[&30].children.deref() {
+                JsSerChildren::Leaves(leaves) => {
                     let lone = &leaves[&21];
                     assert_eq!(lone.source_count, 2);
                     assert_eq!(lone.link_count, 2);
@@ -932,11 +1018,11 @@ mod tests {
         };
 
         match &r.tree.children.deref() {
-            SerChildren::Nodes(nodes) => match &nodes[&31].children.deref() {
-                SerChildren::Leaves(leaves) => {
+            JsSerChildren::Nodes(nodes) => match &nodes[&31].children.deref() {
+                JsSerChildren::Leaves(leaves) => {
                     let lone = &leaves[&20];
                     assert_eq!(lone.source_count, 1);
-                    assert_eq!(lone.link_count, 12);
+                    assert_eq!(lone.link_count, 1);
                 }
                 _ => panic!("no lone"),
             },
@@ -947,7 +1033,6 @@ mod tests {
         assert_eq!(r.tree.node.link_count, 12);
         assert_eq!(r.tree.node.top_source, 13);
         assert_eq!(r.tree.node.top_cite_count, 4);
-        // assert!(false);
     }
 
     #[test]
@@ -961,5 +1046,10 @@ mod tests {
         println!("{}", to_string_pretty(&r).unwrap());
         assert_eq!(r.tree.node.source_count, 2);
         assert_eq!(r.tree.node.link_count, 3);
+    }
+
+    #[test]
+    fn test_prune1() {
+        //TODO !!!!!
     }
 }
