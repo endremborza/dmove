@@ -9,7 +9,7 @@ const TYPE_ARG_NAME: &str = "entity_name";
 const IMPL_FIELD: &str = "impl_str";
 const IMPORT_FIELD: &str = "importables";
 const ME_STRUCT: &str = "MetaElem";
-const SRECORD_PREFIX: &str = "crate::agg_tree";
+const SRECORD_PREFIX: &str = "rankless_rs::agg_tree";
 const SRECORD_ENUM: &str = "SRecord";
 const BASIS_TRAIT: &str = "FoldStackBase";
 const FC_TRAIT: &str = "FoldingStackConsumer";
@@ -71,6 +71,10 @@ pub fn derive_meta_trait(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         let type_name = t.ident.to_string();
                         meta_fmt_ext.push(format!("type {type_name} = {{}};"));
                         apush(&type_name, "&str", true);
+                    }
+                    syn::TraitItem::Fn(_) => {
+                        //yay some defined function
+                        ()
                     }
                     _ => panic!("wrong elem"),
                 }
@@ -256,7 +260,6 @@ pub fn def_srecs(_: TokenStream) -> TokenStream {
         out.push(enum_impls.to_token_stream().to_string());
     }
     // println!("{}", out.join("\n\n"));
-
     out.join("\n\n").parse().unwrap()
 }
 
@@ -291,25 +294,22 @@ pub fn derive_tree_getter(attr: TokenStream, item: TokenStream) -> TokenStream {
         syn::Item::Mod(ref mut imp_syn) => {
             for item in imp_syn.content.as_mut().unwrap().1.iter_mut() {
                 match item {
-                    syn::Item::Struct(struct_def) => {
-                        if let syn::Visibility::Public(_) = struct_def.vis {
-                            tree_defs.push(struct_def.ident.to_token_stream().to_string());
-                        }
-                    }
                     syn::Item::Impl(item_impl) => {
                         item_impl.attrs = derive_attr.clone();
-                        // for mderive in item_impl.attrs.iter_mut() {
-                        //     if let syn::Meta::Path(mval) = &mderive.meta {
-                        //         if mval.segments.last().unwrap().ident.to_string() == MAKER {
-                        //             mderive.meta = derive_w_args.clone();
-                        //             break;
-                        //         };
-                        //     }
-                        // }
+                        tree_defs.push(item_impl.self_ty.as_ref().into_token_stream().to_string());
                     }
                     _ => (),
                 }
             }
+            imp_syn
+                .content
+                .as_mut()
+                .unwrap()
+                .1
+                .extend(tree_defs.iter().map(|e| {
+                    let sdef: syn::Item = parse_str(&format!("pub struct {e};")).unwrap();
+                    sdef
+                }));
             imp_syn.ident.clone()
         }
         _ => panic!("not an impl block"),
@@ -326,7 +326,7 @@ pub fn derive_tree_getter(attr: TokenStream, item: TokenStream) -> TokenStream {
         tree_defs.iter().enumerate().map(|(i, tn)| {
             format!(
                 "if tid == {i} {{
-            return Some(tree_resp::<{mod_name}::{tn}>(q, gets, stats));
+            return Some({mod_name}::{tn}::tree_resp(q, gets, stats));
         }}"
             )
         }),
@@ -369,7 +369,7 @@ fn get_in_types_gen_args<'a, I>(
 where
     I: Iterator<Item = &'a syn::Type>,
 {
-    //this knows way too much and does a _lot_ of magic
+    //TODO: this knows way too much and does a _lot_ of magic
     //also presumes here:
     let mut gen_args: Vec<syn::Type> = vec![parse_str(root_type).unwrap()];
     let mut in_types: Vec<String> = elems
@@ -415,14 +415,13 @@ fn tree_maker_impl_extensions(imp_syn: &syn::ItemImpl, root_entity_str: String) 
         })
         .unwrap();
     let n = stack_types.len() - 1;
-    //WARN: WorkTree is discusting magic
+    //WARN: to_bds and WorkTree is discusting magic
     let bd_specs = cjoin(
         basis_types
             .iter()
             .skip(1)
             .take(n - 2)
-            .map(|e| format!("to_bds::<{e}, WorkTree>()",)),
-        // .map(|e| format!("<{e} as FoldStackBase<WorkTree>>::to_bd_spec()",)),
+            .map(|e| format!("to_bds::<{e}>()",)),
     );
 
     let spec_fn_txt = format!(
@@ -458,9 +457,6 @@ fn tree_maker_impl_extensions(imp_syn: &syn::ItemImpl, root_entity_str: String) 
     ))
     .unwrap();
 
-    // let tree_id_set_nested_type = get_id_set_nested_type(ent_iters.clone().rev());
-    // let tis_type = parse_str(&format!("type NestedIds = ({tree_id_set_nested_type});")).unwrap();
-
     let rest_ets = cjoin(
         ent_iters
             .map(|e| format!("ET<{e}>").to_string())
@@ -484,24 +480,10 @@ fn get_stack_type_elems(in_types: &Vec<String>) -> Vec<String> {
     let mut stack_type_elems: Vec<String> = vec![child.clone()];
     for t in type_iter {
         let as_trait = format!("<{t} as {BASIS_TRAIT}<{child}>>");
-        child = format!("{}::StackElement", as_trait);
+        child = format!("{as_trait}::StackElement");
         stack_type_elems.push(child.clone());
     }
     stack_type_elems
-}
-
-fn get_id_set_nested_type<I, E>(mut et_it: I) -> String
-where
-    I: Iterator<Item = E>,
-    E: Display + Clone,
-{
-    let first = et_it.next().expect("at least one type needed").clone();
-    //TODO: IdSet name is known
-    let mut child = format!("TreeIdSet<{first}, ()>");
-    for t in et_it {
-        child = format!("TreeIdSet<{t}, {child}>");
-    }
-    child
 }
 
 fn get_generic_arg(syn_type: &syn::Type) -> Option<syn::Type> {
@@ -517,13 +499,16 @@ fn get_generic_arg(syn_type: &syn::Type) -> Option<syn::Type> {
 }
 
 fn repler(stack_i: usize, rec_i: usize) -> String {
+    //when I call this into, it makes a new vec
     format!("std::mem::replace(&mut stack.{stack_i}, rec.{rec_i}.into())")
 }
 
-fn spec_match(i: usize, last_si: usize) -> String {
+fn spec_match(rec_size: usize, last_si: usize) -> String {
+    //last_si is the leaf
     let mut lines = Vec::new();
-    for j in 0..i {
-        let able_expr = if i == 1 {
+    for j in 0..rec_size {
+        let able_expr = if rec_size == 1 {
+            // format!("std::mem::replace(&mut stack.{last_si}, rec.into())").to_string()
             format!("std::mem::replace(&mut stack.{last_si}, rec.into())").to_string()
         } else if j == 0 {
             repler(last_si, 0)
@@ -533,7 +518,7 @@ fn spec_match(i: usize, last_si: usize) -> String {
         lines.push(format!("let consumable = {able_expr}"));
 
         let parent_stack_i = last_si - (j + 1);
-        let c_expr = if j < (i - 1) {
+        let c_expr = if j < (rec_size - 1) {
             format!("let mut consumer = {}", repler(parent_stack_i, j + 1))
         } else {
             format!("let consumer = &mut stack.{parent_stack_i}")
