@@ -9,10 +9,11 @@ use crate::common::{
     get_type_name, BackendLoading, BigId, Entity, EntityMutableMapperBackend, MainBuilder,
     MappableEntity, MappableEntityTraitMeta, MetaIntegrator, UnsignedNumber,
 };
+use crate::EntityImmutableMapperBackend;
+
 const ID_TYPE_SIZE: usize = std::mem::size_of::<BigId>();
 const ID_RECORD_SIZE: usize = ID_TYPE_SIZE * 2;
 
-pub type LoadedIdMap<T> = HashMap<BigId, T>;
 type IdRecord = [u8; ID_RECORD_SIZE];
 
 pub struct IdMap {
@@ -21,6 +22,7 @@ pub struct IdMap {
     extension_set: HashSet<BigId>,
     pub current_non_null_count: u64,
 }
+pub struct LoadedIdMap<T>(pub HashMap<BigId, T>);
 
 pub struct Data64MappedEntityBuilder {
     map: IdMap,
@@ -37,6 +39,16 @@ where
     }
 }
 
+impl<E> BackendLoading<E> for LoadedIdMap<E::T>
+where
+    E: Entity,
+    <E as Entity>::T: UnsignedNumber,
+{
+    fn load_backend(path: &PathBuf) -> Self {
+        <IdMap as BackendLoading<E>>::load_backend(path).to_map()
+    }
+}
+
 impl<E> BackendLoading<E> for Range<E::T>
 where
     E: Entity,
@@ -49,21 +61,25 @@ where
     }
 }
 
-impl<E> BackendLoading<E> for LoadedIdMap<E::T>
+impl<E> EntityImmutableMapperBackend<E> for LoadedIdMap<E::T>
 where
-    E: Entity,
+    E: MappableEntity + Entity,
     <E as Entity>::T: UnsignedNumber,
+    for<'a> &'a BigId: From<&'a <E as MappableEntity>::KeyType>,
 {
-    fn load_backend(path: &PathBuf) -> Self {
-        <IdMap as BackendLoading<E>>::load_backend(path).to_map()
+    fn get_via_immut(&self, k: &E::KeyType) -> Option<E::T> {
+        match self.0.get(k.into()) {
+            Some(v) => Some(v.lift()),
+            None => None,
+        }
     }
 }
 
-impl<E, MM> EntityMutableMapperBackend<E, MM> for IdMap
+impl<E> EntityMutableMapperBackend<E> for IdMap
 where
-    E: MappableEntity<MM> + Entity,
+    E: MappableEntity + Entity,
     <E as Entity>::T: UnsignedNumber,
-    for<'a> &'a BigId: From<&'a <E as MappableEntity<MM>>::KeyType>,
+    for<'a> &'a BigId: From<&'a <E as MappableEntity>::KeyType>,
 {
     fn get_via_mut(&mut self, k: &E::KeyType) -> Option<E::T> {
         match self.get(k.into()) {
@@ -93,13 +109,11 @@ impl MetaIntegrator<BigId> for Data64MappedEntityBuilder {
     fn post(mut self, builder: &mut MainBuilder) {
         self.map.extend();
         let n = self.map.current_non_null_count as usize + 1;
-        let camel_name = builder.add_scaled_compact_entity(&self.name, n);
+        let camel_name = builder.add_scaled_entity(&self.name, n, false);
         let mappable_type = get_type_name::<BigId>();
-        builder.meta_elems.push(MappableEntityTraitMeta::meta(
-            &camel_name,
-            &mappable_type,
-            &mappable_type,
-        ));
+        builder
+            .meta_elems
+            .push(MappableEntityTraitMeta::meta(&camel_name, &mappable_type));
     }
 }
 
@@ -111,7 +125,6 @@ impl IdMap {
     {
         let map_buffer = PathBuf::from(id_map_path);
         let mut current_non_null_count: u64 = 0;
-        println!("reading/writing {:?}", map_buffer);
         if !map_buffer.is_file() {
             File::create(&map_buffer).unwrap();
         } else {
@@ -224,7 +237,7 @@ impl IdMap {
                 break;
             }
         }
-        out
+        LoadedIdMap(out)
     }
 }
 

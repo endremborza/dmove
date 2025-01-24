@@ -9,14 +9,15 @@ use std::{
 use dmove_macro::{def_me_struct, derive_meta_trait};
 use hashbrown::HashSet;
 
-use crate::FixedAttributeElement;
-
 pub const MAX_BUF: usize = 0x1000;
 pub const MAX_NUMBUF: usize = 0x10;
+pub const MAX_FIXBUF: usize = 0x100;
 
 const PACK_NAME: &'static str = "dmove";
 
 pub type BigId = u64;
+pub type ET<E> = <E as Entity>::T;
+pub type MAA<T, M> = <T as MarkedAttribute<M>>::AttributeEntity;
 
 pub struct MainBuilder {
     pub meta_elems: Vec<MetaElem>,
@@ -31,34 +32,26 @@ where
     fn load_backend(path: &PathBuf) -> Self;
 }
 
-pub trait EntityMutableMapperBackend<E, MM>
+pub trait EntityMutableMapperBackend<E>
 where
-    E: Entity + MappableEntity<MM>,
+    E: Entity + MappableEntity,
 {
     fn get_via_mut(&mut self, k: &E::KeyType) -> Option<E::T>;
 }
 
-pub trait EntityImmutableMapperBackend<E, MM>
+pub trait EntityImmutableMapperBackend<E>
 where
-    E: Entity + MappableEntity<MM>,
+    E: Entity + MappableEntity,
 {
     fn get_via_immut(&self, k: &E::KeyType) -> Option<E::T>;
     //TODO: offer unsafe/unchecked, faster options
 }
 
-pub trait EntityImmutableRefMapperBackend<E, MM>
+pub trait EntityImmutableRefMapperBackend<E>
 where
-    E: Entity + MappableEntity<MM>,
+    E: Entity + MappableEntity,
 {
     fn get_ref_via_immut(&self, k: &E::KeyType) -> Option<&E::T>;
-    //TODO: offer unsafe/unchecked, faster options
-}
-
-pub trait EntityMutablIterateLinksBackend<E, I>
-where
-    E: Entity,
-{
-    fn links(&mut self) -> Option<E::T>;
 }
 
 def_me_struct!();
@@ -67,7 +60,7 @@ def_me_struct!();
 pub trait Entity {
     type T;
     const N: usize;
-    const NAME: &'static str;
+    const NAME: &str;
 }
 
 #[derive_meta_trait]
@@ -76,25 +69,28 @@ pub trait NamespacedEntity: Entity {
 }
 
 #[derive_meta_trait]
-pub trait MappableEntity<Marker>: Entity {
-    //mapped usize with Self marker means compact entity, currently
+pub trait MappableEntity: Entity {
     type KeyType;
 }
 
 #[derive_meta_trait]
-pub trait VariableSizeAttribute: Entity {
-    type SizeType: ByteArrayInterface + UnsignedNumber;
+pub trait VariableSizeAttribute: Entity
+where
+    Self::T: VarSizedAttributeElement,
+{
+    type SizeType: UnsignedNumber;
     // type LargestBuffer;
     // const LARGEST: usize;
     // on non inmemory thing: have type for offset (with divisor divided)
     // store largest size, so that it can be read without vec
-}
 
-#[derive_meta_trait]
-pub trait FixedSizeAttribute: Entity
-where
-    <Self as Entity>::T: FixedAttributeElement,
-{
+    fn full_size_from_buf(size_slice: &[u8]) -> usize {
+        Self::full_size_from_st(Self::SizeType::from_fbytes(size_slice))
+    }
+
+    fn full_size_from_st(size: Self::SizeType) -> usize {
+        size.to_usize() * Self::T::DIVISOR
+    }
 }
 
 #[derive_meta_trait]
@@ -104,10 +100,21 @@ pub trait Link: Entity {
 }
 
 #[derive_meta_trait]
-pub trait UnitLinkAttribute: Entity + Link {}
+pub trait MarkedAttribute<Marker>: Entity {
+    type AttributeEntity: Entity;
+}
 
 #[derive_meta_trait]
-pub trait PluraLinkAttribute: Entity + Link {}
+pub trait CompactEntity: MappableEntity<KeyType = usize> {}
+
+impl<T> CompactEntity for T where T: MappableEntity<KeyType = usize> {}
+
+//TODO
+// #[derive_meta_trait]
+// pub trait UnitLinkAttribute: Entity + Link {}
+//
+// #[derive_meta_trait]
+// pub trait PluraLinkAttribute: Entity + Link {}
 
 // pub trait HierarchalEntityElement: Iterator<Item = Self::ChildType> {
 //     //sometimes reference
@@ -120,23 +127,36 @@ pub trait PluraLinkAttribute: Entity + Link {}
 //LinkDataToCompactEntities
 //LinkCompactEntitiesToData
 //LinkCompactEntit(ies)ToData(andCompactEntity(es))
+//
+
+// pub trait ByteFixArrayInterface<const S: usize> {
+//     const S: usize = S;
+//     fn to_fbytes(&self) -> [u8; S];
+//     fn from_fbytes(buf: &[u8; S]) -> Self;
+// }
+
+pub trait ByteFixArrayInterface {
+    //serialized, sized
+    //can be different from in-memory size due to padding
+    const S: usize;
+
+    fn to_fbytes(&self) -> Box<[u8]>;
+    fn from_fbytes(buf: &[u8]) -> Self;
+}
 
 pub trait ByteArrayInterface {
     fn to_bytes(&self) -> Box<[u8]>;
     fn from_bytes(buf: &[u8]) -> Self;
 }
 
-pub trait UnsignedNumber {
+pub trait UnsignedNumber: Ord + Clone + Copy + Sized + ByteFixArrayInterface {
     fn to_usize(&self) -> usize;
     fn from_usize(n: usize) -> Self;
     fn cast_big_id(n: BigId) -> Self;
     fn lift(&self) -> Self;
 }
 
-pub trait MetaIntegrator<T>
-where
-    Self: Sized,
-{
+pub trait MetaIntegrator<T>: Sized {
     fn setup(builder: &MainBuilder, name: &str) -> Self;
 
     fn add_elem(&mut self, e: &T);
@@ -147,7 +167,6 @@ where
         self.add_elem(&e)
     }
 
-    //adding just one in the body of an iteration is a limit
     fn add_iter<'a, I>(builder: &mut MainBuilder, elems: I, name: &str)
     where
         I: Iterator<Item = &'a T>,
@@ -185,23 +204,39 @@ impl MainBuilder {
         }
     }
 
-    pub fn add_simple_etrait(&mut self, name: &str, type_name: &str, n: usize) -> String {
+    pub fn add_simple_etrait(
+        &mut self,
+        name: &str,
+        type_name: &str,
+        n: usize,
+        compact: bool,
+    ) -> String {
         let camel_name = camel_case(&name);
         self.meta_elems
             .push(EntityTraitMeta::meta(&camel_name, type_name, n, name));
-        self.meta_elems
-            .push(MappableEntityTraitMeta::meta(&camel_name, "Self", "usize"));
+        if compact {
+            self.meta_elems
+                .push(MappableEntityTraitMeta::meta(&camel_name, "usize"));
+        }
         self.definables.insert(camel_name.clone());
         camel_name
     }
 
-    pub fn add_scaled_compact_entity(&mut self, name: &str, n: usize) -> String {
-        self.add_simple_etrait(name, &get_uscale(n), n)
+    pub fn add_scaled_entity(&mut self, name: &str, n: usize, compact: bool) -> String {
+        self.add_simple_etrait(name, &get_uscale(n), n, compact)
     }
 
     pub fn declare_ns(&mut self, name: &str, ns: &str) {
         self.meta_elems
             .push(NamespacedEntityTraitMeta::meta(&camel_case(name), ns))
+    }
+
+    pub fn declare_marked_attribute<Main, Marker>(&mut self, name: &str) {
+        self.meta_elems.push(MarkedAttributeTraitMeta::meta(
+            &get_type_name::<Main>(),
+            &get_type_name::<Marker>(),
+            &camel_case(name),
+        ))
     }
 
     pub fn declare_link<S, T>(&mut self, name: &str) {
@@ -220,8 +255,7 @@ impl MainBuilder {
             })
         });
         let mut all_defs = vec![format!(
-            "use {}::{{{}}};",
-            PACK_NAME,
+            "use {PACK_NAME}::{{{}}};",
             imports.into_iter().collect::<Vec<String>>().join(", ")
         )];
         all_defs.extend(
@@ -244,19 +278,20 @@ impl ByteArrayInterface for String {
     }
 }
 
-impl<F, L> ByteArrayInterface for (F, L)
+impl<F, L> ByteFixArrayInterface for (F, L)
 where
-    F: Sized + ByteArrayInterface,
-    L: ByteArrayInterface,
+    F: ByteFixArrayInterface,
+    L: ByteFixArrayInterface,
 {
-    fn to_bytes(&self) -> Box<[u8]> {
-        let mut o = self.0.to_bytes().to_vec();
-        o.extend(self.1.to_bytes());
+    const S: usize = F::S + L::S;
+    fn to_fbytes(&self) -> Box<[u8]> {
+        let mut o = self.0.to_fbytes().to_vec();
+        o.extend(self.1.to_fbytes());
         o.into()
     }
-    fn from_bytes(buf: &[u8]) -> Self {
+    fn from_fbytes(buf: &[u8]) -> Self {
         let fsize = size_of::<F>();
-        (F::from_bytes(&buf[..fsize]), L::from_bytes(&buf[fsize..]))
+        (F::from_fbytes(&buf[..fsize]), L::from_fbytes(&buf[fsize..]))
     }
 }
 
@@ -264,22 +299,22 @@ macro_rules! iter_ba_impl {
     ($($iter_type:ty),*) => {
         $(impl<T> ByteArrayInterface for $iter_type
         where
-            T: ByteArrayInterface + Sized,
+            T: ByteFixArrayInterface,
         {
             fn to_bytes(&self) -> Box<[u8]> {
                 let mut out = Vec::new();
                 for e in self.iter() {
-                    out.extend(e.to_bytes().iter())
+                    out.extend(e.to_fbytes().iter())
                 }
                 out.into()
             }
 
             fn from_bytes(buf: &[u8]) -> Self {
-                let size = std::mem::size_of::<T>();
+                let size = T::S;
                 let mut out = Vec::new();
                 let (mut s, mut e) = (0, size);
-                while e < buf.len() {
-                    out.push(T::from_bytes(&buf[s..e]));
+                while e <= buf.len() {
+                    out.push(T::from_fbytes(&buf[s..e]));
                     (s, e) = (e, e + size);
                 }
                 out.into()
@@ -312,16 +347,39 @@ macro_rules! uint_impl {
 
 macro_rules! num_impl {
      ($($t:ty),*) => {
-        $(impl ByteArrayInterface for $t {
-            fn from_bytes(barr: &[u8]) -> Self {
+        $(impl ByteFixArrayInterface for $t {
+
+            const S: usize = size_of::<$t>();
+
+            fn from_fbytes(barr: &[u8]) -> Self {
                 Self::from_be_bytes(barr.try_into().unwrap())
             }
-            fn to_bytes(&self) -> Box<[u8]> {
+            fn to_fbytes(&self) -> Box<[u8]> {
                 self.to_be_bytes().into()
             }
         })*
     };
 }
+
+macro_rules! downcast_fun {
+    ($fun: ident, $n: ident, $($arg: ident),*) => {
+        if ($n >> 8) == 0 {
+            $fun::<u8>($($arg),*)
+        } else if ($n >> 16) == 0 {
+            $fun::<u16>($($arg),*)
+        } else if ($n >> 32) == 0 {
+            $fun::<u32>($($arg),*)
+        } else if ($n >= 2_usize.pow(64)) {
+            $fun::<u64>($($arg),*)
+        } else {
+            $fun::<u128>($($arg),*)
+
+        }
+    };
+}
+pub(crate) use downcast_fun;
+
+use crate::VarSizedAttributeElement;
 
 uint_impl!(u8, u16, u32, u64, u128);
 num_impl!(u8, u16, u32, u64, u128, f32, f64);
