@@ -91,6 +91,10 @@ where
     fn full_size_from_st(size: Self::SizeType) -> usize {
         size.to_usize() * Self::T::DIVISOR
     }
+
+    fn subtype_from_buf(slice: &[u8]) -> <Self::T as VarSizedAttributeElement>::SubType {
+        VaST::<Self>::from_fbytes(slice)
+    }
 }
 
 #[derive_meta_trait]
@@ -108,26 +112,6 @@ pub trait MarkedAttribute<Marker>: Entity {
 pub trait CompactEntity: MappableEntity<KeyType = usize> {}
 
 impl<T> CompactEntity for T where T: MappableEntity<KeyType = usize> {}
-
-//TODO
-// #[derive_meta_trait]
-// pub trait UnitLinkAttribute: Entity + Link {}
-//
-// #[derive_meta_trait]
-// pub trait PluraLinkAttribute: Entity + Link {}
-
-// pub trait HierarchalEntityElement: Iterator<Item = Self::ChildType> {
-//     //sometimes reference
-//     //iteration might be enogh :/
-//     type ChildType;
-// }
-
-//LinkCompactEntityToData
-//LinkDataToCompactEntity
-//LinkDataToCompactEntities
-//LinkCompactEntitiesToData
-//LinkCompactEntit(ies)ToData(andCompactEntity(es))
-//
 
 // pub trait ByteFixArrayInterface<const S: usize> {
 //     const S: usize = S;
@@ -379,7 +363,7 @@ macro_rules! downcast_fun {
 }
 pub(crate) use downcast_fun;
 
-use crate::VarSizedAttributeElement;
+use crate::{var_size_attributes::VaST, VarSizedAttributeElement};
 
 uint_impl!(u8, u16, u32, u64, u128);
 num_impl!(u8, u16, u32, u64, u128, f32, f64);

@@ -19,7 +19,7 @@ use tqdm::{Iter, Tqdm};
 use dmove::{
     BackendLoading, BigId, CompactEntity, Entity, FixAttIterator, FixWriteSizeEntity, LoadedIdMap,
     MainBuilder, MappableEntity, MarkedAttribute, MetaIntegrator, NamespacedEntity, VarAttIterator,
-    VarBox, VarSizedAttributeElement, VariableSizeAttribute, VattReadingMap,
+    VarBox, VarSizedAttributeElement, VariableSizeAttribute, VattArrPair, VattReadingMap,
 };
 
 pub type StowReader = Reader<BufReader<GzDecoder<File>>>;
@@ -127,6 +127,7 @@ pub struct QcPathIter {
 pub struct Quickest {}
 pub struct QuickMap {}
 pub struct QuickestBox {}
+pub struct QuickAttPair {}
 pub struct QuickestVBox {}
 pub struct VarFile {}
 pub struct ReadIter {}
@@ -438,6 +439,14 @@ where
     E: CompactEntity,
 {
     type BE = VarBox<E::T>;
+}
+
+impl<E> BackendSelector<E> for QuickAttPair
+where
+    E: CompactEntity + VariableSizeAttribute,
+    E::T: VarSizedAttributeElement,
+{
+    type BE = VattArrPair<E, u32>;
 }
 
 impl<E> BackendSelector<E> for VarFile

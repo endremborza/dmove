@@ -2,8 +2,8 @@ use std::io;
 
 use crate::{
     common::{
-        init_empty_slice, BackendSelector, MainWorkMarker, MarkedBackendLoader, QuickestBox,
-        QuickestVBox, ReadIter, Stowage,
+        init_empty_slice, BackendSelector, MainWorkMarker, MarkedBackendLoader, QuickAttPair,
+        QuickestBox, QuickestVBox, ReadIter, Stowage,
     },
     gen::{
         a1_entity_mapping::{Countries, Institutions, Works},
@@ -18,7 +18,7 @@ use crate::{
 use dmove::{
     BackendLoading, ByteArrayInterface, ByteFixArrayInterface, CompactEntity, Entity,
     EntityImmutableRefMapperBackend, Link, MappableEntity, NamespacedEntity, UnsignedNumber,
-    VarAttBuilder, VarSizedAttributeElement, VariableSizeAttribute, ET,
+    VarAttBuilder, VarSizedAttributeElement, VariableSizeAttribute, VattArrPair, ET,
 };
 
 use super::a1_entity_mapping::{YearInterface, N_PERS, POSSIBLE_YEAR_FILTERS};
@@ -59,6 +59,14 @@ impl MarkedBackendLoader<QuickestVBox> for CountryInsts {
     }
 }
 
+impl MarkedBackendLoader<QuickAttPair> for CountryInsts {
+    type BE = VattArrPair<Self, u32>;
+    fn load(stowage: &Stowage) -> Self::BE {
+        let boxes = <Self as MarkedBackendLoader<QuickestVBox>>::load(stowage);
+        Self::BE::from_boxes(boxes)
+    }
+}
+
 impl Entity for WorkPeriods {
     type T = u8;
     const N: usize = Works::N;
@@ -77,6 +85,10 @@ impl MappableEntity for WorkPeriods {
 
 impl MappableEntity for CountryInsts {
     type KeyType = usize;
+}
+
+impl VariableSizeAttribute for CountryInsts {
+    type SizeType = u32;
 }
 
 pub fn invert_read_multi_link_to_work<L>(stowage: &mut Stowage, name: &str)

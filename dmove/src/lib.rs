@@ -20,8 +20,8 @@ pub use fixed_size_attributes::{
 };
 pub use ingest_entity::{Data64MappedEntityBuilder, IdMap, LoadedIdMap};
 pub use var_size_attributes::{
-    Locators, VarAttBuilder, VarAttIterator, VarBox, VarSizedAttributeElement, VattReadingMap,
-    VattReadingRefMap,
+    Locators, VaST, VarAttBuilder, VarAttIterator, VarBox, VarSizedAttributeElement, VattArrPair,
+    VattReadingMap, VattReadingRefMap,
 };
 
 //definitions
