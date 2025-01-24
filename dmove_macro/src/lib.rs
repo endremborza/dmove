@@ -123,6 +123,7 @@ pub fn def_srecs(_: TokenStream) -> TokenStream {
     let mut out = Vec::new();
     for i in 2..(MAX_DEPTH + 1) {
         let its = prefed(1..i + 1, "T");
+        let s_gens = prefed(0..i, "S");
         let it_tup: syn::Expr = syn::parse_str(&format!("({its})")).expect("Ts");
         let tgen: syn::AngleBracketedGenericArguments =
             syn::parse_str(&format!("<{its}>")).expect("T-gens");
@@ -149,24 +150,33 @@ pub fn def_srecs(_: TokenStream) -> TokenStream {
         let empty_srec: syn::Expr =
             syn::parse_str(&format!("{rec_prefix}{i}(({empties}))")).unwrap();
 
-        let s_gens = prefed(0..i + 1, "S");
         let t_init_empties = cjoin((1..i + 1).map(|e| format!("T{e}: InitEmpty")));
         let t_comps = cjoin((1..i + 1).map(|e| format!("T{e}: PartialEq")));
-        let t_to_ss = cjoin((1..i + 1).map(|e| format!("T{e}: Into<S{e}>")));
+        let t_to_ss = cjoin((1..i).map(|e| format!("T{e}: Into<S{e}>")));
+        let reinstate_wheres = cjoin((1..i).map(|e| format!("S{e}: ReinstateFrom<T{e}>")));
         let t0_to_s0 = "T0: Into<S0>";
-        let intos_txt = cjoin((0..i).rev().map(|e| format!("rec.{e}.into()")));
+        let intos_txt = join((2..i).rev().map(|e| format!("rec.{e}.into(),")), "");
         let match_internals = cjoin(
-            (1..i + 1).map(|e| format!("Self::Rec{e}(rec) => {{\n{}\n    }}", spec_match(e, i))),
+            (1..i + 1)
+                .map(|e| format!("Self::Rec{e}(rec) => {{\n{}\n    }}", spec_match(e, i - 1))),
         );
-        let consume_wheres =
-            cjoin((0..i).map(|e| format!("S{e}: {FC_TRAIT}<Consumable=S{}>", e + 1)));
+        let consume_where = format!("S{}: {FC_TRAIT}<Consumable=T{i}>", i - 1);
+        let update_wheres = cjoin((0..i - 1).map(|e| format!("S{e}: Updater<S{}>", e + 1)));
 
         let t_cmp_where: syn::WhereClause = syn::parse_str(&format!("where {t_comps}")).unwrap();
         let t_ie_where: syn::WhereClause =
             syn::parse_str(&format!("where {t_init_empties}")).unwrap();
 
         let fold_fn_txt = format!(
-            "pub fn fold<{s_gens}, T0, I>(mut it: I, root: T0) -> ({s_gens}) where I: Iterator<Item=Self>, {t0_to_s0}, {t_to_ss}, {t_init_empties}, {consume_wheres} {{
+            "pub fn fold<{s_gens}, T0, I>(mut it: I, root: T0) -> ({s_gens}) where 
+                I: Iterator<Item=Self>, 
+                {t0_to_s0}, 
+                {t_to_ss}, 
+                {t_init_empties}, 
+                {reinstate_wheres}, 
+                {consume_where},
+                {update_wheres} 
+                {{
                     let first = it.next().unwrap();
                     let mut stack = first.to_stack(root);
                     let flusher = vec![Self::init_empty()].into_iter();
@@ -178,9 +188,15 @@ pub fn def_srecs(_: TokenStream) -> TokenStream {
         );
 
         let to_stack_fn_txt = format!(
-            "pub fn to_stack<{s_gens}, T0>(self, root: T0) -> ({s_gens}) where {t0_to_s0}, {t_to_ss} {{
+            "pub fn to_stack<{s_gens}, T0>(self, root: T0) -> ({s_gens}) where 
+                {t0_to_s0}, 
+                {t_to_ss},
+                {consume_where}
+            {{
                 if let Self::Rec{i}(rec) = self {{
-                    (root.into(), {intos_txt})
+                    let mut leaf = rec.1.into();
+                    leaf.consume(rec.0);
+                    (root.into(), {intos_txt} leaf)
                 }} else {{
                     panic!(\"wrong starter\")
                 }}
@@ -188,7 +204,11 @@ pub fn def_srecs(_: TokenStream) -> TokenStream {
         );
 
         let update_stack_fn_txt = format!(
-            "pub fn update_stack<{s_gens}>(self, stack: &mut ({s_gens})) where {t_to_ss}, {consume_wheres} {{
+            "pub fn update_stack<{s_gens}>(self, stack: &mut ({s_gens})) where 
+                {reinstate_wheres}, 
+                {consume_where}, 
+                {update_wheres} 
+            {{
                 match self {{
                     {match_internals}
                 }}
@@ -379,7 +399,7 @@ where
         })
         .collect();
     in_types.insert(0, format!("IntX<{root_type}, 0, true>"));
-    in_types.extend(vec!["WorkTree".to_string(), "WT".to_string()].into_iter());
+    in_types.extend(vec!["WorkTree".to_string()].into_iter());
     return Some((gen_args, get_stack_type_elems(&in_types), in_types));
 }
 
@@ -414,13 +434,13 @@ fn tree_maker_impl_extensions(imp_syn: &syn::ItemImpl, root_entity_str: String) 
             None
         })
         .unwrap();
-    let n = stack_types.len() - 1;
+    let n = stack_types.len();
     //WARN: to_bds and WorkTree is discusting magic
     let bd_specs = cjoin(
         basis_types
             .iter()
             .skip(1)
-            .take(n - 2)
+            .take(n)
             .map(|e| format!("to_bds::<{e}>()",)),
     );
 
@@ -441,7 +461,7 @@ fn tree_maker_impl_extensions(imp_syn: &syn::ItemImpl, root_entity_str: String) 
     where
         I: Iterator<Item = Self::SortedRec>,
     {
-        let stack: Self::Stack = Self::SortedRec::fold(it, id);
+        let mut stack: Self::Stack = Self::SortedRec::fold(it, id);
         stack.0.collapse()
     }";
 
@@ -498,35 +518,23 @@ fn get_generic_arg(syn_type: &syn::Type) -> Option<syn::Type> {
     None
 }
 
-fn repler(stack_i: usize, rec_i: usize) -> String {
-    //when I call this into, it makes a new vec
-    format!("std::mem::replace(&mut stack.{stack_i}, rec.{rec_i}.into())")
-}
-
 fn spec_match(rec_size: usize, last_si: usize) -> String {
     //last_si is the leaf
-    let mut lines = Vec::new();
-    for j in 0..rec_size {
-        let able_expr = if rec_size == 1 {
-            // format!("std::mem::replace(&mut stack.{last_si}, rec.into())").to_string()
-            format!("std::mem::replace(&mut stack.{last_si}, rec.into())").to_string()
-        } else if j == 0 {
-            repler(last_si, 0)
-        } else {
-            "consumer".to_string()
-        };
-        lines.push(format!("let consumable = {able_expr}"));
-
-        let parent_stack_i = last_si - (j + 1);
-        let c_expr = if j < (rec_size - 1) {
-            format!("let mut consumer = {}", repler(parent_stack_i, j + 1))
-        } else {
-            format!("let consumer = &mut stack.{parent_stack_i}")
-        };
-        lines.push(c_expr);
-        lines.push("consumer.consume(consumable)".to_string());
+    if rec_size == 1 {
+        return format!("stack.{last_si}.consume(rec)");
     }
-    join(lines.iter().map(|e| format!("            {}", e)), ";\n")
+    let mut lines = Vec::new();
+    for j in 1..rec_size {
+        let line = format!(
+            "stack.{}.update(&mut stack.{}, rec.{})",
+            last_si - j,
+            last_si - j + 1,
+            j,
+        );
+        lines.push(line);
+    }
+    lines.push(format!("stack.{last_si}.consume(rec.0)"));
+    join(lines.iter().map(|e| format!("            {e}")), ";\n")
 }
 
 fn sarg(arg: &str) -> String {
