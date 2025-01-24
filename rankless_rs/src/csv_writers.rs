@@ -10,7 +10,7 @@ use crate::common::Stowage;
 use crate::oa_structs::{
     Ancestor, AssociatedInstitution, Author, Authorship, Biblio, Concept, FieldLike, Geo,
     IdCountDecorated, IdTrait, Institution, Location, OpenAccess, Publisher, RelatedConcept,
-    Source, SubField, Topic, Work, WorkTopic,
+    Source, SubField, SummaryStats, Topic, Work, WorkTopic,
 };
 
 type GzInner = GzEncoder<BufWriter<File>>;
@@ -73,8 +73,8 @@ macro_rules! create_complex_writers {
             pub struct Decorated {
                 #[serde(flatten)]
                 child: IdCountDecorated<$t_name>,
-                $( $rest_key: Option<Vec<$rest_value>> ),*
-                $(, $rest_single_key: Option<$rest_single_value> )*
+                $( $rest_key: Option<Vec<$rest_value>>, )*
+                $( $rest_single_key: Option<$rest_single_value>, )*
             }
 
             impl IdTrait for Decorated
@@ -152,7 +152,7 @@ macro_rules! macwrite {
 create_complex_writers!(
     Source - sources;;;,
     Publisher - publishers;;;,
-    Author - authors;;;,
+    Author - authors;; summary_stats -> SummaryStats;,
     Topic - topics;;;,
     FieldLike - fields;;;,
     FieldLike - domains;;;,

@@ -4,8 +4,12 @@ use hashbrown::{HashMap, HashSet};
 use serde::{de::DeserializeOwned, Deserialize};
 
 use crate::{
-    common::{oa_id_parse, ParsedId, Stowage},
+    common::{oa_id_parse, ParsedId, Stowage, MAIN_NAME},
     csv_writers::{authors, institutions, sources, works},
+    env_consts::{
+        MIN_AUTHOR_CITE_COUNT, MIN_AUTHOR_WORK_COUNT, MIN_PAPERS_FOR_INST, MIN_PAPERS_FOR_SOURCE,
+        START_YEAR,
+    },
     oa_structs::{
         post::{Author, Authorship, Location},
         ReferencedWork, Work,
@@ -14,9 +18,9 @@ use crate::{
 
 use dmove::BigId;
 
-pub const START_YEAR: u16 = 1950;
-// pub const START_YEAR: u16 = env!("START_YEAR").parse().unwrap();
-pub const FINAL_YEAR: u16 = 2024;
+pub const FINAL_YEAR: u16 = 2025;
+const MAX_AUTHORS: usize = 20;
+const MIN_CITATIONS: usize = 2;
 
 const FIX_AUTHORS: [BigId; 3] = [5064297795, 5005839111, 5078032253];
 
@@ -63,7 +67,7 @@ impl FilterBase for Authorship {
     }
 
     fn get_min() -> usize {
-        env!("MIN_PAPERS_FOR_INST").parse().unwrap()
+        MIN_PAPERS_FOR_INST as usize
     }
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
@@ -80,7 +84,7 @@ impl FilterBase for ReferencedWork {
     }
 
     fn get_min() -> usize {
-        2
+        MIN_CITATIONS
     }
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
@@ -99,7 +103,7 @@ impl FilterBase for Location {
     }
 
     fn get_min() -> usize {
-        env!("MIN_PAPERS_FOR_SOURCE").parse().unwrap()
+        MIN_PAPERS_FOR_SOURCE as usize
     }
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
@@ -116,7 +120,7 @@ impl FilterBase for PersonAuthorship {
     }
 
     fn get_max() -> usize {
-        20
+        MAX_AUTHORS
     }
 
     fn has_max() -> bool {
@@ -124,7 +128,7 @@ impl FilterBase for PersonAuthorship {
     }
 
     fn filter_targets() -> bool {
-        false
+        true
     }
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
@@ -156,9 +160,13 @@ fn single_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
 }
 
 fn author_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
+    let pre_filter = stowage.get_last_filter(authors::C).unwrap();
     filter_write::<Author, _>(stowage, step_id, authors::C, |o| {
-        FIX_AUTHORS.contains(&o.get_parsed_id())
-            | ((o.cited_by_count.unwrap_or(0) >= 50000) & (o.works_count.unwrap_or(0) >= 200))
+        let aid = o.get_parsed_id();
+        FIX_AUTHORS.contains(&aid)
+            | (pre_filter.contains(&aid)
+                & (o.cited_by_count.unwrap_or(0) >= MIN_AUTHOR_CITE_COUNT.into())
+                & (o.works_count.unwrap_or(0) >= MIN_AUTHOR_WORK_COUNT.into()))
     })?;
     Ok(())
 }
@@ -177,7 +185,7 @@ where
         step_id,
         entity_type,
         stowage
-            .read_csv_objs::<T>(entity_type, "main")
+            .read_csv_objs::<T>(entity_type, MAIN_NAME)
             .filter(|o| closure(&o))
             .map(|o| o.get_parsed_id()),
     )

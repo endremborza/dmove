@@ -5,7 +5,7 @@ use std::{cmp::Reverse, collections::BinaryHeap as MaxHeap};
 
 def_srecs!();
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct AggTreeBase<IdType, Node, Child> {
     pub id: IdType,
     pub node: Node,
@@ -54,6 +54,18 @@ pub trait SortedRecord: Sized {
     type FlatRecord: Into<Self>;
 
     fn from_cmp(last_rec: &Self::FlatRecord, next_rec: Self::FlatRecord) -> Option<Self>;
+}
+
+pub trait Updater<C> {
+    //+initiator replacing other
+    //+?
+    fn update<T>(&mut self, other: &mut C, other_reinitiator: T)
+    where
+        C: ReinstateFrom<T>;
+}
+
+pub trait ReinstateFrom<T> {
+    fn reinstate_from(&mut self, value: T);
 }
 
 impl<SR> From<MinHeap<SR::FlatRecord>> for HeapIterator<SR>
@@ -125,85 +137,103 @@ impl<I: PartialEq, N, C> PartialEq for AggTreeBase<I, N, C> {
     }
 }
 
-pub fn merge_sorted_vecs_fun<T, F, F2>(
-    out: &mut Vec<T>,
-    left_vec: Vec<T>,
-    right_vec: Vec<T>,
-    merging_fun: F,
-    mut right_mapper: F2,
-) where
-    T: PartialOrd,
-    F: Fn(T, T) -> T,
-    F2: FnMut(&T),
+pub struct VecExtender<'a, T> {
+    v: &'a mut Vec<T>,
+}
+
+pub trait OrderedMapper {
+    type Elem;
+    fn left_map(&mut self, e: &Self::Elem);
+    fn right_map(&mut self, e: &Self::Elem);
+    fn common_map(&mut self, l: &Self::Elem, r: &Self::Elem);
+}
+
+impl<'a, T> OrderedMapper for VecExtender<'a, T>
+where
+    T: Clone,
 {
-    if left_vec.len() == 0 {
-        right_vec.iter().for_each(right_mapper);
-        let _ = std::mem::replace(out, right_vec);
-        return;
+    type Elem = T;
+    fn left_map(&mut self, e: &Self::Elem) {
+        self.v.push(e.clone())
     }
-    if right_vec.len() == 0 {
-        let _ = std::mem::replace(out, left_vec);
-        return;
+    fn right_map(&mut self, e: &Self::Elem) {
+        self.v.push(e.clone())
     }
-    let mut li = left_vec.into_iter();
-    let mut ri = right_vec.into_iter().map(|e| {
-        right_mapper(&e);
-        e
-    });
-    let mut left_elem = li.next().unwrap();
-    let mut right_elem = ri.next().unwrap();
+    fn common_map(&mut self, l: &Self::Elem, _r: &Self::Elem) {
+        self.v.push(l.clone())
+    }
+}
+
+pub fn merge_sorted_vecs<T>(left_vec: Vec<T>, right_vec: Vec<T>) -> Vec<T>
+where
+    T: PartialOrd + Clone,
+{
+    let mut v = Vec::new();
+    sorted_iters_to_vec(&mut v, left_vec.iter(), right_vec.iter());
+    v
+}
+
+pub fn sorted_iters_to_vec<'a, 'b, T, IL, IR>(out: &mut Vec<T>, left_it: IL, right_it: IR)
+where
+    T: PartialOrd + Clone + 'a + 'b,
+    IL: Iterator<Item = &'a T>,
+    IR: Iterator<Item = &'b T>,
+{
+    let mut vadd = VecExtender { v: out };
+    ordered_calls(left_it, right_it, &mut vadd);
+}
+
+pub fn ordered_calls<'a, 'b, T, IL, IR, M>(mut left_it: IL, mut right_it: IR, merger: &mut M)
+where
+    T: PartialOrd + 'a + 'b,
+    IL: Iterator<Item = &'a T>,
+    IR: Iterator<Item = &'b T>,
+    M: OrderedMapper<Elem = T> + ?Sized,
+{
+    let mut left_elem = match left_it.next() {
+        Some(v) => v,
+        None => return right_it.for_each(|e| merger.right_map(e)),
+    };
+
+    let mut right_elem = match right_it.next() {
+        Some(v) => v,
+        None => return left_it.for_each(|e| merger.left_map(e)),
+    };
 
     loop {
         if left_elem == right_elem {
-            out.push(merging_fun(left_elem, right_elem));
-            match ri.next() {
+            merger.common_map(left_elem, right_elem);
+            match right_it.next() {
                 Some(el) => right_elem = el,
                 None => break,
             }
-            match li.next() {
+            match left_it.next() {
                 Some(el) => left_elem = el,
                 None => {
-                    out.push(right_elem);
+                    merger.right_map(right_elem);
                     break;
                 }
             }
         } else if right_elem < left_elem {
-            out.push(right_elem);
-            match ri.next() {
+            merger.right_map(right_elem);
+            match right_it.next() {
                 Some(el) => right_elem = el,
                 None => {
-                    out.push(left_elem);
+                    merger.left_map(left_elem);
                     break;
                 }
             }
         } else {
-            out.push(left_elem);
-            match li.next() {
+            merger.left_map(left_elem);
+            match left_it.next() {
                 Some(el) => left_elem = el,
                 None => {
-                    out.push(right_elem);
+                    merger.right_map(right_elem);
                     break;
                 }
             }
         }
     }
-    for rem in li.chain(ri) {
-        out.push(rem);
-    }
-}
-
-pub fn merge_sorted_vecs<T>(left: Vec<T>, right: Vec<T>) -> Vec<T>
-where
-    T: PartialOrd,
-{
-    //needs to recycle vectors
-    if left.len() == 0 {
-        return right;
-    }
-    if right.len() == 0 {
-        return left;
-    }
-    let mut out = Vec::with_capacity(left.len() + right.len());
-    merge_sorted_vecs_fun(&mut out, left, right, |l, _r| l, |_| ());
-    out
+    left_it.for_each(|e| merger.left_map(e));
+    right_it.for_each(|e| merger.right_map(e));
 }

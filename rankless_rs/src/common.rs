@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use std::env;
 use std::fs::{DirEntry, ReadDir};
 use std::io::prelude::*;
 use std::ops::Range;
@@ -10,50 +12,56 @@ use std::{
 use csv::{DeserializeRecordsIntoIter, Reader, ReaderBuilder};
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use hashbrown::{HashMap, HashSet};
+use serde::Deserialize;
 use serde::{de::DeserializeOwned, Serialize};
 use tqdm::{Iter, Tqdm};
 
 use dmove::{
-    BackendLoading, BigId, Entity, MainBuilder, MappableEntity, MetaIntegrator, NamespacedEntity,
-    VarAttIterator, VarBox, VarSizedAttributeElement, VariableSizeAttribute,
+    BackendLoading, BigId, CompactEntity, Entity, FixAttIterator, FixWriteSizeEntity, LoadedIdMap,
+    MainBuilder, MappableEntity, MarkedAttribute, MetaIntegrator, NamespacedEntity, VarAttIterator,
+    VarBox, VarSizedAttributeElement, VariableSizeAttribute, VattReadingMap,
 };
 
 pub type StowReader = Reader<BufReader<GzDecoder<File>>>;
 
 type InIterator<T> = Tqdm<DeserializeRecordsIntoIter<BufReader<flate2::read::GzDecoder<File>>, T>>;
 
-pub const COUNTRIES: &str = "countries";
-pub const AREA_FIELDS: &str = "area-fields";
-
+pub const MAIN_NAME: &str = "main";
 pub const BUILD_LOC: &str = "qc-builds";
+pub const SEM_DIR: &str = "semantic-ids";
 // pub const A_STAT_PATH: &str = "attribute-statics";
 // pub const QC_CONF: &str = "qc-specs";
 
 pub const ID_PREFIX: &str = "https://openalex.org/";
 
+pub struct NameMarker;
+pub struct NameExtensionMarker;
+pub struct SemanticIdMarker;
+pub struct MainWorkMarker;
+pub struct WorkCountMarker;
+pub struct CiteCountMarker;
+
 #[macro_export]
 macro_rules! add_parsed_id_traits {
-    () => {};
-    ($struct:ident $(, $rest:ident)*) => {
-        impl ParsedId for $struct {
+    ($($struct:ident),*) => {
+        $(impl ParsedId for $struct {
             fn get_parsed_id(&self) -> BigId {
-                oa_id_parse(&self.id.clone().unwrap())
+                oa_id_parse(self.id.as_ref().unwrap())
             }
         }
-        add_parsed_id_traits!($($rest),*);
+        )*
     };
 }
 
 #[macro_export]
 macro_rules! add_strict_parsed_id_traits {
-    () => {};
-    ($struct:ident $(, $rest:ident)*) => {
-        impl ParsedId for $struct {
+    ($($struct:ident),*) => {
+        $(impl ParsedId for $struct {
             fn get_parsed_id(&self) -> BigId {
-                oa_id_parse(&self.id.clone())
+                oa_id_parse(&self.id)
             }
         }
-        add_strict_parsed_id_traits!($($rest),*);
+        )*
     };
 }
 
@@ -73,8 +81,8 @@ macro_rules! add_parent_parsed_id_traits {
 macro_rules! pathfields_fn {
     ($struct:ident, $($k:ident),*) => {
 
-        struct $struct {
-            $($k: PathBuf,)*
+        pub struct $struct {
+            $(pub $k: PathBuf,)*
         }
 
         impl $struct {
@@ -94,16 +102,8 @@ macro_rules! pathfields_fn {
     };
 }
 
-macro_rules! nullable_uint {
-    ($($t:ty),*) => {
-        $(impl Nullable for $t {
-            fn null_value() -> Self {0}
-        })*
-    };
-}
-
 pub struct Stowage {
-    paths: PathCollection,
+    pub paths: PathCollection,
     current_name: String,
     current_ns: String,
     pub builder: Option<MainBuilder>,
@@ -125,16 +125,31 @@ pub struct QcPathIter {
 //TODO: this is sort of a mess - can't tell the difference between box and vbox
 //varbox seems to be for variable sized entity
 pub struct Quickest {}
+pub struct QuickMap {}
 pub struct QuickestBox {}
 pub struct QuickestVBox {}
+pub struct VarFile {}
 pub struct ReadIter {}
+pub struct ReadFixIter {}
 pub struct IterCompactElement {}
+
+#[derive(Deserialize)]
+pub struct SemanticElem {
+    pub id: BigId,
+    pub semantic_id: String,
+}
 
 pub trait BackendSelector<E>
 where
     E: Entity,
 {
     type BE;
+}
+
+pub trait MarkedBackendLoader<Mark>: Entity {
+    type BE;
+
+    fn load(stowage: &Stowage) -> Self::BE;
 }
 
 pathfields_fn!(
@@ -149,11 +164,45 @@ pub trait ParsedId {
     fn get_parsed_id(&self) -> BigId;
 }
 
-pub trait Nullable {
-    fn null_value() -> Self;
+pub trait InitEmpty {
+    fn init_empty() -> Self;
 }
 
-nullable_uint!(u8, u16, u32, u64);
+impl InitEmpty for () {
+    fn init_empty() -> Self {}
+}
+
+macro_rules! empty_num {
+    ($($ty:ty),*) => {
+        $(impl InitEmpty for $ty {
+                fn init_empty() -> Self {
+                    0
+                }
+            }
+        )*
+    };
+}
+
+macro_rules! empty_coll {
+    ($($ty:ty;$($g:ident)-*),*) => {
+        $(impl <$($g),*> InitEmpty for $ty{
+                fn init_empty() -> Self {
+                    Self::new()
+                }
+            }
+        )*
+    };
+}
+
+empty_num!(u8, u16, u32, u64);
+
+empty_coll!(Vec<T>; T, BTreeSet<T>; T, HashMap<K, V>; K-V);
+
+impl InitEmpty for String {
+    fn init_empty() -> Self {
+        "".to_string()
+    }
+}
 
 impl Stowage {
     pub fn new(root_path: &str) -> Self {
@@ -177,27 +226,8 @@ impl Stowage {
         self.builder.unwrap().write_code(&code_path(&suffix))
     }
 
-    pub fn get_reader<T>(&self, fname: T) -> StowReader
-    where
-        T: std::convert::AsRef<Path>,
-    {
-        let reader = get_gz_buf(
-            self.paths
-                .entity_csvs
-                .join(fname)
-                .with_extension("csv.gz")
-                .to_str()
-                .unwrap(),
-        );
-        ReaderBuilder::new().from_reader(reader)
-    }
-
     pub fn get_out_csv_path(&self) -> &str {
         self.paths.entity_csvs.to_str().unwrap()
-    }
-
-    pub fn get_sub_reader<T: std::fmt::Display>(&self, entity: T, sub: T) -> StowReader {
-        self.get_reader(format!("{}/{}", entity, sub))
     }
 
     pub fn get_filter_dir(&self, step_id: u8) -> PathBuf {
@@ -210,7 +240,7 @@ impl Stowage {
         let mut out_path = None;
 
         if !self.paths.entity_csvs.join(entity_type).exists() {
-            println!("no such type {}", entity_type);
+            println!("no such type {entity_type}");
             return None;
         }
         let dirs = match read_dir(&self.paths.filter_steps) {
@@ -290,7 +320,12 @@ impl Stowage {
         main_path: &str,
         sub_path: &str,
     ) -> ObjIter<T> {
-        ObjIter::new(self, main_path, sub_path)
+        read_deser_obj::<T>(&self.paths.entity_csvs, main_path, sub_path)
+    }
+
+    pub fn read_sem_ids<E: Entity>(&self) -> ObjIter<SemanticElem> {
+        let path = PathBuf::from(env::var_os("OA_PERSISTENT").unwrap());
+        read_deser_obj::<SemanticElem>(&path, SEM_DIR, E::NAME)
     }
 
     pub fn iter_cached_qc_locs(&self) -> QcPathIter {
@@ -303,12 +338,20 @@ impl Stowage {
 
     pub fn get_entity_interface<E, Marker>(&self) -> Marker::BE
     where
-        E: Entity + NamespacedEntity,
         Marker: BackendSelector<E>,
-        Marker::BE: BackendLoading<E>,
+        E: MarkedBackendLoader<Marker, BE = Marker::BE>,
     {
-        let path = self.path_from_ns(E::NS);
-        Marker::BE::load_backend(&path)
+        E::load(self)
+    }
+
+    pub fn get_marked_interface<E, AttMarker, BeMarker>(&self) -> BeMarker::BE
+    where
+        E: Entity + MarkedAttribute<AttMarker>,
+        E::AttributeEntity: NamespacedEntity,
+        BeMarker: BackendSelector<E::AttributeEntity>,
+        BeMarker::BE: BackendLoading<E::AttributeEntity>,
+    {
+        self.get_entity_interface::<<E as MarkedAttribute<AttMarker>>::AttributeEntity, BeMarker>()
     }
 
     pub fn set_name(&mut self, name_o: Option<&str>) {
@@ -317,7 +360,14 @@ impl Stowage {
         }
     }
 
-    fn path_from_ns(&self, ns: &str) -> PathBuf {
+    pub fn declare<E, Marker>(&mut self, name: &str) {
+        self.builder
+            .as_mut()
+            .unwrap()
+            .declare_marked_attribute::<E, Marker>(&name);
+    }
+
+    pub fn path_from_ns(&self, ns: &str) -> PathBuf {
         self.paths.entity_csvs.parent().unwrap().join(ns)
     }
 }
@@ -335,40 +385,87 @@ impl QcPathIter {
     }
 }
 
+impl<T> ObjIter<T>
+where
+    T: DeserializeOwned,
+{
+    pub fn new(reader: StowReader, main: &str, sub: &str) -> Self {
+        let iterable = reader
+            .into_deserialize::<T>()
+            .tqdm()
+            .desc(Some(format!("reading {} / {}", main, sub)));
+        Self { iterable }
+    }
+}
+
+impl<E, Marker> MarkedBackendLoader<Marker> for E
+where
+    E: NamespacedEntity,
+    Marker: BackendSelector<E>,
+    Marker::BE: BackendLoading<E>,
+{
+    type BE = Marker::BE;
+    fn load(stowage: &Stowage) -> Self::BE {
+        let path = stowage.path_from_ns(E::NS);
+        println!("loading {} from {:?}", E::NAME, path);
+        Marker::BE::load_backend(&path)
+    }
+}
+
 impl<E> BackendSelector<E> for Quickest
 where
-    E: Entity + MappableEntity<BigId>,
+    E: Entity + MappableEntity<KeyType = BigId>,
 {
-    //TODO: move back maybe for something like
-    //FullyLoadedCacheType type on the trait
-    type BE = HashMap<BigId, E::T>;
+    type BE = LoadedIdMap<E::T>;
+}
+
+impl<E> BackendSelector<E> for QuickMap
+where
+    E: FixWriteSizeEntity + MappableEntity,
+{
+    type BE = HashMap<<E as MappableEntity>::KeyType, E::T>;
 }
 
 impl<E> BackendSelector<E> for QuickestBox
 where
-    E: Entity + MappableEntity<E, KeyType = usize>,
+    E: CompactEntity,
 {
     type BE = Box<[E::T]>;
 }
 
 impl<E> BackendSelector<E> for QuickestVBox
 where
-    E: Entity + MappableEntity<E, KeyType = usize>,
+    E: CompactEntity,
 {
     type BE = VarBox<E::T>;
 }
 
+impl<E> BackendSelector<E> for VarFile
+where
+    E: CompactEntity + VariableSizeAttribute,
+    E::T: VarSizedAttributeElement,
+{
+    type BE = VattReadingMap<E>;
+}
+
 impl<E> BackendSelector<E> for ReadIter
 where
-    E: Entity + MappableEntity<E, KeyType = usize> + VariableSizeAttribute,
+    E: Entity + VariableSizeAttribute,
     <E as Entity>::T: VarSizedAttributeElement,
 {
     type BE = VarAttIterator<E>;
 }
 
+impl<E> BackendSelector<E> for ReadFixIter
+where
+    E: FixWriteSizeEntity,
+{
+    type BE = FixAttIterator<E>;
+}
+
 impl<E> BackendSelector<E> for IterCompactElement
 where
-    E: Entity + MappableEntity<E, KeyType = usize>,
+    E: CompactEntity,
 {
     type BE = Range<E::T>;
 }
@@ -401,32 +498,6 @@ impl Iterator for QcPathIter {
     }
 }
 
-impl<T> Nullable for Vec<T> {
-    fn null_value() -> Self {
-        Vec::new()
-    }
-}
-
-impl Nullable for String {
-    fn null_value() -> Self {
-        "".to_string()
-    }
-}
-
-impl<T> ObjIter<T>
-where
-    T: DeserializeOwned,
-{
-    pub fn new(stowage: &Stowage, main: &str, sub: &str) -> Self {
-        let reader = stowage.get_sub_reader(main, sub);
-        let iterable = reader
-            .into_deserialize::<T>()
-            .tqdm()
-            .desc(Some(format!("reading {} / {}", main, sub)));
-        Self { iterable }
-    }
-}
-
 impl<T: DeserializeOwned> Iterator for ObjIter<T> {
     type Item = T;
     fn next(&mut self) -> Option<Self::Item> {
@@ -446,7 +517,10 @@ pub fn field_id_parse(id: &str) -> u64 {
     id.split("/").last().unwrap().parse::<u64>().expect(id)
 }
 
-pub fn get_gz_buf(file_name: &str) -> BufReader<GzDecoder<File>> {
+pub fn get_gz_buf<P>(file_name: P) -> BufReader<GzDecoder<File>>
+where
+    P: AsRef<Path>,
+{
     let file = File::open(file_name).unwrap();
     let gz_decoder = GzDecoder::new(file);
     BufReader::new(gz_decoder)
@@ -468,7 +542,7 @@ pub fn write_gz_buf<T>(out_path: &Path, obj: &T) -> io::Result<()>
 where
     T: Serialize,
 {
-    write_gz_meta(out_path, obj, |o| bincode::serialize(o).unwrap(), "json")
+    write_gz_meta(out_path, obj, |o| bincode::serialize(o).unwrap(), "buf")
 }
 
 pub fn write_gz_meta<T, F>(out_path: &Path, obj: &T, f: F, suffix: &str) -> io::Result<()>
@@ -478,7 +552,7 @@ where
 {
     let out_file = File::create(
         out_path
-            .with_extension(format!("{}.gz", suffix))
+            .with_extension(format!("{suffix}.gz"))
             .to_str()
             .unwrap(),
     )?;
@@ -487,28 +561,28 @@ where
     writer.write_all(&f(obj))
 }
 
-pub fn _read_js_path<T: DeserializeOwned>(fp: &str) -> Result<T, serde_json::Error> {
-    let mut js_str = String::new();
-    get_gz_buf(fp).read_to_string(&mut js_str).unwrap();
-    serde_json::from_str(&js_str)
+pub fn read_buf_path<T, P>(fp: P) -> Result<T, bincode::Error>
+where
+    T: DeserializeOwned,
+    P: AsRef<Path>,
+{
+    // let mut buf: Vec<u8> = Vec::new();
+    // get_gz_buf(fp).read_to_end(&mut buf)?;
+    // bincode::deserialize(&buf)
+    bincode::deserialize_from(&mut get_gz_buf(fp))
 }
 
-pub fn _read_buf_path<T: DeserializeOwned>(fp: &str) -> Result<T, bincode::Error> {
-    let mut buf: Vec<u8> = Vec::new();
-    get_gz_buf(fp).read_to_end(&mut buf)?;
-    bincode::deserialize(&buf)
-}
-
-pub fn _read_cache<T: DeserializeOwned>(stowage: &Stowage, fname: &str) -> T {
-    _read_js_path(
-        stowage
-            .paths
-            .cache
-            .join(format!("{}.json.gz", fname))
-            .to_str()
-            .unwrap(),
-    )
-    .expect(&format!("tried reading {}", fname))
+pub fn write_buf_path<T, P>(obj: T, fp: P) -> Result<(), Box<bincode::ErrorKind>>
+where
+    T: Serialize,
+    P: AsRef<Path>,
+{
+    // let buf = bincode::serialize(&obj).unwrap();
+    // TODO: this reading writing is a bit of a wet mess
+    let file = File::create(fp)?;
+    let encoder = GzEncoder::new(file, Compression::default());
+    let writer = std::io::BufWriter::new(encoder);
+    bincode::serialize_into(writer, &obj)
 }
 
 pub fn short_string_to_u64(input: &str) -> BigId {
@@ -518,13 +592,26 @@ pub fn short_string_to_u64(input: &str) -> BigId {
     BigId::from_le_bytes(padded_input)
 }
 
-pub fn init_empty_slice<E: Entity, T: Nullable>() -> Box<[T]> {
+pub fn init_empty_slice<E: Entity, T: InitEmpty>() -> Box<[T]> {
     (0..E::N + 1)
-        .map(|_| T::null_value())
+        .map(|_| T::init_empty())
         .collect::<Vec<T>>()
         .into()
 }
 
 pub fn code_path(suffix: &str) -> String {
-    format!("rankless_rs/src/gen_{}.rs", suffix)
+    //TODO: this WET knows gen path :(
+    format!("rankless_rs/src/gen/{}.rs", suffix)
+}
+
+fn read_deser_obj<T: DeserializeOwned>(root: &Path, main_path: &str, sub_path: &str) -> ObjIter<T> {
+    let gz_buf = get_gz_buf(
+        root.join(main_path)
+            .join(sub_path)
+            .with_extension("csv.gz")
+            .to_str()
+            .unwrap(),
+    );
+    let reader = ReaderBuilder::new().from_reader(gz_buf);
+    ObjIter::new(reader, main_path, sub_path)
 }
