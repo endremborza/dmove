@@ -69,8 +69,10 @@ const SOURCE_BUF_SIZE: usize = 0x200;
 const TARGET_BUF_SIZE: usize = 0x500;
 
 struct WVecPair {
-    pub sources: StackWExtension<SOURCE_BUF_SIZE, WorkWInd>,
-    pub targets: StackWExtension<TARGET_BUF_SIZE, WT>,
+    // pub sources: StackWExtension<SOURCE_BUF_SIZE, WorkWInd>,
+    // pub targets: StackWExtension<TARGET_BUF_SIZE, WT>,
+    pub sources: Vec<WorkWInd>,
+    pub targets: Vec<WT>,
 }
 
 struct PrepNode {
@@ -234,21 +236,28 @@ where
 impl WVecPair {
     fn new() -> Self {
         Self {
-            sources: StackWExtension::new(),
-            targets: StackWExtension::new(),
+            // sources: StackWExtension::new(),
+            // sources: StackWExtension::new(),
+            targets: Vec::new(),
+            sources: Vec::new(),
         }
     }
     fn reset(&mut self) {
-        self.sources.reset();
-        self.targets.reset();
+        unsafe {
+            self.sources.set_len(0);
+            self.targets.set_len(0);
+        }
+        // self.sources.reset();
+        // self.targets.reset();
     }
 
     fn add(&mut self, e: &WorkWInd, other: &Self, other_tind: usize) {
         self.sources.add(*e);
         for i in 0..e.1.to_usize() {
             let ind = other_tind + i;
-            let val = other.targets.get(ind);
-            self.targets.add(*val);
+            // let val = other.targets.get(ind);
+            let val = other.targets[ind];
+            self.targets.add(val);
         }
     }
 }
@@ -304,9 +313,9 @@ impl OrderedMapper<WorkWInd> for WVecMerger<'_> {
         self.node.update_with_wt(r);
         let last_len = self.wv_into.targets.len() as u32;
         let left_it =
-            (self.left_i..(self.left_i + (l.1 as usize))).map(|i| self.left_from.targets.get(i));
+            (self.left_i..(self.left_i + (l.1 as usize))).map(|i| &self.left_from.targets[i]);
         let right_it =
-            (self.right_i..(self.right_i + (r.1 as usize))).map(|i| self.right_from.targets.get(i));
+            (self.right_i..(self.right_i + (r.1 as usize))).map(|i| &self.right_from.targets[i]);
 
         self.left_i += l.1 as usize;
         self.right_i += r.1 as usize;
@@ -332,8 +341,8 @@ impl PrepNode {
     fn update_and_get_collapsed_node(&mut self, other: &mut Self) -> CollapsedNode {
         let mut merger = WVecMerger::new(&mut self.merge_into, &self.merge_from, &other.merge_from);
         //one of them to
-        let left_it = (0..self.merge_from.sources.len()).map(|e| self.merge_from.sources.get(e));
-        let right_it = (0..other.merge_from.sources.len()).map(|e| other.merge_from.sources.get(e));
+        let left_it = (0..self.merge_from.sources.len()).map(|e| &self.merge_from.sources[e]);
+        let right_it = (0..other.merge_from.sources.len()).map(|e| &other.merge_from.sources[e]);
         ordered_calls(left_it, right_it, &mut merger);
         let node = merger.node;
         std::mem::swap(&mut self.merge_into, &mut self.merge_from);
@@ -598,7 +607,7 @@ impl Collapsing for PrepNode {
     fn collapse(&mut self) -> Self::Collapsed {
         let mut out = CollapsedNode::init_empty();
         for i in 0..self.merge_from.sources.len() {
-            out.update_with_wt(self.merge_from.sources.get(i));
+            out.update_with_wt(&self.merge_from.sources[i]);
         }
         out
     }
@@ -1355,7 +1364,7 @@ pub mod big_test_tree {
         fake_attu.insert(Institutions::NAME.to_string(), gatts(16, "I"));
         let q = TreeQ {
             year: None,
-            eid: 0,
+            eid: n as u32,
             tid: None,
         };
         BigTree::tree_resp(q, &Getters::fake(), &fake_attu)
