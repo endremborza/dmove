@@ -1,44 +1,40 @@
+mod fixed_heap;
+
 use deunicode::deunicode;
-use std::{
-    ops::{Add, AddAssign},
-    sync::Arc,
-    usize,
-};
-use triple_accel::{levenshtein_search, rdamerau};
+pub use fixed_heap::FixedHeap;
+use std::convert::TryInto;
+use std::fmt::Debug;
+use std::{ops::AddAssign, sync::Arc, usize};
+use tqdm::Iter;
 
 pub type IndType = u32;
 
-#[allow(dead_code)]
-const ASCII_LC: [u8; ASCII_COUNT] = [
-    97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
-    116, 117, 118, 119, 120, 121, 122,
-];
+const MAX_HEAP_SIZE: usize = 16;
+
 const SPLIT_CHAR: u8 = 32;
 const ASCII_LC_MIN: u8 = 97;
 const ASCII_LC_MAX: u8 = 122;
 const ASCII_COUNT: usize = 26;
 const CHAR_COUNT: usize = ASCII_COUNT;
 
-pub const MAX_HEAP_SIZE: usize = 16;
 const MAX_QUERY_CHARS: usize = 256;
-const MAX_QUERY_WORDS: usize = 16;
+const MAX_QUERY_WORDS: usize = 32;
+
+const BRANCHING_LEVELS: usize = 2;
+
+type IndOutTrie<NL> = GenTrie<NL, FixedHeap<IndType, MAX_HEAP_SIZE>>;
+type TrieNodeRoot = IndOutTrie<TrieNodeL1>;
+type TrieNodeL1 = IndOutTrie<TrieLeaves>;
+
+type PrepTrieL1 = IndOutTrie<Vec<PrepLeaf>>;
+type PrepTrieRoot = IndOutTrie<PrepTrieL1>;
 
 pub struct SearchEngine {
-    char_array: Arc<[u8]>,
-    words: Arc<[(u32, u16)]>,
-    inds: Arc<[ByteInd]>,
+    tree: Arc<CustomTrie>,
 }
 
-// diff, starting point
-#[derive(PartialEq, Ord, Eq, PartialOrd, Copy, Clone)]
-struct OrdererBase(u8, u8);
-
-#[derive(PartialEq, Ord, Eq, PartialOrd)]
-struct OrdererIndexed(OrdererBase, IndType);
-
-struct FixedHeap<T> {
-    arr: [T; MAX_HEAP_SIZE],
-}
+#[derive(Debug, Clone, PartialEq)]
+struct WordViaCharr(u32, u16);
 
 struct StackWordSet {
     char_array: [u8; MAX_QUERY_CHARS],
@@ -46,111 +42,228 @@ struct StackWordSet {
     breaks_count: usize,
 }
 
-struct ByteInd {
-    word_idx: u32,
-    skipped_n: u16,
+struct GenTrie<NextLevel, Out> {
+    children: [NextLevel; CHAR_COUNT],
+    out: Out,
 }
 
 struct CustomTrie {
-    tree: [[TrieNode; (CHAR_COUNT + 1)]; CHAR_COUNT],
+    prefix_tree: TrieNodeRoot,
+    inner_tree: TrieNodeRoot,
+    char_array: Box<[u8]>,
 }
 
-struct TrieNode {
-    leaves: Box<[TrieLeaf]>,
-}
+#[derive(Debug)]
+struct TrieLeaves(Box<[TrieLeaf]>);
 
+#[derive(Debug)]
 struct TrieLeaf {
-    suffix: Box<[u8]>,
+    suffix: WordViaCharr,
     ids: Box<[IndType]>,
 }
 
-struct MultiWordMatcher<'a> {
-    query_arr: [u8; MAX_QUERY_CHARS],
-    breaks: &'a [u8],
-    matching_basis: [OrdererBase; MAX_QUERY_WORDS],
-    mathing_inds: [u16; MAX_QUERY_WORDS],
-}
-
-struct SingleWordMatcher<'a> {
-    query: &'a [u8],
-}
-
-struct OuterWordIter<'a> {
-    siter: std::slice::Iter<'a, ByteInd>,
-    current_b_ind: &'a ByteInd,
-    keeps_going: bool,
-    new_inner: bool,
-    skipped_n: u16,
+struct PrepLeaf {
+    suffix: WordViaCharr,
+    ids: Vec<IndType>,
 }
 
 struct IndexedWord {
     word: Vec<u8>,
     outer_idx: usize,
-    inner_idx: usize,
+    _inner_idx: usize, //TODO: use this somehow
 }
 
-trait Maxed {
-    fn max_value() -> Self;
+trait Construct {
+    fn new() -> Self;
 }
 
-trait WordMatcher
-where
-    Self: Sized,
-{
-    fn order_from_words(
-        &mut self,
-        words: &mut OuterWordIter<'_>,
-        state: &SearchEngine,
-        cache: &mut Vec<Option<OrdererBase>>,
-    ) -> OrdererBase;
-
-    fn get_order_heap(mut self, state: &SearchEngine) -> FixedHeap<OrdererIndexed> {
-        let mut heap: FixedHeap<OrdererIndexed> = FixedHeap::new();
-        let mut outer_ind = 0;
-        let mut owi = OuterWordIter::new(state.inds.iter()).unwrap();
-        let mut cache = vec![None; state.words.len()];
-        while owi.keeps_going {
-            outer_ind.add_assign(owi.skipped_n as u32);
-            let order = self.order_from_words(&mut owi, state, &mut cache);
-            heap.push(OrdererIndexed(order, outer_ind));
-        }
-        heap
-    }
+trait QueriableLevel {
+    fn query(&self, word: &[u8], char_arr: &[u8]) -> Vec<IndType>;
 }
 
-impl<T> FixedHeap<T>
-where
-    T: PartialOrd + Maxed,
-{
+impl<T> Construct for Vec<T> {
     fn new() -> Self {
-        let arr = core::array::from_fn(|_| T::max_value());
-        Self { arr }
+        Self::new()
     }
+}
 
-    fn push(&mut self, e: T) {
-        if self.arr[0] > e {
-            self.arr[0] = e;
-            self.reorganize_limited(0, MAX_HEAP_SIZE)
+impl<T: Iterator<Item = TrieLeaf>> From<T> for TrieLeaves {
+    fn from(value: T) -> Self {
+        Self(value.collect::<Vec<TrieLeaf>>().try_into().unwrap())
+    }
+}
+
+impl<T: Construct> Construct for IndOutTrie<T> {
+    fn new() -> Self {
+        let children = core::array::from_fn(|_| T::new());
+        Self {
+            children,
+            out: FixedHeap::new(),
         }
     }
+}
 
-    fn reorganize_limited(&mut self, i: usize, limit: usize) {
-        for child_side in 1..3 {
-            let child_ind = i * 2 + child_side;
-            if child_ind >= limit {
-                return;
-            };
-            if self.arr[child_ind] > self.arr[i] {
-                self.arr.swap(child_ind, i);
-                self.reorganize_limited(child_ind, limit);
+impl<T: QueriableLevel> QueriableLevel for IndOutTrie<T> {
+    fn query(&self, word: &[u8], char_arr: &[u8]) -> Vec<IndType> {
+        if word.len() == 0 {
+            return self
+                .out
+                .arr
+                .into_iter()
+                .take_while(|e| *e < IndType::MAX)
+                .collect();
+        }
+        self.children[word[0] as usize].query(&word[1..], char_arr)
+    }
+}
+
+impl QueriableLevel for TrieLeaves {
+    fn query(&self, word: &[u8], char_arr: &[u8]) -> Vec<IndType> {
+        let mut out = Vec::new();
+        let l = log_search(&self.0, |e| e.suffix.under(char_arr, word));
+        let r = log_search(&self.0[l..], |e| e.suffix.not_over(char_arr, word)) + l;
+        for leaf in self.0[l..r].iter() {
+            out.extend(leaf.ids.iter());
+        }
+        out.sort();
+        out
+    }
+}
+
+impl PrepTrieRoot {
+    fn finalize(mut self, char_array: &Vec<u8>) -> TrieNodeRoot {
+        self.out.sort();
+        let out = self.out;
+        let children = child_into(self.children, |c| c.finalize(char_array));
+        TrieNodeRoot { out, children }
+    }
+
+    fn extend(
+        &mut self,
+        idxed_word: &IndexedWord,
+        char_array: &mut Vec<u8>,
+        start_char: usize,
+        last_suff: &[u8],
+    ) -> Vec<u8> {
+        let full_word = &idxed_word.word[start_char..];
+        self.out.push_unique(idxed_word.outer_idx as IndType);
+        if full_word.len() < 1 {
+            return last_suff.into();
+        }
+        let l1 = &mut self.children[full_word[0] as usize];
+        l1.out.push_unique(idxed_word.outer_idx as IndType);
+        if full_word.len() < 2 {
+            return last_suff.into();
+        }
+        let l2 = &mut l1.children[full_word[1] as usize];
+        let suffix = &full_word[BRANCHING_LEVELS..];
+        let overlap = get_overlap(suffix, last_suff);
+        char_array.extend(suffix[overlap..].iter());
+        let ln = suffix.len();
+        let suff_by_idx = WordViaCharr((char_array.len() - ln) as u32, ln as u16);
+        let l2_idx = get_i(l2, suff_by_idx);
+        l2[l2_idx].ids.push(idxed_word.outer_idx as IndType);
+        suffix.into()
+    }
+}
+
+impl PrepTrieL1 {
+    fn finalize(mut self, char_array: &Vec<u8>) -> TrieNodeL1 {
+        self.out.sort();
+        let out = self.out;
+        let children = child_into(self.children, |mut c| {
+            c.sort_by_key(|tl| tl.suffix.cut(&char_array));
+            c.into_iter()
+                .map(|mut leaf| {
+                    leaf.ids.sort();
+                    TrieLeaf {
+                        ids: leaf.ids.into(),
+                        suffix: leaf.suffix,
+                    }
+                })
+                .into()
+        });
+        TrieNodeL1 { out, children }
+    }
+}
+
+impl WordViaCharr {
+    fn cut<'a>(&self, char_arr: &'a [u8]) -> &'a [u8] {
+        &char_arr[self.0 as usize..(self.0 as usize + self.1 as usize)]
+    }
+
+    fn under(&self, char_arr: &[u8], comp: &[u8]) -> bool {
+        //consider empty comp
+        self.cmp_meta(char_arr, comp, false)
+    }
+
+    fn not_over(&self, char_arr: &[u8], comp: &[u8]) -> bool {
+        self.cmp_meta(char_arr, comp, true)
+    }
+
+    fn cmp_meta(&self, char_arr: &[u8], comp: &[u8], breaker: bool) -> bool {
+        let my_size = self.1 as usize;
+        let my_arr = self.cut(char_arr);
+        for i in 0..comp.len() {
+            if i >= my_size {
+                break;
+            }
+            if my_arr[i] > comp[i] {
+                return false;
+            }
+            if my_arr[i] < comp[i] {
+                return true;
             }
         }
+        breaker
+    }
+}
+
+impl CustomTrie {
+    fn new(mut idxed_words: Vec<IndexedWord>) -> Self {
+        idxed_words.sort_by(|l, r| get_suffix(&l.word).cmp(&get_suffix(&r.word)));
+        let mut char_array = Vec::new();
+        let mut last_suff: Vec<u8> = Vec::new();
+        let mut prep_tree = PrepTrieRoot::new();
+        let mut inner_prep = PrepTrieRoot::new();
+
+        for idxed_word in idxed_words
+            .into_iter()
+            .rev()
+            .tqdm()
+            .desc(Some("building trie"))
+            .filter(|e| e.word.len() > 0)
+        {
+            last_suff = prep_tree.extend(&idxed_word, &mut char_array, 0, &last_suff);
+            for i in 1..(idxed_word.word.len() - 1) {
+                inner_prep.extend(&idxed_word, &mut char_array, i, &last_suff);
+            }
+        }
+        Self {
+            prefix_tree: prep_tree.finalize(&char_array),
+            inner_tree: inner_prep.finalize(&char_array),
+            char_array: char_array.into(),
+        }
     }
 
-    fn sort(&mut self) {
-        for e in (1..MAX_HEAP_SIZE).rev() {
-            self.arr.swap(0, e);
-            self.reorganize_limited(0, e);
+    fn query(&self, sword: &StackWordSet, limit: usize) -> Vec<IndType> {
+        //should iterate through matches
+        //return _ordered_ indeices of matches
+        // I. perfect match at start of word
+        // II. perfect match within the word
+        // III. parital match anywhere
+        //    - this might be multilevel based on partials similarity
+        // should be optional to return up to a number or all - for multiword
+        if sword.breaks_count <= 1 {
+            let be = sword.break_array[0] as usize;
+            let word = &sword.char_array[0..be];
+            let mut matches = self.prefix_tree.query(word, &self.char_array);
+            if matches.len() < limit {
+                extend_sorted(&mut matches, self.inner_tree.query(word, &self.char_array));
+            }
+            matches
+        } else {
+            Vec::new()
         }
     }
 }
@@ -163,12 +276,29 @@ impl StackWordSet {
             breaks_count: 0,
         };
         let mut i: u8 = 0;
-        for c in deunicode(&words.to_lowercase()).chars() {
-            if (c == ' ') && (i > 0) {
+        for c in deunicode(&words.to_lowercase()).as_bytes().iter() {
+            if (*c == SPLIT_CHAR) && (i > 0) {
                 out.new_break(i);
-            } else {
-                c.encode_utf8(&mut out.char_array[(i as usize)..(i.add(1) as usize)]);
+                if out.breaks_count == MAX_QUERY_WORDS {
+                    // println!(
+                    //     "ran out of breaks at {} for {}",
+                    //     i,
+                    //     &words[..out.break_array[5] as usize]
+                    // );
+                    return out;
+                }
+            } else if (*c >= ASCII_LC_MIN) && (*c <= ASCII_LC_MAX) {
+                out.char_array[i as usize] = *c - ASCII_LC_MIN;
                 i.add_assign(1);
+                if i == 0 {
+                    //overflow
+                    // println!(
+                    //     "ran out of chars at {} for {}",
+                    //     out.breaks_count,
+                    //     &words[..out.break_array[5] as usize]
+                    // );
+                    return out;
+                }
             }
         }
         out.new_break(i);
@@ -176,48 +306,14 @@ impl StackWordSet {
     }
 
     fn new_break(&mut self, i: u8) {
-        self.break_array[self.breaks_count as usize] = i as u8;
-        self.breaks_count.add_assign(1);
-    }
-
-    fn get_heap(self, engine: &SearchEngine) -> FixedHeap<OrdererIndexed> {
-        if self.breaks_count == 1 {
-            let be = self.break_array[0];
-            if be == 0 {
-                let mut h = FixedHeap::new();
-                for i in 0..MAX_HEAP_SIZE {
-                    h.push(OrdererIndexed(OrdererBase(0, 0), i as u32));
-                }
-                return h;
-            } else if be == 1 {
-                let mut h = FixedHeap::new();
-                let c = self.char_array[0];
-                let (mut i, mut e, mut wi) = (0, 0, 0);
-                for idxs in engine.inds.iter() {
-                    i += idxs.skipped_n;
-                    if idxs.skipped_n != 0 {
-                        wi = 0
-                    }
-                    let start_idx = engine.words[idxs.word_idx as usize].0;
-                    if engine.char_array[start_idx as usize] == c {
-                        h.push(OrdererIndexed(OrdererBase(wi, 0), i as u32));
-                        e += 1;
-                        if e == MAX_HEAP_SIZE {
-                            return h;
-                        }
-                    }
-                    wi += 1;
-                }
-                return h;
-            }
-            let matcher = SingleWordMatcher {
-                query: &self.char_array[..be as usize],
-            };
-            matcher.get_order_heap(&engine)
+        let last_break = if self.breaks_count > 0 {
+            self.break_array[self.breaks_count - 1]
         } else {
-            let matcher =
-                MultiWordMatcher::new(self.char_array, &self.break_array[..self.breaks_count]);
-            matcher.get_order_heap(&engine)
+            0
+        };
+        if last_break != i {
+            self.break_array[self.breaks_count as usize] = i as u8;
+            self.breaks_count.add_assign(1);
         }
     }
 }
@@ -227,246 +323,84 @@ impl SearchEngine {
         //TODO:
         // involve sizetype (authors-names is only u8 max len!)
         // maybe if small enough precompile the whole whing with the data - store on stack
-        // prefix-tree for single word queries
         // 26, 676, 17576, 456976
-        let mut idxed_words = Vec::new();
-        for (hi, haystack) in haystacks.enumerate() {
-            let mut word = Vec::new();
-            let mut inner_idx = 0;
-            for c in deunicode(&haystack.to_lowercase()).into_bytes().iter() {
-                if c == &SPLIT_CHAR {
-                    let mut old_word: Vec<u8> = Vec::new();
-                    std::mem::swap(&mut old_word, &mut word);
-                    idxed_words.push(IndexedWord {
-                        word: old_word,
-                        inner_idx,
-                        outer_idx: hi,
-                    });
-                    inner_idx += 1;
-                } else if (c >= &ASCII_LC_MIN) && (c <= &ASCII_LC_MAX) {
-                    word.push(*c);
-                }
+        let idxed_words = get_idxed_words(haystacks);
+        let trie = CustomTrie::new(idxed_words);
+        Self { tree: trie.into() }
+    }
+
+    pub fn query(&self, query: &str) -> Vec<IndType> {
+        let sword = StackWordSet::new(query);
+        self.tree
+            .query(&sword, MAX_HEAP_SIZE)
+            .into_iter()
+            .take(MAX_HEAP_SIZE)
+            .collect()
+    }
+}
+
+/// gets i so that arr\[..i\] all true arr\[i..\] all false
+fn log_search<T, F: Fn(&T) -> bool>(arr: &[T], f: F) -> usize {
+    if arr.len() == 0 {
+        return 0;
+    }
+    let (mut l, mut r) = (0, arr.len());
+    loop {
+        let m = (l + r) / 2;
+        if f(&arr[m]) {
+            l = m + 1;
+        } else {
+            r = m;
+        }
+        if l >= r {
+            break;
+        }
+    }
+    l
+}
+
+fn extend_sorted<T: PartialOrd>(int_v: &mut Vec<T>, add_v: Vec<T>) {
+    let mut i = 0;
+    let init_i_len = int_v.len();
+    let mut last_ge = None;
+    for add_e in add_v.into_iter() {
+        while i < init_i_len {
+            if int_v[i] < add_e {
+                i += 1;
+            } else {
+                last_ge = Some(i);
+                break;
             }
+        }
+        if match last_ge {
+            None => true,
+            Some(i) => add_e != int_v[i],
+        } {
+            int_v.push(add_e)
+        }
+    }
+}
+
+fn get_idxed_words<I: Iterator<Item = String>>(haystacks: I) -> Vec<IndexedWord> {
+    let mut idxed_words = Vec::new();
+    for (hi, haystack) in haystacks.enumerate() {
+        let wstack = StackWordSet::new(&haystack);
+        let mut last_break = 0;
+        for break_n in 0..wstack.breaks_count {
+            let this_break = wstack.break_array[break_n] as usize;
             idxed_words.push(IndexedWord {
-                word,
-                inner_idx,
+                word: wstack.char_array[last_break..this_break].to_vec(),
+                _inner_idx: break_n,
                 outer_idx: hi,
             });
-        }
-        idxed_words.sort_by(|l, r| l.word.cmp(&r.word));
-        let mut char_array = Vec::new();
-        let mut last_word: Vec<u8> = Vec::new();
-        let mut prep_idx_sets = Vec::new();
-        for idxed_word in idxed_words.into_iter() {
-            if idxed_word.word.len() == 0 {
-                continue;
-            }
-            let overlap = if idxed_word.word.starts_with(&last_word) {
-                last_word.len()
-            } else {
-                0
-            };
-            char_array.extend(idxed_word.word[overlap..].iter());
-            last_word = idxed_word.word;
-            prep_idx_sets.push((
-                char_array.len() - last_word.len(),
-                last_word.len(),
-                idxed_word.outer_idx,
-                idxed_word.inner_idx,
-            ))
-        }
-        prep_idx_sets.sort();
-
-        let mut prep_round2 = Vec::new();
-        let mut words = Vec::new();
-        let mut last_word = (0, 0);
-        for (w0, w1, hi, ii) in prep_idx_sets.into_iter() {
-            let this_word = (w0 as u32, w1 as u16);
-            if last_word != this_word {
-                words.push(this_word.clone());
-                last_word = this_word;
-            }
-            prep_round2.push((hi, ii, words.len() - 1));
-        }
-        prep_round2.sort();
-
-        let mut inds = Vec::new();
-        let mut last_hi = 0;
-        for (hi, _, wind) in prep_round2.into_iter() {
-            let val = ByteInd {
-                word_idx: wind as u32,
-                skipped_n: (hi - last_hi) as u16,
-            };
-            inds.push(val);
-            last_hi = hi;
-        }
-
-        Self {
-            char_array: char_array.into(),
-            inds: inds.into(),
-            words: words.into(),
+            last_break = this_break;
         }
     }
-
-    pub fn query(&self, query: &str) -> [IndType; MAX_HEAP_SIZE] {
-        let mut heap = StackWordSet::new(query).get_heap(self);
-        heap.sort();
-        heap.arr.map(|e| e.1)
-    }
+    idxed_words
 }
 
-impl<'a> MultiWordMatcher<'a> {
-    fn new(query_arr: [u8; MAX_QUERY_CHARS], breaks: &'a [u8]) -> Self {
-        Self {
-            query_arr,
-            breaks,
-            matching_basis: [OrdererBase::max_value(); MAX_QUERY_WORDS],
-            mathing_inds: [0; MAX_QUERY_WORDS],
-        }
-    }
-
-    fn reset(&mut self) {
-        for i in 0..self.breaks.len() {
-            self.matching_basis[i] = OrdererBase::max_value();
-        }
-    }
-}
-
-impl<'a> OuterWordIter<'a> {
-    fn new(mut siter: std::slice::Iter<'a, ByteInd>) -> Option<Self> {
-        if let Some(current_b_ind) = siter.next() {
-            return Some(Self {
-                siter,
-                current_b_ind,
-                keeps_going: true,
-                new_inner: true,
-                skipped_n: current_b_ind.skipped_n,
-            });
-        }
-        None
-    }
-}
-
-impl Maxed for OrdererBase {
-    fn max_value() -> Self {
-        Self(u8::MAX, u8::MAX)
-    }
-}
-
-impl Maxed for OrdererIndexed {
-    fn max_value() -> Self {
-        Self(OrdererBase::max_value(), IndType::MAX)
-    }
-}
-
-impl WordMatcher for MultiWordMatcher<'_> {
-    fn order_from_words(
-        &mut self,
-        words: &mut OuterWordIter<'_>,
-        state: &SearchEngine,
-        cache: &mut Vec<Option<OrdererBase>>,
-    ) -> OrdererBase {
-        self.reset();
-        for (word_idx, b_ind) in words.enumerate() {
-            let mut start_p = 0;
-            for (break_idx, end_p) in self.breaks.iter().enumerate() {
-                let end_u = *end_p as usize;
-                let new_order = get_score(&self.query_arr[start_p..end_u], cache, b_ind, state);
-                start_p = end_u;
-
-                if new_order < self.matching_basis[break_idx] {
-                    self.matching_basis[break_idx] = new_order;
-                    self.mathing_inds[break_idx] = word_idx as u16;
-                };
-            }
-        }
-        let n_i = n_unique(&mut self.mathing_inds[..self.breaks.len()]);
-        // TODO: incorporate this, also the fei fei li problem
-        // also, incorporate matching order of matched words
-        self.matching_basis[..self.breaks.len()]
-            .iter()
-            .max()
-            .unwrap()
-            .to_owned()
-    }
-}
-
-impl WordMatcher for SingleWordMatcher<'_> {
-    fn order_from_words(
-        &mut self,
-        words: &mut OuterWordIter<'_>,
-        state: &SearchEngine,
-        cache: &mut Vec<Option<OrdererBase>>,
-    ) -> OrdererBase {
-        let mut order = OrdererBase::max_value();
-        for b_ind in words {
-            let new_order = get_score(self.query, cache, b_ind, state);
-            if new_order < order {
-                order = new_order;
-            }
-        }
-        order
-    }
-}
-
-impl<'a> Iterator for OuterWordIter<'a> {
-    type Item = &'a ByteInd;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.new_inner {
-            self.new_inner = false;
-            return Some(self.current_b_ind);
-        }
-
-        if let Some(b_ind) = self.siter.next() {
-            self.current_b_ind = b_ind;
-            if b_ind.skipped_n > 0 {
-                self.new_inner = true;
-                self.skipped_n = self.current_b_ind.skipped_n;
-                return None;
-            }
-            return Some(self.current_b_ind);
-        } else {
-            self.keeps_going = false;
-        }
-        None
-    }
-}
-
-fn get_score(
-    needle: &[u8],
-    cache: &mut Vec<Option<OrdererBase>>,
-    bo: &ByteInd,
-    state: &SearchEngine,
-) -> OrdererBase {
-    let wuid = bo.word_idx as usize;
-    match cache[wuid] {
-        Some(o) => o,
-        None => {
-            let word = state.words[wuid];
-            let haystack = &state.char_array[word.0 as usize..(word.0 + word.1 as u32) as usize];
-            let o = get_score_base(needle, haystack);
-            cache[wuid] = Some(o.clone());
-            o
-        }
-    }
-}
-
-fn get_score_base(needle: &[u8], haystack: &[u8]) -> OrdererBase {
-    let (hl, nl) = (haystack.len() as u8, needle.len() as u8);
-    if hl > nl {
-        if let Some(lmatch) = levenshtein_search(needle, haystack).next() {
-            OrdererBase(lmatch.k as u8, lmatch.start as u8)
-        } else {
-            OrdererBase(hl, hl)
-        }
-    } else {
-        let score = rdamerau(needle, haystack);
-        OrdererBase(score as u8, 0)
-    }
-}
-
-fn n_unique<T: PartialEq + Ord + std::fmt::Debug>(arr: &mut [T]) -> u8 {
+fn _n_unique<T: PartialEq + Ord>(arr: &mut [T]) -> u8 {
+    //TODO: use this for better matches
     arr.sort();
     let mut o = 0;
     for (i, e) in arr.iter().enumerate().skip(1) {
@@ -475,4 +409,127 @@ fn n_unique<T: PartialEq + Ord + std::fmt::Debug>(arr: &mut [T]) -> u8 {
         }
     }
     o
+}
+
+fn get_suffix(word: &Vec<u8>) -> Vec<u8> {
+    word.iter().skip(BRANCHING_LEVELS).map(|e| *e).collect()
+}
+
+fn get_overlap<T: PartialEq>(suffix: &[T], word: &[T]) -> usize {
+    if word.ends_with(suffix) {
+        suffix.len()
+    } else {
+        0
+    }
+}
+
+fn get_i(v: &mut Vec<PrepLeaf>, e: WordViaCharr) -> usize {
+    for (i, pl) in v.iter().enumerate() {
+        if e == pl.suffix {
+            return i;
+        }
+    }
+    v.push(PrepLeaf {
+        suffix: e,
+        ids: Vec::new(),
+    });
+    return v.len() - 1;
+}
+
+fn child_into<S, T, F>(children: [S; CHAR_COUNT], f: F) -> [T; CHAR_COUNT]
+where
+    F: FnMut(S) -> T,
+{
+    match children.into_iter().map(f).collect::<Vec<T>>().try_into() {
+        Ok(a) => a,
+        Err(_) => panic!("cant collect to {CHAR_COUNT}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get_test_engine() -> SearchEngine {
+        let haystacks = vec![
+            "abc",
+            "xyz",
+            "man woo",
+            "axa",
+            "mewixalion",
+            "bumble rumble",
+        ];
+        SearchEngine::new(haystacks.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn gets_empty() {
+        let engine = get_test_engine();
+        assert_eq!(engine.query("").len(), 6);
+    }
+
+    #[test]
+    fn gets_starts() {
+        let engine = get_test_engine();
+        for (q, r0) in vec![
+            ("a", 0),
+            ("x", 1),
+            ("ma", 2),
+            ("w", 2),
+            ("ax", 3),
+            ("mewix", 4),
+        ]
+        .iter()
+        {
+            let result = engine.query(q);
+            assert_eq!(result[0], *r0);
+        }
+        assert_eq!(engine.query("a")[1], 3);
+        assert_eq!(engine.query("q").len(), 0);
+    }
+
+    #[test]
+    fn gets_innards() {
+        let engine = get_test_engine();
+        for (q, r0) in vec![
+            ("y", 1),
+            ("an", 2),
+            ("xa", 3),
+            ("ion", 4),
+            ("wix", 4),
+            ("ix", 4),
+        ]
+        .iter()
+        {
+            let result = engine.query(q);
+            println!("{:?} for {}", result, q);
+            assert_eq!(result[0], *r0);
+        }
+        assert_eq!(engine.query("x")[1], 3);
+        assert_eq!(engine.query("x").len(), 3);
+        //cant find based on one character that is the last one
+        println!("{:?}", engine.query("c"));
+        assert_eq!(engine.query("c").len(), 0);
+    }
+
+    #[test]
+    fn optimized_array() {
+        let haystacks = vec!["ababc", "xaabc", "wuabc"];
+        let engine = SearchEngine::new(haystacks.iter().map(|s| s.to_string()));
+        assert_eq!(engine.tree.char_array.len(), 3);
+    }
+
+    #[test]
+    fn gets_long() {
+        let haystacks = vec!["Hiroyasa Hidaka", "Manuel Hidalgo", "Hisao Hidaka"];
+        let engine = SearchEngine::new(haystacks.iter().map(|s| s.to_string()));
+        assert_eq!(engine.query("hidalgo")[0], 1);
+    }
+
+    #[test]
+    fn gets_ch() {
+        let haystacks = vec!["China", "Chile", "Chad"];
+        let engine = SearchEngine::new(haystacks.iter().map(|s| s.to_string()));
+        assert_eq!(engine.query("ch")[0], 0);
+    }
 }

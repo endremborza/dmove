@@ -4,5 +4,5 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+tqdm = "0.7"
 deunicode = "1.6.0"
-triple_accel = "0.4"
