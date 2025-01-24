@@ -240,6 +240,9 @@ pub struct Source {
     is_in_doaj: Option<bool>,
     homepage_url: Option<String>,
     updated_date: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_json_array")]
+    alternate_titles: Option<String>,
+    abbreviated_title: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -287,6 +290,15 @@ pub struct Authorship {
     pub institutions: Option<String>,
     author_position: Option<String>,
     raw_affiliation_string: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct SummaryStats {
+    pub parent_id: Option<String>,
+    pub h_index: u32,
+    pub i10_index: u32,
+    pub works_count: u32,
+    pub cited_by_count: u64,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -414,7 +426,6 @@ where
 {
     let h_maps_o = Option::<Vec<IdStruct>>::deserialize(deserializer)?;
     if let Some(h_maps) = h_maps_o {
-        //TODO ugly quick dirty
         let ids: Vec<String> = h_maps.iter().map(|e| e.id.clone().unwrap()).collect();
         return Ok(Some(ids.join(";")));
     }
@@ -446,7 +457,7 @@ where
 {
     let json_array_opt: Option<Vec<Value>> = Option::deserialize(deserializer)?;
     if let Some(json_array) = json_array_opt {
-        let json_string = serde_json::to_string(&json_array).expect("gotem");
+        let json_string = serde_json::to_string(&json_array).unwrap();
         return Ok(Some(json_string));
     }
     return Ok(None);
@@ -498,8 +509,22 @@ pub mod post {
         pub field: String,
     }
 
-    add_id_traits!(Author);
-    add_strict_parsed_id_traits!(Author, Topic);
+    #[derive(Deserialize, Debug)]
+    pub struct Institution {
+        id: String,
+        pub country_code: Option<String>,
+        pub display_name_acronyms: Option<String>,
+    }
+
+    #[derive(Deserialize, Debug)]
+    pub struct Source {
+        id: String,
+        pub alternate_titles: Option<String>,
+        // abbreviated_title: Option<String>,
+    }
+
+    add_id_traits!(Author, Institution, Source);
+    add_strict_parsed_id_traits!(Author, Topic, Institution, Source);
 
     impl ParsedId for SubField {
         fn get_parsed_id(&self) -> BigId {

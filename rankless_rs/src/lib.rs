@@ -1,31 +1,29 @@
 #![feature(min_specialization)]
+#![feature(future_join)]
 use std::io;
 
-mod bbns;
-mod common;
+pub mod agg_tree;
+pub mod common;
 mod csv_writers;
-pub mod gen_derived_links1;
-pub mod gen_derived_links2;
-pub mod gen_entity_mapping;
-pub mod gen_init_links;
+pub mod env_consts;
+mod filter;
+pub mod gen;
 mod oa_structs;
+pub mod steps;
 
-//
-mod agg_tree;
-
-pub use common::{Quickest, QuickestBox, QuickestVBox, ReadIter, Stowage};
+pub use common::{
+    CiteCountMarker, NameExtensionMarker, NameMarker, Quickest, QuickestBox, QuickestVBox,
+    ReadFixIter, ReadIter, SemanticIdMarker, Stowage, WorkCountMarker,
+};
 
 macro_rules! mods_as_comms {
     ($($mod_name:ident),*) => {
-        $(mod $mod_name;)*
-
         fn subrun(comm: &str, mut stowage: Stowage) -> io::Result<()>{
             $(
-
             let mstr = stringify!($mod_name);
             if (comm == mstr) {
                 stowage.set_namespace(mstr);
-                return $mod_name::main(stowage);
+                return steps::$mod_name::main(stowage);
             }
             )*
             Ok(())
@@ -33,20 +31,23 @@ macro_rules! mods_as_comms {
     };
 }
 
-mods_as_comms!(
-    filter,
-    entity_mapping,
-    init_atts,
-    derive_links1,
-    derive_links2
-);
-
 pub fn runner(comm: &str, root_str: &str, in_root_o: Option<String>) -> io::Result<()> {
     let stowage = Stowage::new(root_str);
     if comm == "to-csv" {
         if let Some(in_root_str) = in_root_o {
             csv_writers::write_csvs(&in_root_str, &stowage)?;
         }
+    } else if comm == "filter" {
+        return filter::main(stowage);
     }
     subrun(comm, stowage)
 }
+mods_as_comms!(
+    a1_entity_mapping,
+    a2_init_atts,
+    derive_links1,
+    derive_links2,
+    derive_links3,
+    derive_links4,
+    derive_links5
+);
