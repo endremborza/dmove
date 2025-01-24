@@ -137,30 +137,41 @@ impl<I: PartialEq, N, C> PartialEq for AggTreeBase<I, N, C> {
     }
 }
 
-pub struct VecExtender<'a, T> {
-    v: &'a mut Vec<T>,
+pub struct ArrExtender<'a, T> {
+    v: &'a mut T,
 }
 
-pub trait OrderedMapper {
+pub trait OrderedMapper<T> {
     type Elem;
     fn left_map(&mut self, e: &Self::Elem);
     fn right_map(&mut self, e: &Self::Elem);
     fn common_map(&mut self, l: &Self::Elem, r: &Self::Elem);
 }
 
-impl<'a, T> OrderedMapper for VecExtender<'a, T>
+pub trait ExtendableArr<T> {
+    fn add(&mut self, e: T);
+}
+
+impl<T> ExtendableArr<T> for Vec<T> {
+    fn add(&mut self, e: T) {
+        self.push(e)
+    }
+}
+
+impl<'a, T, V> OrderedMapper<T> for ArrExtender<'a, V>
 where
     T: Clone,
+    V: ExtendableArr<T>,
 {
     type Elem = T;
     fn left_map(&mut self, e: &Self::Elem) {
-        self.v.push(e.clone())
+        self.v.add(e.clone())
     }
     fn right_map(&mut self, e: &Self::Elem) {
-        self.v.push(e.clone())
+        self.v.add(e.clone())
     }
     fn common_map(&mut self, l: &Self::Elem, _r: &Self::Elem) {
-        self.v.push(l.clone())
+        self.v.add(l.clone())
     }
 }
 
@@ -169,17 +180,18 @@ where
     T: PartialOrd + Clone,
 {
     let mut v = Vec::new();
-    sorted_iters_to_vec(&mut v, left_vec.iter(), right_vec.iter());
+    sorted_iters_to_arr(&mut v, left_vec.iter(), right_vec.iter());
     v
 }
 
-pub fn sorted_iters_to_vec<'a, 'b, T, IL, IR>(out: &mut Vec<T>, left_it: IL, right_it: IR)
+pub fn sorted_iters_to_arr<'a, 'b, T, IL, IR, V>(out: &mut V, left_it: IL, right_it: IR)
 where
     T: PartialOrd + Clone + 'a + 'b,
     IL: Iterator<Item = &'a T>,
     IR: Iterator<Item = &'b T>,
+    V: ExtendableArr<T>,
 {
-    let mut vadd = VecExtender { v: out };
+    let mut vadd = ArrExtender { v: out };
     ordered_calls(left_it, right_it, &mut vadd);
 }
 
@@ -188,7 +200,7 @@ where
     T: PartialOrd + 'a + 'b,
     IL: Iterator<Item = &'a T>,
     IR: Iterator<Item = &'b T>,
-    M: OrderedMapper<Elem = T> + ?Sized,
+    M: OrderedMapper<T, Elem = T> + ?Sized,
 {
     let mut left_elem = match left_it.next() {
         Some(v) => v,
