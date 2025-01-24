@@ -312,10 +312,9 @@ impl OrderedMapper<WorkWInd> for WVecMerger<'_> {
     fn common_map(&mut self, l: &Self::Elem, r: &Self::Elem) {
         self.node.update_with_wt(r);
         let last_len = self.wv_into.targets.len() as u32;
-        let left_it =
-            (self.left_i..(self.left_i + (l.1 as usize))).map(|i| &self.left_from.targets[i]);
+        let left_it = self.left_from.targets[self.left_i..(self.left_i + (l.1 as usize))].iter();
         let right_it =
-            (self.right_i..(self.right_i + (r.1 as usize))).map(|i| &self.right_from.targets[i]);
+            self.right_from.targets[self.right_i..(self.right_i + (r.1 as usize))].iter();
 
         self.left_i += l.1 as usize;
         self.right_i += r.1 as usize;
@@ -341,8 +340,8 @@ impl PrepNode {
     fn update_and_get_collapsed_node(&mut self, other: &mut Self) -> CollapsedNode {
         let mut merger = WVecMerger::new(&mut self.merge_into, &self.merge_from, &other.merge_from);
         //one of them to
-        let left_it = (0..self.merge_from.sources.len()).map(|e| &self.merge_from.sources[e]);
-        let right_it = (0..other.merge_from.sources.len()).map(|e| &other.merge_from.sources[e]);
+        let left_it = self.merge_from.sources.iter();
+        let right_it = other.merge_from.sources.iter();
         ordered_calls(left_it, right_it, &mut merger);
         let node = merger.node;
         std::mem::swap(&mut self.merge_into, &mut self.merge_from);
@@ -606,9 +605,9 @@ impl Collapsing for PrepNode {
     type Collapsed = CollapsedNode;
     fn collapse(&mut self) -> Self::Collapsed {
         let mut out = CollapsedNode::init_empty();
-        for i in 0..self.merge_from.sources.len() {
-            out.update_with_wt(&self.merge_from.sources[i]);
-        }
+        self.merge_from.sources.iter().for_each(|e| {
+            out.update_with_wt(e);
+        });
         out
     }
 }
