@@ -10,8 +10,8 @@ use crate::{
 };
 use rankless_rs::{
     agg_tree::{
-        ordered_calls, sorted_iters_to_vec, AggTreeBase, FoldingStackConsumer, HeapIterator,
-        MinHeap, OrderedMapper, ReinstateFrom, SortedRecord, Updater,
+        ordered_calls, sorted_iters_to_arr, AggTreeBase, ExtendableArr, FoldingStackConsumer,
+        HeapIterator, MinHeap, OrderedMapper, ReinstateFrom, SortedRecord, Updater,
     },
     common::{read_buf_path, write_buf_path, InitEmpty},
     env_consts::START_YEAR,
@@ -50,7 +50,7 @@ struct IddCollNode<E: NumberedEntity> {
     node: CollapsedNode,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct WorkWInd(WT, WorkCiteT);
 
 impl PartialEq for WorkWInd {
@@ -65,9 +65,12 @@ impl PartialOrd for WorkWInd {
     }
 }
 
+const SOURCE_BUF_SIZE: usize = 0x200;
+const TARGET_BUF_SIZE: usize = 0x500;
+
 struct WVecPair {
-    pub sources: Vec<WorkWInd>,
-    pub targets: Vec<WT>,
+    pub sources: StackWExtension<SOURCE_BUF_SIZE, WorkWInd>,
+    pub targets: StackWExtension<TARGET_BUF_SIZE, WT>,
 }
 
 struct PrepNode {
@@ -77,11 +80,17 @@ struct PrepNode {
 
 struct WVecMerger<'a> {
     left_i: usize,
-    left_from: &'a Vec<WT>,
+    left_from: &'a WVecPair,
     right_i: usize,
-    right_from: &'a Vec<WT>,
+    right_from: &'a WVecPair,
     wv_into: &'a mut WVecPair,
     node: CollapsedNode,
+}
+
+struct StackWExtension<const L: usize, T> {
+    buf: [T; L],
+    blen: usize,
+    vec: Vec<T>,
 }
 
 pub trait TreeGetter: NumberedEntity {
@@ -119,12 +128,9 @@ trait TreeMaker {
         <Self::SortedRec as SortedRecord>::FlatRecord: Ord + Clone,
     {
         let tid = q.tid.unwrap_or(0);
-        println!(
-            "requested entity: {}({}) tid:{}",
-            Self::Root::NAME,
-            q.eid,
-            tid
-        );
+        let eid = <NET<Self::Root> as UnsignedNumber>::from_usize(q.eid.to_usize());
+        let req_id = format!("{}({}:{})", Self::Root::NAME, eid, tid);
+        println!("requested entity: {req_id}");
         let _year = q.year.unwrap_or(START_YEAR);
         let year = "X"; //TODO
         let tree_path = gets
@@ -136,19 +142,18 @@ trait TreeMaker {
             .join(tid.to_string())
             .join(year.to_string());
         let mut full_tree: BufSerTree = if !tree_path.exists() {
-            let eid = <NET<Self::Root> as UnsignedNumber>::from_usize(q.eid.to_usize());
             let now = std::time::Instant::now();
             let heap = Self::get_heap(eid, gets);
-            println!("got heap in {}", now.elapsed().as_millis());
+            println!("{req_id}: got heap in {}", now.elapsed().as_millis());
             let hither: HeapIterator<Self::SortedRec> = heap.into();
 
             let now = std::time::Instant::now();
             let root = Self::get_root_tree(eid, hither);
-            println!("got root in {}", now.elapsed().as_millis());
+            println!("{req_id}: got root in {}", now.elapsed().as_millis());
 
             let now = std::time::Instant::now();
             let ser_tree: BufSerTree = root.into();
-            println!("converted tree in {}", now.elapsed().as_millis());
+            println!("{req_id}: converted tree in {}", now.elapsed().as_millis());
 
             let year_parent = tree_path.parent().unwrap();
             create_dir_all(year_parent).unwrap();
@@ -159,7 +164,7 @@ trait TreeMaker {
 
             let now = std::time::Instant::now();
             write_buf_path(&ser_tree, year_parent.join(year.to_string())).unwrap();
-            println!("wrote tree in {}", now.elapsed().as_millis());
+            println!("{req_id}: wrote tree in {}", now.elapsed().as_millis());
             ser_tree
         } else {
             read_buf_path(tree_path).unwrap()
@@ -168,23 +173,21 @@ trait TreeMaker {
         let now = std::time::Instant::now();
         let bds = Self::get_spec().breakdowns;
         prune(&mut full_tree, stats, &bds);
-        println!("pruned in {}", now.elapsed().as_millis());
+        println!("{req_id}: pruned in {}", now.elapsed().as_millis());
 
-        let now = std::time::Instant::now();
         let parent = gets
             .stowage
             .path_from_ns(<WorksNames as NamespacedEntity>::NS);
         let mut work_name_basis =
             VattReadingRefMap::<WorksNames>::from_locator(&gets.wn_locators, &parent);
-        println!("loaded in {}", now.elapsed().as_millis());
 
         let now = std::time::Instant::now();
         let atts = get_atts(&full_tree, &bds, stats, &mut work_name_basis);
-        println!("got atts in {}", now.elapsed().as_millis());
+        println!("{req_id}: got atts in {}", now.elapsed().as_millis());
 
         let now = std::time::Instant::now();
         let tree = full_tree.into();
-        println!("converted in {}", now.elapsed().as_millis());
+        println!("{req_id}: converted in {}", now.elapsed().as_millis());
         TreeResponse { tree, atts }
     }
 }
@@ -198,23 +201,60 @@ trait FoldStackBase<C> {
 
 trait TopTree {}
 
+impl<const L: usize, T> StackWExtension<L, T>
+where
+    T: InitEmpty + Copy + Clone,
+{
+    fn new() -> Self {
+        Self {
+            buf: [T::init_empty(); L],
+            vec: Vec::new(),
+            blen: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        unsafe { self.vec.set_len(0) }
+        self.blen = 0;
+    }
+
+    fn get(&self, ind: usize) -> &T {
+        if ind >= self.buf.len() {
+            &self.vec[ind - self.blen]
+        } else {
+            &self.buf[ind]
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.blen + self.vec.len()
+    }
+}
+
 impl WVecPair {
     fn new() -> Self {
         Self {
-            sources: Vec::new(),
-            targets: Vec::new(),
+            sources: StackWExtension::new(),
+            targets: StackWExtension::new(),
         }
     }
     fn reset(&mut self) {
-        unsafe {
-            self.sources.set_len(0);
-            self.targets.set_len(0);
+        self.sources.reset();
+        self.targets.reset();
+    }
+
+    fn add(&mut self, e: &WorkWInd, other: &Self, other_tind: usize) {
+        self.sources.add(*e);
+        for i in 0..e.1.to_usize() {
+            let ind = other_tind + i;
+            let val = other.targets.get(ind);
+            self.targets.add(*val);
         }
     }
 }
 
 impl<'a> WVecMerger<'a> {
-    fn new(wv_into: &'a mut WVecPair, left_from: &'a Vec<WT>, right_from: &'a Vec<WT>) -> Self {
+    fn new(wv_into: &'a mut WVecPair, left_from: &'a WVecPair, right_from: &'a WVecPair) -> Self {
         Self {
             left_i: 0,
             right_i: 0,
@@ -247,59 +287,54 @@ impl CollapsedNode {
     }
 }
 
-impl OrderedMapper for WVecMerger<'_> {
+impl<T, const L: usize> ExtendableArr<T> for StackWExtension<L, T> {
+    fn add(&mut self, e: T) {
+        if self.blen == self.buf.len() {
+            self.vec.push(e)
+        } else {
+            self.buf[self.blen] = e;
+            self.blen += 1;
+        }
+    }
+}
+
+impl OrderedMapper<WorkWInd> for WVecMerger<'_> {
     type Elem = WorkWInd;
     fn common_map(&mut self, l: &Self::Elem, r: &Self::Elem) {
         self.node.update_with_wt(r);
         let last_len = self.wv_into.targets.len() as u32;
-
-        let left_it = self.left_from[self.left_i..(self.left_i + (l.1 as usize))].iter();
-        let right_it = self.right_from[self.right_i..(self.right_i + (r.1 as usize))].iter();
+        let left_it =
+            (self.left_i..(self.left_i + (l.1 as usize))).map(|i| self.left_from.targets.get(i));
+        let right_it =
+            (self.right_i..(self.right_i + (r.1 as usize))).map(|i| self.right_from.targets.get(i));
 
         self.left_i += l.1 as usize;
         self.right_i += r.1 as usize;
 
-        sorted_iters_to_vec(&mut self.wv_into.targets, left_it, right_it);
-
+        sorted_iters_to_arr(&mut self.wv_into.targets, left_it, right_it);
         let total_targets = self.wv_into.targets.len() as u32 - last_len;
-        self.wv_into.sources.push(WorkWInd(l.0, total_targets));
+        self.wv_into.sources.add(WorkWInd(l.0, total_targets));
     }
 
     fn left_map(&mut self, e: &Self::Elem) {
-        self.wv_into.sources.push(e.clone());
-        for _ in 0..e.1 {
-            self.wv_into
-                .targets
-                .push(self.left_from[self.left_i].clone());
-            self.left_i += 1;
-        }
+        self.wv_into.add(e, self.left_from, self.left_i);
+        self.left_i += e.1.to_usize();
     }
 
     fn right_map(&mut self, e: &Self::Elem) {
         self.node.update_with_wt(e);
-        self.wv_into.sources.push(e.clone());
-        for _ in 0..e.1 {
-            self.wv_into
-                .targets
-                .push(self.right_from[self.right_i].clone());
-            self.right_i += 1;
-        }
+        self.wv_into.add(e, self.right_from, self.right_i);
+        self.right_i += e.1.to_usize();
     }
 }
 
 impl PrepNode {
     fn update_and_get_collapsed_node(&mut self, other: &mut Self) -> CollapsedNode {
-        let mut merger = WVecMerger::new(
-            &mut self.merge_into,
-            &self.merge_from.targets,
-            &other.merge_from.targets,
-        );
+        let mut merger = WVecMerger::new(&mut self.merge_into, &self.merge_from, &other.merge_from);
         //one of them to
-        ordered_calls(
-            self.merge_from.sources.iter(),
-            other.merge_from.sources.iter(),
-            &mut merger,
-        );
+        let left_it = (0..self.merge_from.sources.len()).map(|e| self.merge_from.sources.get(e));
+        let right_it = (0..other.merge_from.sources.len()).map(|e| other.merge_from.sources.get(e));
+        ordered_calls(left_it, right_it, &mut merger);
         let node = merger.node;
         std::mem::swap(&mut self.merge_into, &mut self.merge_from);
         self.merge_into.reset();
@@ -308,12 +343,12 @@ impl PrepNode {
 
     fn take_new(&mut self, work_tree: &WorkTree) {
         let top = WorkWInd(work_tree.0.id, work_tree.0.children.len() as WorkCiteT);
-        self.merge_from.sources.push(top);
+        self.merge_from.sources.add(top);
         work_tree
             .0
             .children
             .iter()
-            .for_each(|e| self.merge_from.targets.push(*e))
+            .for_each(|e| self.merge_from.targets.add(*e))
     }
 
     fn reset(&mut self) {
@@ -467,6 +502,12 @@ impl InitEmpty for PrepNode {
     }
 }
 
+impl InitEmpty for WorkWInd {
+    fn init_empty() -> Self {
+        Self(0, 0)
+    }
+}
+
 impl<E> Updater<WorkTree> for IntXTree<E, WorkTree>
 where
     E: NumberedEntity,
@@ -556,9 +597,9 @@ impl Collapsing for PrepNode {
     type Collapsed = CollapsedNode;
     fn collapse(&mut self) -> Self::Collapsed {
         let mut out = CollapsedNode::init_empty();
-        self.merge_from.sources.iter().for_each(|e| {
-            out.update_with_wt(e);
-        });
+        for i in 0..self.merge_from.sources.len() {
+            out.update_with_wt(self.merge_from.sources.get(i));
+        }
         out
     }
 }
@@ -675,11 +716,14 @@ mod iterators {
     use super::*;
 
     pub struct SuCoInstIter<'a> {
-        ref_sfs: &'a Box<[ET<Subfields>]>,
+        // ref_sfs: &'a Box<[ET<Subfields>]>,
+        ref_sfs: &'a [ET<Subfields>],
         rsfi: usize,
-        cit_wids: &'a Box<[ET<Works>]>,
+        // cit_wids: &'a Box<[ET<Works>]>,
+        cit_wids: &'a [ET<Works>],
         cwidi: usize,
-        cit_insts: Option<&'a Box<[ET<Institutions>]>>,
+        // cit_insts: Option<&'a Box<[ET<Institutions>]>>,
+        cit_insts: Option<&'a [ET<Institutions>]>,
         cinsti: usize,
         gets: &'a Getters,
     }
@@ -1112,7 +1156,7 @@ mod country_trees {
         );
         fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
             let mut heap = MinHeap::new();
-            for refed_inst in gets.cinsts(&id) {
+            for refed_inst in gets.country_insts(&id) {
                 for refed_wid in gets.iworks(refed_inst) {
                     for (refed_sf, citing_country, citing_inst, citing_wid) in
                         iterators::SuCoInstIter::new(refed_wid, gets)
@@ -1142,7 +1186,7 @@ mod country_trees {
         );
         fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
             let mut heap = MinHeap::new();
-            for country_inst in gets.cinsts(&id) {
+            for country_inst in gets.country_insts(&id) {
                 for refed_wid in gets.iworks(country_inst) {
                     for refed_inst in gets.winsts(refed_wid) {
                         let refed_country = gets.icountry(refed_inst);
@@ -1279,10 +1323,10 @@ pub mod big_test_tree {
             IntX<Institutions, 0, true>,
             IntX<Countries, 0, true>,
         );
-        fn get_heap(_id: NET<Self::Root>, _gets: &Getters) -> MinHeap<FrTm<Self>> {
+        fn get_heap(id: NET<Self::Root>, _gets: &Getters) -> MinHeap<FrTm<Self>> {
             let mut heap = MinHeap::new();
             let mut rng = StdRng::seed_from_u64(42);
-            for _ in 0..2_u32.pow(20) {
+            for _ in 0..2_u32.pow(id as u32) {
                 let rec = (
                     rng.gen(),
                     rng.gen(),
@@ -1297,15 +1341,7 @@ pub mod big_test_tree {
         }
     }
 
-    fn q() -> TreeQ {
-        TreeQ {
-            year: None,
-            eid: 0,
-            tid: None,
-        }
-    }
-
-    pub fn get_big_tree() -> TreeResponse {
+    pub fn get_big_tree(n: usize) -> TreeResponse {
         let mut fake_attu = HashMap::new();
         let gatts = |i: u32, pref: &str| {
             (0..2_u32.pow(i))
@@ -1317,7 +1353,12 @@ pub mod big_test_tree {
         };
         fake_attu.insert(Countries::NAME.to_string(), gatts(8, "C"));
         fake_attu.insert(Institutions::NAME.to_string(), gatts(16, "I"));
-        BigTree::tree_resp(q(), &Getters::fake(), &fake_attu)
+        let q = TreeQ {
+            year: None,
+            eid: 0,
+            tid: None,
+        };
+        BigTree::tree_resp(q, &Getters::fake(), &fake_attu)
     }
 }
 
@@ -1448,16 +1489,21 @@ mod tests {
 
     #[test]
     pub fn big_tree() {
-        let r = big_test_tree::get_big_tree();
+        let r = big_test_tree::get_big_tree(20);
         // assert_eq!(r.tree.node.link_count, 524288); //19
         let node = &r.tree.node;
         println!(
-            "lc: {}, sc: {}, tc: {},",
+            "lc: {}, sc: {}, ts: {},",
             node.link_count, node.source_count, node.top_source,
         );
-        assert_eq!(r.tree.node.link_count, 1048448); //20 - nano
-        assert_eq!(r.tree.node.source_count, 65536); //20 - nano
-        assert_eq!(r.tree.node.top_source, 28260); //20 - nano
+
+        assert_eq!(r.tree.node.link_count, 1048576); //20 - full
+        assert_eq!(r.tree.node.source_count, 1048434); //20 - full
+        assert_eq!(r.tree.node.top_source, 16735219); //20 - full
+
+        // assert_eq!(r.tree.node.link_count, 1048448); //20 - nano
+        // assert_eq!(r.tree.node.source_count, 65536); //20 - nano
+        // assert_eq!(r.tree.node.top_source, 28260); //20 - nano
 
         // assert_eq!(r.tree.node.link_count, 2097152); //21
     }

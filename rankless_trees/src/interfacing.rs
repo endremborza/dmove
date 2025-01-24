@@ -2,7 +2,7 @@ use std::{fmt::Display, sync::Arc};
 
 use crate::{ids::AttributeLabelUnion, io::AttributeLabel};
 use rankless_rs::{
-    common::{BackendSelector, QuickMap, QuickestBox, QuickestVBox, Stowage},
+    common::{BackendSelector, QuickAttPair, QuickMap, QuickestBox, QuickestVBox, Stowage},
     gen::{
         // a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields},
         a2_init_atts::{
@@ -18,8 +18,8 @@ use rankless_rs::{
 
 use dmove::{
     BackendLoading, CompactEntity, Entity, EntityImmutableRefMapperBackend, Locators,
-    MappableEntity, MarkedAttribute, NamespacedEntity, UnsignedNumber, VarAttBuilder, VarBox,
-    VariableSizeAttribute, ET, MAA,
+    MappableEntity, MarkedAttribute, NamespacedEntity, UnsignedNumber, VaST, VarAttBuilder, VarBox,
+    VariableSizeAttribute, VattArrPair, ET, MAA,
 };
 use hashbrown::HashMap;
 use rand::Rng;
@@ -28,7 +28,8 @@ use serde::{de::DeserializeOwned, Serialize};
 const SPEC_CORR_RATE: f64 = 0.2;
 
 pub type NET<E> = <E as NumberedEntity>::T;
-type VB<T> = <QuickestVBox as BackendSelector<T>>::BE;
+// type VB<T> = <QuickestVBox as BackendSelector<T>>::BE;
+type VB<E> = <QuickAttPair as BackendSelector<E>>::BE;
 type FB<T> = <QuickestBox as BackendSelector<T>>::BE;
 type MB<T> = <QuickMap as BackendSelector<T>>::BE;
 // type RI<T> = <ReadIter as BackendSelector<T>>::BE;
@@ -36,15 +37,15 @@ type MB<T> = <QuickMap as BackendSelector<T>>::BE;
 pub struct Getters {
     ifs: Interfaces,
     pub stowage: Arc<Stowage>,
-    pub wn_locators: Locators<WorksNames>,
+    pub wn_locators: Locators<WorksNames, u64>,
 }
 
 macro_rules! make_interfaces {
     ($($f_key:ident => $f_t:ty),*; $($v_key:ident -> $v_t:ty),*; $($m_key:ident >> $m_t:ty),*) => {
         struct Interfaces {
-            $($f_key: FB<$f_t>),*,
-            $($v_key: VB<$v_t>),*,
-            $($m_key: MB<$m_t>),*,
+            $($f_key: FB<$f_t>,)*
+            $($v_key: VB<$v_t>,)*
+            $($m_key: MB<$m_t>,)*
         }
 
         impl Interfaces {
@@ -55,33 +56,31 @@ macro_rules! make_interfaces {
                         stowage_clone.get_entity_interface::<$f_t, QuickestBox>()
                     });
                 )*
-
                 $(
                     let stowage_clone = Arc::clone(&stowage);
                     let $v_key = std::thread::spawn( move || {
-                        stowage_clone.get_entity_interface::<$v_t, QuickestVBox>()
+                        // stowage_clone.get_entity_interface::<$v_t, QuickestVBox>()
+                        stowage_clone.get_entity_interface::<$v_t, QuickAttPair>()
                     });
                 )*
-
                 $(
                     let stowage_clone = Arc::clone(&stowage);
                     let $m_key = std::thread::spawn( move || {
                         stowage_clone.get_entity_interface::<$m_t, QuickMap>()
                     });
                 )*
-
                 Self {
                     $($f_key: $f_key.join().expect("Thread panicked")),*,
                     $($v_key: $v_key.join().expect("Thread panicked")),*,
                     $($m_key: $m_key.join().expect("Thread panicked")),*,
                 }
-
             }
 
             fn fake() -> Self {
                     Self {
                         $($f_key: Vec::new().into()),*,
-                        $($v_key: Vec::new().into()),*,
+                        // $($v_key: Vec::new().into()),*,
+                        $($v_key: VattArrPair::empty()),*,
                         $($m_key: HashMap::new().into()),*
                     }
             }
@@ -99,10 +98,12 @@ macro_rules! make_interfaces {
             )*
 
             $(
-                pub fn $v_key<'a, K: UnsignedNumber>(&'a self, key: &'a K) -> &'a ET<$v_t> {
-                    type BE = VB<$v_t>;
+                // pub fn $v_key<'a, K: UnsignedNumber>(&'a self, key: &'a K) -> &'a ET<$v_t> {
+                pub fn $v_key<'a, K: UnsignedNumber>(&'a self, key: &'a K) -> &'a [VaST<$v_t>] {
+                    // type BE = VB<$v_t>;
                     let uk = key.to_usize();
-                    <BE as EntityImmutableRefMapperBackend<$v_t>>::get_ref_via_immut(&self.ifs.$v_key, &uk).expect(&format!("e: {}, k: {}", <$v_t as Entity>::NAME, uk))
+                    // <BE as EntityImmutableRefMapperBackend<$v_t>>::get_ref_via_immut(&self.ifs.$v_key, &uk).expect(&format!("e: {}, k: {}", <$v_t as Entity>::NAME, uk))
+                    self.ifs.$v_key.get(&uk).expect(&format!("e: {}, k: {}", <$v_t as Entity>::NAME, uk))
 
                 }
             )*
@@ -173,7 +174,7 @@ make_interfaces!(
     winsts -> WorkInstitutions,
     wships -> WorkAuthorships,
     shipis -> AuthorshipInstitutions,
-    cinsts -> CountryInsts,
+    country_insts -> CountryInsts,
     sources -> WorkSources;
     sqy >> SourceYearQs
 );
@@ -239,7 +240,8 @@ impl Getters {
 
     pub fn new(stowage: Stowage) -> Self {
         let path = stowage.path_from_ns(WorksNames::NS);
-        let wn_locators = <Locators<WorksNames> as BackendLoading<WorksNames>>::load_backend(&path);
+        let wn_locators =
+            <Locators<WorksNames, _> as BackendLoading<WorksNames>>::load_backend(&path);
         let astow = Arc::new(stowage);
         Self {
             ifs: Interfaces::new(astow.clone()),
@@ -265,7 +267,8 @@ impl Getters {
         );
 
         let path = stowage.path_from_ns(WorksNames::NS);
-        let wn_locators = <Locators<WorksNames> as BackendLoading<WorksNames>>::load_backend(&path);
+        let wn_locators =
+            <Locators<WorksNames, _> as BackendLoading<WorksNames>>::load_backend(&path);
 
         Self {
             stowage: Arc::new(stowage),
