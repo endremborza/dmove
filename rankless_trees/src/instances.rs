@@ -1086,12 +1086,76 @@ mod inst_trees {
         }
     }
 
-    impl TreeMaker for TreeSuCoInSu {
+    // impl TreeMaker for TreeSuCoInSu {
+    //     type StackBasis = (
+    //         IntX<Subfields, 0, true>,
+    //         IntX<Countries, 1, false>,
+    //         IntX<Institutions, 1, false>,
+    //         IntX<Subfields, 3, false>,
+    //     );
+    //     fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
+    //         let mut heap = MinHeap::new();
+    //         for refed_wid in gets.iworks(&id) {
+    //             for refed_sf in gets.subfield(refed_wid) {
+    //                 for citing_wid in gets.citing(refed_wid) {
+    //                     for citing_inst in gets.winsts(citing_wid) {
+    //                         let citing_country = gets.icountry(citing_inst);
+    //                         for citing_topic in gets.topic(citing_wid) {
+    //                             let citing_subfield = gets.tsuf(citing_topic);
+    //                             let record = (
+    //                                 refed_sf.lift(),
+    //                                 citing_country.lift(),
+    //                                 citing_inst.lift(),
+    //                                 citing_subfield.lift(),
+    //                                 refed_wid.lift(),
+    //                                 citing_wid.lift(),
+    //                             );
+    //                             heap.push(record);
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //         heap
+    //     }
+    // }
+    //
+    // impl TreeMaker for TreeSuCoInSo {
+    //     type StackBasis = (
+    //         IntX<Subfields, 0, true>,
+    //         IntX<Countries, 1, false>,
+    //         IntX<Institutions, 1, false>,
+    //         IntX<Sources, 3, false>,
+    //     );
+    //     fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
+    //         let mut heap = MinHeap::new();
+    //         for refed_wid in gets.iworks(&id) {
+    //             for (refed_sf, citing_country, citing_inst, citing_wid) in
+    //                 iterators::SuCoInstIter::new(refed_wid, gets)
+    //             {
+    //                 for citing_source in gets.sources(&citing_wid) {
+    //                     heap.push((
+    //                         refed_sf.lift(),
+    //                         citing_country.lift(),
+    //                         citing_inst.lift(),
+    //                         citing_source.lift(),
+    //                         refed_wid.lift(),
+    //                         citing_wid.lift(),
+    //                     ))
+    //                 }
+    //             }
+    //         }
+    //         heap
+    //     }
+    // }
+
+    //FOR TESTING ONLY
+
+    impl TreeMaker for TreeSuCoInFors {
         type StackBasis = (
             IntX<Subfields, 0, true>,
             IntX<Countries, 1, false>,
             IntX<Institutions, 1, false>,
-            IntX<Subfields, 3, false>,
         );
         fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
             let mut heap = MinHeap::new();
@@ -1100,18 +1164,14 @@ mod inst_trees {
                     for citing_wid in gets.citing(refed_wid) {
                         for citing_inst in gets.winsts(citing_wid) {
                             let citing_country = gets.icountry(citing_inst);
-                            for citing_topic in gets.topic(citing_wid) {
-                                let citing_subfield = gets.tsuf(citing_topic);
-                                let record = (
-                                    refed_sf.lift(),
-                                    citing_country.lift(),
-                                    citing_inst.lift(),
-                                    citing_subfield.lift(),
-                                    refed_wid.lift(),
-                                    citing_wid.lift(),
-                                );
-                                heap.push(record);
-                            }
+                            let record = (
+                                refed_sf.lift(),
+                                citing_country.lift(),
+                                citing_inst.lift(),
+                                refed_wid.lift(),
+                                citing_wid.lift(),
+                            );
+                            heap.push(record);
                         }
                     }
                 }
@@ -1120,12 +1180,11 @@ mod inst_trees {
         }
     }
 
-    impl TreeMaker for TreeSuCoInSo {
+    impl TreeMaker for TreeSuCoInIts {
         type StackBasis = (
             IntX<Subfields, 0, true>,
             IntX<Countries, 1, false>,
             IntX<Institutions, 1, false>,
-            IntX<Sources, 3, false>,
         );
         fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
             let mut heap = MinHeap::new();
@@ -1133,16 +1192,13 @@ mod inst_trees {
                 for (refed_sf, citing_country, citing_inst, citing_wid) in
                     iterators::SuCoInstIter::new(refed_wid, gets)
                 {
-                    for citing_source in gets.sources(&citing_wid) {
-                        heap.push((
-                            refed_sf.lift(),
-                            citing_country.lift(),
-                            citing_inst.lift(),
-                            citing_source.lift(),
-                            refed_wid.lift(),
-                            citing_wid.lift(),
-                        ))
-                    }
+                    heap.push((
+                        refed_sf.lift(),
+                        citing_country.lift(),
+                        citing_inst.lift(),
+                        refed_wid.lift(),
+                        citing_wid.lift(),
+                    ))
                 }
             }
             heap
