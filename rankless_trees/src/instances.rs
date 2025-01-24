@@ -761,18 +761,19 @@ mod iterators {
                     ref_sf = self.ref_sfs.next();
                     continue;
                 }
-                let cit_inst = if let Some(cit_insts) = &mut self.cit_insts {
-                    match cit_insts.next() {
+                let cit_inst = match &mut self.cit_insts {
+                    Some(cit_insts) => match cit_insts.next() {
                         Some(iid) => iid,
                         None => {
                             citing_wid = self.cit_wids.next();
                             self.cit_insts = None;
                             continue;
                         }
+                    },
+                    None => {
+                        self.cit_insts = Some(self.gets.winsts(citing_wid.unwrap()).iter());
+                        continue;
                     }
-                } else {
-                    self.cit_insts = Some(self.gets.winsts(citing_wid.unwrap()).iter());
-                    continue;
                 };
                 return Some((
                     ref_sf.unwrap().lift(),
