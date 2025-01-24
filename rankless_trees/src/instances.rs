@@ -721,20 +721,22 @@ where
 
 mod iterators {
 
+    use std::iter::Peekable;
+
     use super::*;
 
     pub struct SuCoInstIter<'a> {
         ref_wid: &'a ET<Works>,
-        ref_sfs: Iter<'a, ET<Subfields>>,
-        cit_wids: Iter<'a, ET<Works>>,
+        ref_sfs: Peekable<Iter<'a, ET<Subfields>>>,
+        cit_wids: Peekable<Iter<'a, ET<Works>>>,
         cit_insts: Option<Iter<'a, ET<Institutions>>>,
         gets: &'a Getters,
     }
 
     impl<'a> SuCoInstIter<'a> {
         pub fn new(refed_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
-            let ref_sfs = gets.subfield(refed_wid).iter();
-            let cit_wids = gets.citing(refed_wid).iter();
+            let ref_sfs = gets.subfield(refed_wid).iter().peekable();
+            let cit_wids = gets.citing(refed_wid).iter().peekable();
             Self {
                 ref_wid: refed_wid,
                 ref_sfs,
@@ -749,37 +751,39 @@ mod iterators {
         type Item = (ET<Subfields>, ET<Countries>, ET<Institutions>, ET<Works>);
 
         fn next(&mut self) -> Option<Self::Item> {
-            let mut ref_sf = self.ref_sfs.next();
-            let mut citing_wid = self.cit_wids.next();
             loop {
-                if ref_sf.is_none() {
-                    return None;
-                }
-                if citing_wid.is_none() {
-                    self.cit_wids = self.gets.citing(self.ref_wid).iter();
-                    citing_wid = self.cit_wids.next();
-                    ref_sf = self.ref_sfs.next();
-                    continue;
-                }
+                let ref_sf = match self.ref_sfs.peek() {
+                    Some(v) => v,
+                    None => return None,
+                };
+                let cite_wid = match self.cit_wids.peek() {
+                    Some(v) => *v,
+                    None => {
+                        self.cit_wids = self.gets.citing(self.ref_wid).iter().peekable();
+                        self.cit_wids.next();
+                        self.ref_sfs.next();
+                        continue;
+                    }
+                };
                 let cit_inst = match &mut self.cit_insts {
                     Some(cit_insts) => match cit_insts.next() {
                         Some(iid) => iid,
                         None => {
-                            citing_wid = self.cit_wids.next();
+                            self.cit_wids.next();
                             self.cit_insts = None;
                             continue;
                         }
                     },
                     None => {
-                        self.cit_insts = Some(self.gets.winsts(citing_wid.unwrap()).iter());
+                        self.cit_insts = Some(self.gets.winsts(cite_wid).iter());
                         continue;
                     }
                 };
                 return Some((
-                    ref_sf.unwrap().lift(),
+                    ref_sf.lift(),
                     self.gets.icountry(cit_inst).lift(),
                     cit_inst.lift(),
-                    citing_wid.unwrap().lift(),
+                    cite_wid.lift(),
                 ));
             }
         }
