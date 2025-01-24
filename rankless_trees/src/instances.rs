@@ -753,14 +753,13 @@ mod iterators {
         fn next(&mut self) -> Option<Self::Item> {
             loop {
                 let ref_sf = match self.ref_sfs.peek() {
-                    Some(v) => v,
+                    Some(v) => *v,
                     None => return None,
                 };
                 let cite_wid = match self.cit_wids.peek() {
                     Some(v) => *v,
                     None => {
                         self.cit_wids = self.gets.citing(self.ref_wid).iter().peekable();
-                        self.cit_wids.next();
                         self.ref_sfs.next();
                         continue;
                     }
