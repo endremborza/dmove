@@ -18,7 +18,7 @@ use std::{
     future::join,
     net::SocketAddr,
     ops::Deref,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use tower::ServiceBuilder;
@@ -206,9 +206,10 @@ macro_rules! multi_route {
             let mut v = Vec::new();
             let mut tops = Vec::new();
             let mut specs: TreeSpecMap = HashMap::new();
-            let mut static_att_union: AttributeLabelUnion = HashMap::new();
-            NodeInterfaces::<Topics>::new(&$g.stowage).update_stats(&mut static_att_union, ccount);
-            NodeInterfaces::<Qs>::new(&$g.stowage).update_stats(&mut static_att_union, ccount);
+            // let mut static_att_union: AttributeLabelUnion = HashMap::new();
+            let static_att_union: Arc<Mutex<AttributeLabelUnion>> = Arc::new(Mutex::new(HashMap::new()));
+            NodeInterfaces::<Topics>::new(&$g.stowage).update_stats(&mut static_att_union.lock().unwrap(), ccount);
+            NodeInterfaces::<Qs>::new(&$g.stowage).update_stats(&mut static_att_union.lock().unwrap(), ccount);
             $(v.push(
                     EntityDescription {
                         name: <$T as Entity>::NAME.to_string(),
@@ -217,15 +218,27 @@ macro_rules! multi_route {
                 );
             )*
 
+            let mut ei_ns_map = HashMap::new();
+
+            $(
+                let gets_clone = Arc::clone(&$g);
+                let au_clone = static_att_union.clone();
+                let thread = std::thread::spawn( move || {
+                    let ent_intf = RootInterfaces::<$T>::new(&gets_clone.stowage);
+                    let nstate = NameState::new::<$T>(&ent_intf);
+                    ent_intf.update_stats(&mut au_clone.lock().unwrap(), ccount);
+                    nstate
+                });
+                ei_ns_map.insert(<$T>::NAME, thread);
+            )*
+
             let name_state_route = Router::new()
             $(.route(&format!("/names/{}", <$T as Entity>::NAME), get(name_get))
                 .route(&format!("/slice/{}/:from/:to", <$T as Entity>::NAME), get(slice_get))
                 .route(&format!("/views/{}/:semantic_id", <$T as Entity>::NAME), get(view_get))
                 .with_state({
                     specs.insert(<$T as Entity>::NAME.to_string(), <$T as TreeGetter>::get_specs());
-                    let ent_intf = RootInterfaces::<$T>::new(&$g.stowage);
-                    let nstate = NameState::new::<$T>(&ent_intf);
-                    ent_intf.update_stats(&mut static_att_union, ccount);
+                    let nstate = ei_ns_map.remove(<$T>::NAME).unwrap().join().expect("NState thread panicked");
                     let entities = top_slice(&nstate.responses);
                     tops.push(
                         TopResult {name: <$T as Entity>::NAME.to_string(), entities }
@@ -234,7 +247,7 @@ macro_rules! multi_route {
                 })
             )*;
 
-            let att_union = Arc::new(static_att_union);
+            let att_union = Arc::new(Arc::into_inner(static_att_union).unwrap().into_inner().unwrap());
             let tree_route = Router::new()
             $(
                 .route(&format!("/{}", <$T as Entity>::NAME), get(tree_get::<$T>))
