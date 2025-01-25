@@ -18,7 +18,7 @@ use std::{
     future::join,
     net::SocketAddr,
     ops::Deref,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
 };
 
 use tower::ServiceBuilder;
@@ -200,16 +200,12 @@ impl NameState {
 }
 
 macro_rules! multi_route {
-    ($g: ident, $($T: ty),*) => {
+    ($s: ident, $($T: ty),*) => {
         {
-            let ccount = $g.total_cite_count();
             let mut v = Vec::new();
             let mut tops = Vec::new();
             let mut specs: TreeSpecMap = HashMap::new();
-            // let mut static_att_union: AttributeLabelUnion = HashMap::new();
             let static_att_union: Arc<Mutex<AttributeLabelUnion>> = Arc::new(Mutex::new(HashMap::new()));
-            NodeInterfaces::<Topics>::new(&$g.stowage).update_stats(&mut static_att_union.lock().unwrap(), ccount);
-            NodeInterfaces::<Qs>::new(&$g.stowage).update_stats(&mut static_att_union.lock().unwrap(), ccount);
             $(v.push(
                     EntityDescription {
                         name: <$T as Entity>::NAME.to_string(),
@@ -217,20 +213,43 @@ macro_rules! multi_route {
                     }
                 );
             )*
-
             let mut ei_ns_map = HashMap::new();
+            let cv_pair = Arc::new((Mutex::new(None), Condvar::new()));
 
             $(
-                let gets_clone = Arc::clone(&$g);
+                let stowage_clone = Arc::clone(&$s);
                 let au_clone = static_att_union.clone();
+                let shared_cvp = Arc::clone(&cv_pair);
                 let thread = std::thread::spawn( move || {
-                    let ent_intf = RootInterfaces::<$T>::new(&gets_clone.stowage);
+                    let ent_intf = RootInterfaces::<$T>::new(&stowage_clone);
                     let nstate = NameState::new::<$T>(&ent_intf);
+
+                    let (lock, cvar) = &*shared_cvp;
+                    let mut data = lock.lock().unwrap();
+                    while data.is_none() {
+                        data = cvar.wait(data).unwrap();
+                    }
+                    let ccount = *data.as_ref().unwrap();
+
                     ent_intf.update_stats(&mut au_clone.lock().unwrap(), ccount);
                     nstate
                 });
                 ei_ns_map.insert(<$T>::NAME, thread);
             )*
+
+            let gets = Arc::new(Getters::new($s.clone()));
+
+            let ccount = gets.total_cite_count();
+
+            {
+                let (lock, cvar) = &*cv_pair;
+                let mut data = lock.lock().unwrap();
+                *data = Some(ccount);
+                cvar.notify_all();
+            }
+
+            NodeInterfaces::<Topics>::new(&$s).update_stats(&mut static_att_union.lock().unwrap(), ccount);
+            NodeInterfaces::<Qs>::new(&$s).update_stats(&mut static_att_union.lock().unwrap(), ccount);
 
             let name_state_route = Router::new()
             $(.route(&format!("/names/{}", <$T as Entity>::NAME), get(name_get))
@@ -253,7 +272,7 @@ macro_rules! multi_route {
                 .route(&format!("/{}", <$T as Entity>::NAME), get(tree_get::<$T>))
                 .with_state({
                     let ts = TreeBasisState {
-                        gets: $g.clone(),
+                        gets: gets.clone(),
                         att_union: att_union.clone(),
                     };
                     ts.into()
@@ -278,9 +297,9 @@ async fn main() {
         .gzip(true)
         .quality(CompressionLevel::Fastest);
 
-    let gets = Arc::new(Getters::new(Stowage::new(&path)));
+    let astow = Arc::new(Stowage::new(&path));
     let (response_api, tree_api, entity_descriptions, tops, specs) =
-        multi_route!(gets, Authors, Institutions, Sources, Subfields, Countries);
+        multi_route!(astow, Authors, Institutions, Sources, Subfields, Countries);
 
     let count_api = static_router(&entity_descriptions);
     let specs_api = static_router(&TreeSpecs::new(specs));
