@@ -185,7 +185,6 @@ trait TreeMaker<'a> {
             for (pid, part_root) in root_it {
                 let part_ser: BufSerTree = part_root.into();
                 ser_tree.ingest_disjunct(part_ser);
-
                 write_buf_path(&ser_tree, get_path(pid)).unwrap();
             }
             println!(
@@ -788,7 +787,7 @@ mod iterators {
                         Some(tid) => *tid,
                         None => {
                             self.cit_wids.next();
-                            self.cit_insts = None;
+                            self.cit_tops = None;
                             continue;
                         }
                     },
@@ -895,7 +894,9 @@ mod iterators {
                             continue;
                         }
                     },
-                    None => self.it = Some(I::new(&ref_wid, &self.gets)),
+                    None => {
+                        self.it = Some(I::new(&ref_wid, &self.gets));
+                    }
                 }
             }
         }
