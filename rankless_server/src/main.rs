@@ -81,6 +81,11 @@ struct NameState {
 struct TreeBasisState {
     gets: Arc<Getters>,
     att_union: Arc<AttributeLabelUnion>,
+    //tree_calculating thread(s) stored here
+    //a thread starts up with these two ^^
+    //starts listening to a queue/channel
+    //in the queue, gets a TreeQ and a channel to respond to, with a TreeResponse
+    //after response is piped into the channel, thread still runs with e.g. caching
 }
 
 #[derive(Serialize, Clone)]
@@ -218,7 +223,7 @@ macro_rules! multi_route {
 
             $(
                 let stowage_clone = Arc::clone(&$s);
-                let au_clone = static_att_union.clone();
+                let au_clone = Arc::clone(&static_att_union);
                 let shared_cvp = Arc::clone(&cv_pair);
                 let thread = std::thread::spawn( move || {
                     let ent_intf = RootInterfaces::<$T>::new(&stowage_clone);
@@ -238,15 +243,12 @@ macro_rules! multi_route {
             )*
 
             let gets = Arc::new(Getters::new($s.clone()));
-
             let ccount = gets.total_cite_count();
 
-            {
-                let (lock, cvar) = &*cv_pair;
-                let mut data = lock.lock().unwrap();
-                *data = Some(ccount);
-                cvar.notify_all();
-            }
+            let (lock, cvar) = &*cv_pair;
+            let mut data = lock.lock().unwrap();
+            *data = Some(ccount);
+            cvar.notify_all();
 
             NodeInterfaces::<Topics>::new(&$s).update_stats(&mut static_att_union.lock().unwrap(), ccount);
             NodeInterfaces::<Qs>::new(&$s).update_stats(&mut static_att_union.lock().unwrap(), ccount);

@@ -20,9 +20,9 @@ fn srecords() {
     }
 
     type SR = SRecord3<u8, u8, u8>;
-    let hip: HeapIterator<SR> = heap.into();
+    let hip: Option<HeapIterator<SR>> = heap.into();
 
-    let v: Vec<SR> = hip.collect();
+    let v: Vec<SR> = hip.unwrap().collect();
     println!("{:?}", v);
     assert_eq!(v.len(), 4);
     match v[0] {

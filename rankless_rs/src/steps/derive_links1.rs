@@ -26,18 +26,24 @@ use super::a1_entity_mapping::{YearInterface, N_PERS, POSSIBLE_YEAR_FILTERS};
 pub struct WorkPeriods {}
 pub struct CountryInsts {}
 
+impl WorkPeriods {
+    pub fn from_year(year: u16) -> ET<Self> {
+        for i in (0..N_PERS).rev() {
+            if year >= POSSIBLE_YEAR_FILTERS[i] {
+                return i as u8;
+            }
+        }
+        0
+    }
+}
+
 impl MarkedBackendLoader<QuickestBox> for WorkPeriods {
     type BE = <QuickestBox as BackendSelector<Self>>::BE;
     fn load(stowage: &Stowage) -> Self::BE {
         let wys = stowage.get_entity_interface::<WorkYears, ReadFixIter>();
         wys.map(|y_id| {
             let y = YearInterface::reverse(y_id);
-            for i in (0..N_PERS).rev() {
-                if y >= POSSIBLE_YEAR_FILTERS[i] {
-                    return i as u8;
-                }
-            }
-            0
+            Self::from_year(y)
         })
         .collect()
     }

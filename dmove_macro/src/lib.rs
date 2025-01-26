@@ -3,7 +3,7 @@ use std::{fmt::Display, str::FromStr};
 
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
-use syn::{parse::Parser, parse_macro_input, parse_str, ImplItem};
+use syn::{parse_macro_input, parse_str};
 
 const TYPE_ARG_NAME: &str = "entity_name";
 const IMPL_FIELD: &str = "impl_str";
@@ -123,7 +123,7 @@ pub fn def_srecs(_: TokenStream) -> TokenStream {
     let mut out = Vec::new();
     for i in 2..(MAX_DEPTH + 1) {
         let its = prefed(1..i + 1, "T");
-        let s_gens = prefed(0..i, "S");
+        let s_gens = prefed(1..i, "S");
         let it_tup: syn::Expr = syn::parse_str(&format!("({its})")).expect("Ts");
         let tgen: syn::AngleBracketedGenericArguments =
             syn::parse_str(&format!("<{its}>")).expect("T-gens");
@@ -154,11 +154,10 @@ pub fn def_srecs(_: TokenStream) -> TokenStream {
         let t_comps = cjoin((1..i + 1).map(|e| format!("T{e}: PartialEq")));
         let t_to_ss = cjoin((1..i).map(|e| format!("T{e}: Into<S{e}>")));
         let reinstate_wheres = cjoin((1..i).map(|e| format!("S{e}: ReinstateFrom<T{e}>")));
-        let t0_to_s0 = "T0: Into<S0>";
         let intos_txt = join((2..i).rev().map(|e| format!("rec.{e}.into(),")), "");
         let match_internals = cjoin(
             (1..i + 1)
-                .map(|e| format!("Self::Rec{e}(rec) => {{\n{}\n    }}", spec_match(e, i - 1))),
+                .map(|e| format!("Self::Rec{e}(rec) => {{\n{}\n    }}", spec_match(e, i - 2))),
         );
         let consume_where = format!("S{}: {FC_TRAIT}<Consumable=T{i}>", i - 1);
         let update_wheres = cjoin((0..i - 1).map(|e| format!("S{e}: Updater<S{}>", e + 1)));
@@ -168,35 +167,31 @@ pub fn def_srecs(_: TokenStream) -> TokenStream {
             syn::parse_str(&format!("where {t_init_empties}")).unwrap();
 
         let fold_fn_txt = format!(
-            "pub fn fold<{s_gens}, T0, I>(mut it: I, root: T0) -> ({s_gens}) where 
+            "pub fn fold<{s_gens}, S0, I>(mut it: I, root: &mut S0) where 
                 I: Iterator<Item=Self>, 
-                {t0_to_s0}, 
                 {t_to_ss}, 
                 {t_init_empties}, 
                 {reinstate_wheres}, 
                 {consume_where},
                 {update_wheres} 
                 {{
-                    let first = it.next().unwrap();
-                    let mut stack = first.to_stack(root);
+                    let mut stack = it.next().unwrap().to_stack();
                     let flusher = vec![Self::init_empty()].into_iter();
                     for rec in it.chain(flusher) {{
-                        rec.update_stack(&mut stack);
+                        rec.update_stack(&mut stack, root);
                     }}
-                    stack
                 }}"
         );
 
         let to_stack_fn_txt = format!(
-            "pub fn to_stack<{s_gens}, T0>(self, root: T0) -> ({s_gens}) where 
-                {t0_to_s0}, 
+            "pub fn to_stack<{s_gens}>(self) -> ({s_gens}) where 
                 {t_to_ss},
                 {consume_where}
             {{
                 if let Self::Rec{i}(rec) = self {{
                     let mut leaf = rec.1.into();
                     leaf.consume(rec.0);
-                    (root.into(), {intos_txt} leaf)
+                    ({intos_txt} leaf)
                 }} else {{
                     panic!(\"wrong starter\")
                 }}
@@ -204,7 +199,7 @@ pub fn def_srecs(_: TokenStream) -> TokenStream {
         );
 
         let update_stack_fn_txt = format!(
-            "pub fn update_stack<{s_gens}>(self, stack: &mut ({s_gens})) where 
+            "pub fn update_stack<{s_gens}, S0>(self, stack: &mut ({s_gens}), root: &mut S0) where 
                 {reinstate_wheres}, 
                 {consume_where}, 
                 {update_wheres} 
@@ -284,38 +279,15 @@ pub fn def_srecs(_: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn derive_tree_maker(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mut input = parse_macro_input!(item as syn::Item);
-    match input {
-        syn::Item::Impl(ref mut imp_syn) => {
-            let add_items = tree_maker_impl_extensions(imp_syn, attr.to_string());
-            imp_syn.items.extend(add_items.into_iter());
-        }
-        _ => panic!("not an impl block"),
-    };
-
-    let out = quote! {
-        #input
-    };
-    // println!("\n\n\nout: \"{out}\"");
-    out.into()
-}
-
-#[proc_macro_attribute]
 pub fn derive_tree_getter(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(item as syn::Item);
-    const MAKER: &str = "derive_tree_maker";
     let mut tree_defs: Vec<String> = Vec::new();
     // let derive_w_args: syn::Meta = parse_str(&format!("{MAKER}({attr})")).unwrap();
-    let derive_attr: Vec<syn::Attribute> = syn::Attribute::parse_outer
-        .parse_str(&format!("#[{MAKER}({attr})]"))
-        .unwrap();
     let mod_name = match input {
         syn::Item::Mod(ref mut imp_syn) => {
             for item in imp_syn.content.as_mut().unwrap().1.iter_mut() {
                 match item {
                     syn::Item::Impl(item_impl) => {
-                        item_impl.attrs = derive_attr.clone();
                         tree_defs.push(item_impl.self_ty.as_ref().into_token_stream().to_string());
                     }
                     _ => (),
@@ -382,116 +354,88 @@ pub fn derive_tree_getter(attr: TokenStream, item: TokenStream) -> TokenStream {
     out.into()
 }
 
-fn get_in_types_gen_args<'a, I>(
-    elems: I,
-    root_type: &String,
-) -> Option<(Vec<syn::Type>, Vec<String>, Vec<String>)>
-where
-    I: Iterator<Item = &'a syn::Type>,
-{
-    //TODO: this knows way too much and does a _lot_ of magic
-    //also presumes here:
-    let mut gen_args: Vec<syn::Type> = vec![parse_str(root_type).unwrap()];
-    let mut in_types: Vec<String> = elems
-        .map(|e| {
-            gen_args.push(get_generic_arg(&e).unwrap());
-            e.to_token_stream().to_string()
-        })
-        .collect();
-    in_types.insert(0, format!("IntX<{root_type}, 0, true>"));
-    in_types.extend(vec!["WorkTree".to_string()].into_iter());
-    return Some((gen_args, get_stack_type_elems(&in_types), in_types));
-}
+#[proc_macro_derive(StackBasis)]
+pub fn derive_stack_basis(item: TokenStream) -> TokenStream {
+    // #[allow(dead_code)]
+    let input = parse_macro_input!(item as syn::Item);
 
-fn tree_maker_impl_extensions(imp_syn: &syn::ItemImpl, root_entity_str: String) -> Vec<ImplItem> {
-    const STACK_BASIS: &str = "StackBasis";
-    let (flat_types, stack_types, basis_types) = imp_syn
-        .items
-        .iter()
-        .find_map(|e| {
-            if let ImplItem::Type(it) = e {
-                if it.ident.to_string() == STACK_BASIS {
-                    match &it.ty {
-                        syn::Type::Tuple(t) => {
-                            return get_in_types_gen_args(t.elems.iter(), &root_entity_str);
-                        }
-                        syn::Type::Paren(t) => {
-                            return get_in_types_gen_args(
-                                vec![t.elem.as_ref()].into_iter(),
-                                &root_entity_str,
-                            );
-                        }
-                        syn::Type::Path(t) => {
-                            let syn_t: syn::Type =
-                                parse_str(&t.path.segments.last().to_token_stream().to_string())
-                                    .unwrap();
-                            return get_in_types_gen_args(vec![syn_t].iter(), &root_entity_str);
-                        }
-                        _ => (),
-                    }
-                }
-            }
-            None
-        })
-        .unwrap();
-    let n = stack_types.len();
-    //WARN: to_bds and WorkTree is discusting magic
-    let bd_specs = cjoin(
-        basis_types
-            .iter()
-            .skip(1)
-            .take(n)
-            .map(|e| format!("to_bds::<{e}>()",)),
-    );
+    let mut gen_args: Vec<syn::Type> = Vec::new();
+    let (mut in_types, ty_name) = if let syn::Item::Struct(item_struct) = &input {
+        if let syn::Fields::Unnamed(fields) = &item_struct.fields {
+            let its = fields
+                .unnamed
+                .iter()
+                .map(|e| {
+                    gen_args.push(get_generic_arg(&e.ty).unwrap());
+                    e.ty.to_token_stream().to_string()
+                })
+                .collect::<Vec<String>>();
+            (its, item_struct.ident.clone())
+        } else {
+            panic!("wrong fields")
+        }
+    } else {
+        panic!("not struct")
+    };
 
-    let spec_fn_txt = format!(
-        "fn get_spec() -> TreeSpec {{
-            let breakdowns = vec![{bd_specs}];
-            let root_type = \"{root_entity_str}\".to_string();
-            TreeSpec {{
-                root_type,
-                breakdowns,
-            }}
+    let bd_specs = cjoin(in_types.iter().map(|e| format!("to_bds::<{e}>()",)));
+
+    in_types.push("WorkTree".to_string());
+    let rev_stack_types = get_stack_type_elems(&in_types);
+
+    let bds_fn_txt = format!(
+        "fn get_bds() -> Vec<BreakdownSpec> {{
+            vec![{bd_specs}]
         }}"
     );
 
-    let spec_fn = parse_str(&spec_fn_txt).expect("spec fn");
-
-    let fold_fn_txt = "fn get_root_tree<I>(id: ET<Self::Root>, it: I) -> Self::RootTree
-    where
-        I: Iterator<Item = Self::SortedRec>,
-    {
-        let mut stack: Self::Stack = Self::SortedRec::fold(it, id);
-        stack.0.collapse()
-    }";
-
-    let fold_fn = parse_str(&fold_fn_txt).expect("fold fn");
-
-    //TODO: ET is known and used here +WTs at the end of flat rec
-    let mut ent_iters = flat_types.into_iter().map(|e| e.to_token_stream());
-
-    let root_id = parse_str(&format!("type Root = {};", ent_iters.next().unwrap())).unwrap();
-    let root_tree = parse_str(&format!(
-        "type RootTree = CollT<{}>;",
-        stack_types.iter().last().unwrap()
-    ))
-    .unwrap();
-
-    let rest_ets = cjoin(
-        ent_iters
-            .map(|e| format!("ET<{e}>").to_string())
+    let bds_fn: syn::ImplItem = parse_str(&bds_fn_txt).expect("spec fn");
+    let entity_types = cjoin(
+        gen_args
+            .iter()
+            .map(|e| format!("ET<{}>", e.to_token_stream()))
             .chain(vec!["WT".to_string(), "WT".to_string()].into_iter()),
     );
-    let sr_type = parse_str(&format!(
-        "type SortedRec = {SRECORD_PREFIX}::{SRECORD_ENUM}{n}<{rest_ets}>;"
+    let n = gen_args.len() + 2;
+
+    let sr_type: syn::ImplItem = parse_str(&format!(
+        "type SortedRec = {SRECORD_PREFIX}::{SRECORD_ENUM}{n}<{entity_types}>;"
     ))
     .unwrap();
-    let stack_type = parse_str(&format!(
+
+    let top_tree: syn::ImplItem = parse_str(&format!(
+        "type TopTree = {};",
+        rev_stack_types.last().unwrap()
+    ))
+    .unwrap();
+
+    let fold_into = quote! {
+        fn fold_into<R, I>(root: &mut R, iter: I)
+        where
+            I: Iterator<Item = Self::SortedRec>,
+            R: Updater<Self::TopTree>
+        {
+            Self::SortedRec::fold(iter, root);
+        }
+    };
+
+    let stack_type: syn::ImplItem = parse_str(&format!(
         "type Stack = ({});",
-        cjoin(stack_types.into_iter().rev())
+        cjoin(rev_stack_types.into_iter().rev())
     ))
     .unwrap();
-    vec![sr_type, stack_type, root_id, root_tree, spec_fn, fold_fn]
+
+    quote! {
+        impl StackBasis for #ty_name {
+
+            #sr_type
+            #stack_type
+            #bds_fn
+            #top_tree
+            #fold_into
+        }
+    }
+    .into()
 }
 
 fn get_stack_type_elems(in_types: &Vec<String>) -> Vec<String> {
@@ -520,17 +464,26 @@ fn get_generic_arg(syn_type: &syn::Type) -> Option<syn::Type> {
 
 fn spec_match(rec_size: usize, last_si: usize) -> String {
     //last_si is the leaf
+    if last_si == 0 {
+        if rec_size == 1 {
+            return "stack.consume(rec)".to_string();
+        }
+        return "root.update(stack, rec.1);stack.consume(rec.0);".to_string();
+    }
     if rec_size == 1 {
         return format!("stack.{last_si}.consume(rec)");
     }
     let mut lines = Vec::new();
     for j in 1..rec_size {
-        let line = format!(
-            "stack.{}.update(&mut stack.{}, rec.{})",
-            last_si - j,
-            last_si - j + 1,
-            j,
-        );
+        let line = if j > last_si {
+            format!("root.update(&mut stack.0, rec.{j})")
+        } else {
+            format!(
+                "stack.{}.update(&mut stack.{}, rec.{j})",
+                last_si - j,
+                last_si - j + 1,
+            )
+        };
         lines.push(line);
     }
     lines.push(format!("stack.{last_si}.consume(rec.0)"));

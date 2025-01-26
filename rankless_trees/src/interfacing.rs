@@ -1,16 +1,21 @@
 use std::{fmt::Display, sync::Arc};
 
-use crate::{ids::AttributeLabelUnion, io::AttributeLabel};
+use crate::{
+    ids::AttributeLabelUnion,
+    io::{AttributeLabel, WT},
+};
 use rankless_rs::{
-    common::{BackendSelector, QuickAttPair, QuickMap, QuickestBox, QuickestVBox, Stowage},
+    common::{
+        BackendSelector, MainWorkMarker, QuickAttPair, QuickMap, QuickestBox, QuickestVBox, Stowage,
+    },
     gen::{
-        // a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields},
+        a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Works},
         a2_init_atts::{
             AuthorshipAuthor, AuthorshipInstitutions, InstCountries, SourceYearQs, TopicSubfields,
             WorkAuthorships, WorkSources, WorkTopics, WorkYears, WorksNames,
         },
-        derive_links1::{SourceWorks, WorkInstitutions, WorkSubfields, WorksCiting},
-        derive_links2::{AuthorWorks, InstitutionWorks, SubfieldWorks, WorkCitingCounts},
+        derive_links1::{WorkInstitutions, WorkSubfields},
+        derive_links2::WorkCitingCounts,
     },
     steps::derive_links1::{CountryInsts, WorkPeriods},
     CiteCountMarker, NameExtensionMarker, NameMarker, SemanticIdMarker, WorkCountMarker,
@@ -19,7 +24,7 @@ use rankless_rs::{
 use dmove::{
     BackendLoading, CompactEntity, Entity, EntityImmutableRefMapperBackend, Locators,
     MappableEntity, MarkedAttribute, NamespacedEntity, UnsignedNumber, VaST, VarAttBuilder, VarBox,
-    VariableSizeAttribute, VattArrPair, ET, MAA,
+    VarSizedAttributeElement, VariableSizeAttribute, VattArrPair, ET, MAA,
 };
 use hashbrown::HashMap;
 use rand::Rng;
@@ -28,11 +33,9 @@ use serde::{de::DeserializeOwned, Serialize};
 const SPEC_CORR_RATE: f64 = 0.2;
 
 pub type NET<E> = <E as NumberedEntity>::T;
-// type VB<T> = <QuickestVBox as BackendSelector<T>>::BE;
 type VB<E> = <QuickAttPair as BackendSelector<E>>::BE;
 type FB<T> = <QuickestBox as BackendSelector<T>>::BE;
 type MB<T> = <QuickMap as BackendSelector<T>>::BE;
-// type RI<T> = <ReadIter as BackendSelector<T>>::BE;
 
 pub struct Getters {
     ifs: Interfaces,
@@ -41,8 +44,9 @@ pub struct Getters {
 }
 
 macro_rules! make_interfaces {
-    ($($f_key:ident => $f_t:ty),*; $($v_key:ident -> $v_t:ty),*; $($m_key:ident >> $m_t:ty),*) => {
+    ($($e_key:ident > $e_t:ty),*;$($f_key:ident => $f_t:ty),*; $($v_key:ident -> $v_t:ty),*; $($m_key:ident >> $m_t:ty),*) => {
         struct Interfaces {
+            $($e_key: VB<MAA<$e_t, MainWorkMarker>>,)*
             $($f_key: FB<$f_t>,)*
             $($v_key: VB<$v_t>,)*
             $($m_key: MB<$m_t>,)*
@@ -50,6 +54,13 @@ macro_rules! make_interfaces {
 
         impl Interfaces {
             fn new(stowage: Arc<Stowage>) -> Self {
+
+                $(
+                    let stowage_clone = Arc::clone(&stowage);
+                    let $e_key = std::thread::spawn( move || {
+                        <$e_t as WorkLoader>::load_work_interface(stowage_clone)
+                    });
+                )*
                 $(
                     let stowage_clone = Arc::clone(&stowage);
                     let $f_key = std::thread::spawn( move || {
@@ -59,7 +70,6 @@ macro_rules! make_interfaces {
                 $(
                     let stowage_clone = Arc::clone(&stowage);
                     let $v_key = std::thread::spawn( move || {
-                        // stowage_clone.get_entity_interface::<$v_t, QuickestVBox>()
                         stowage_clone.get_entity_interface::<$v_t, QuickAttPair>()
                     });
                 )*
@@ -70,6 +80,7 @@ macro_rules! make_interfaces {
                     });
                 )*
                 Self {
+                    $($e_key: $e_key.join().expect("Thread panicked")),*,
                     $($f_key: $f_key.join().expect("Thread panicked")),*,
                     $($v_key: $v_key.join().expect("Thread panicked")),*,
                     $($m_key: $m_key.join().expect("Thread panicked")),*,
@@ -79,7 +90,7 @@ macro_rules! make_interfaces {
             fn fake() -> Self {
                     Self {
                         $($f_key: Vec::new().into()),*,
-                        // $($v_key: Vec::new().into()),*,
+                        $($e_key: VattArrPair::empty()),*,
                         $($v_key: VattArrPair::empty()),*,
                         $($m_key: HashMap::new().into()),*
                     }
@@ -98,16 +109,20 @@ macro_rules! make_interfaces {
             )*
 
             $(
-                // pub fn $v_key<'a, K: UnsignedNumber>(&'a self, key: &'a K) -> &'a ET<$v_t> {
                 pub fn $v_key<'a, K: UnsignedNumber>(&'a self, key: &'a K) -> &'a [VaST<$v_t>] {
-                    // type BE = VB<$v_t>;
                     let uk = key.to_usize();
-                    // <BE as EntityImmutableRefMapperBackend<$v_t>>::get_ref_via_immut(&self.ifs.$v_key, &uk).expect(&format!("e: {}, k: {}", <$v_t as Entity>::NAME, uk))
                     self.ifs.$v_key.get(&uk).expect(&format!("e: {}, k: {}", <$v_t as Entity>::NAME, uk))
 
                 }
             )*
 
+            $(
+                pub fn $e_key<'a>(&'a self, key: ET<$e_t>) -> &'a [VaST<MAA<$e_t, MainWorkMarker>>] {
+                    let uk = key.to_usize();
+                    self.ifs.$e_key.get(&uk).expect(&format!("e: {} works, k: {}", <$e_t as Entity>::NAME, uk))
+
+                }
+            )*
 
             $(
                 pub fn $m_key<'a, >(&'a self, key: &'a <$m_t as MappableEntity>::KeyType) -> &'a ET<$m_t> {
@@ -124,6 +139,13 @@ macro_rules! make_interfaces {
             )*
 
         }
+        $(
+        impl WorksFromMemory for $e_t {
+            fn works_from_ram(gets: &Getters, id: NET<Self>) -> &[WT] {
+                gets.$e_key(id)
+            }
+        }
+        )*
 
     };
 }
@@ -158,19 +180,20 @@ macro_rules! make_ent_interfaces {
 }
 
 make_interfaces!(
+    citing > Works,
+    cworks > Countries,
+    iworks > Institutions,
+    aworks > Authors,
+    soworks > Sources,
+    sfworks > Subfields;
     year => WorkYears,
     wperiod => WorkPeriods,
     tsuf => TopicSubfields,
     icountry => InstCountries,
     shipa => AuthorshipAuthor,
     wccount => WorkCitingCounts;
-    topic -> WorkTopics,
-    subfield -> WorkSubfields,
-    aworks -> AuthorWorks,
-    iworks -> InstitutionWorks,
-    soworks -> SourceWorks,
-    fieldworks -> SubfieldWorks,
-    citing -> WorksCiting,
+    wtopics -> WorkTopics,
+    wsubfields -> WorkSubfields,
     winsts -> WorkInstitutions,
     wships -> WorkAuthorships,
     shipis -> AuthorshipInstitutions,
@@ -206,6 +229,29 @@ pub trait NumberedEntity: Entity {
     type T: UnsignedNumber + DeserializeOwned + Serialize + Ord + Copy + Display;
 }
 
+pub trait WorkLoader: MarkedAttribute<MainWorkMarker>
+where
+    MAA<Self, MainWorkMarker>: CompactEntity + VariableSizeAttribute + NamespacedEntity,
+    ET<MAA<Self, MainWorkMarker>>: VarSizedAttributeElement,
+{
+    fn load_work_interface(stowage: Arc<Stowage>) -> VB<MAA<Self, MainWorkMarker>> {
+        stowage.get_entity_interface::<MAA<Self, MainWorkMarker>, QuickAttPair>()
+    }
+}
+
+pub trait WorksFromMemory: MarkedAttribute<MainWorkMarker> + NumberedEntity {
+    fn works_from_ram(gets: &Getters, id: NET<Self>) -> &[WT];
+}
+
+impl<E> WorkLoader for E
+where
+    E: MarkedAttribute<MainWorkMarker>,
+
+    MAA<Self, MainWorkMarker>: CompactEntity + VariableSizeAttribute + NamespacedEntity,
+    ET<MAA<Self, MainWorkMarker>>: VarSizedAttributeElement,
+{
+}
+
 impl<E> NumberedEntity for E
 where
     E: Entity,
@@ -238,15 +284,14 @@ impl Getters {
         f64::from(o)
     }
 
-    pub fn new(stowage: Stowage) -> Self {
+    pub fn new(stowage: Arc<Stowage>) -> Self {
         let path = stowage.path_from_ns(WorksNames::NS);
         let wn_locators =
             <Locators<WorksNames, _> as BackendLoading<WorksNames>>::load_backend(&path);
-        let astow = Arc::new(stowage);
         Self {
-            ifs: Interfaces::new(astow.clone()),
+            ifs: Interfaces::new(stowage.clone()),
             wn_locators,
-            stowage: astow,
+            stowage,
         }
     }
 

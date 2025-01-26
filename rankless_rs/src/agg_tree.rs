@@ -77,20 +77,20 @@ pub trait ReinstateFrom<T> {
     fn reinstate_from(&mut self, value: T);
 }
 
-impl<SR> From<MinHeap<SR::FlatRecord>> for HeapIterator<SR>
+impl<SR> From<MinHeap<SR::FlatRecord>> for Option<HeapIterator<SR>>
 where
     SR: SortedRecord,
     SR::FlatRecord: Ord + Clone,
 {
     fn from(mut heap: MinHeap<SR::FlatRecord>) -> Self {
-        let last_rec = heap.pop().unwrap();
+        let last_rec = heap.pop()?;
         let rec = last_rec.clone();
         let next_srec = Some(rec.into());
-        Self {
+        Some(HeapIterator {
             heap,
             last_rec,
             next_srec,
-        }
+        })
     }
 }
 
