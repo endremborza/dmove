@@ -1,6 +1,6 @@
 use std::{
     fs::{create_dir_all, File},
-    io::{Read, Seek, Write},
+    io::{BufReader, Read, Seek, Write},
     marker::PhantomData,
     path::PathBuf,
 };
@@ -194,7 +194,10 @@ where
     E::T: VarSizedAttributeElement,
     LT: UnsignedNumber,
 {
-    fn from_file(counts: &mut File) -> Self {
+    fn from_file<R>(counts: &mut R) -> Self
+    where
+        R: Read,
+    {
         let mut size_buf = [0; MAX_NUMBUF];
         let size_slice = &mut size_buf[..E::SizeType::S];
         let mut seek = 0;
@@ -351,12 +354,14 @@ where
     LT: UnsignedNumber,
 {
     fn load_backend(path: &PathBuf) -> Self {
-        let mut file_pair = VattFilePair::open(&path.join(E::NAME));
-        let locators = Locators::<E, LT>::from_file(&mut file_pair.counts);
+        let file_pair = VattFilePair::open(&path.join(E::NAME));
+        let mut count_br = BufReader::new(file_pair.counts);
+        let mut target_br = BufReader::new(file_pair.targets);
+        let locators = Locators::<E, LT>::from_file(&mut count_br);
         let mut v = Vec::new();
         let mut buf = [0; MAX_BUF];
         let bufr = &mut buf[0..Self::BL];
-        while let Ok(_) = file_pair.targets.read_exact(bufr) {
+        while let Ok(_) = target_br.read_exact(bufr) {
             v.push(E::subtype_from_buf(bufr))
         }
 
