@@ -230,11 +230,15 @@ macro_rules! multi_route {
                     let nstate = NameState::new::<$T>(&ent_intf);
 
                     let (lock, cvar) = &*shared_cvp;
+                    println!("waiting for data in {}", <$T>::NAME);
                     let mut data = lock.lock().unwrap();
+                    println!("whiling data in {}", <$T>::NAME);
                     while data.is_none() {
+                        println!("unlocking data in {}", <$T>::NAME);
                         data = cvar.wait(data).unwrap();
                     }
                     let ccount = *data.as_ref().unwrap();
+                    println!("got data in {}", <$T>::NAME);
 
                     ent_intf.update_stats(&mut au_clone.lock().unwrap(), ccount);
                     nstate
@@ -245,11 +249,12 @@ macro_rules! multi_route {
             let gets = Arc::new(Getters::new($s.clone()));
             let ccount = gets.total_cite_count();
 
-            let (lock, cvar) = &*cv_pair;
-            let mut data = lock.lock().unwrap();
-            *data = Some(ccount);
-            cvar.notify_all();
-
+            {
+                let (lock, cvar) = &*cv_pair;
+                let mut data = lock.lock().unwrap();
+                *data = Some(ccount);
+                cvar.notify_all();
+            }
             NodeInterfaces::<Topics>::new(&$s).update_stats(&mut static_att_union.lock().unwrap(), ccount);
             NodeInterfaces::<Qs>::new(&$s).update_stats(&mut static_att_union.lock().unwrap(), ccount);
 
