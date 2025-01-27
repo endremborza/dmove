@@ -30,7 +30,7 @@ use hashbrown::HashMap;
 use rand::Rng;
 use serde::{de::DeserializeOwned, Serialize};
 
-const SPEC_CORR_RATE: f64 = 0.2;
+const SPEC_CORR_RATE: f64 = 0.35;
 
 pub type NET<E> = <E as NumberedEntity>::T;
 type VB<E> = <QuickAttPair as BackendSelector<E>>::BE;
@@ -109,7 +109,7 @@ macro_rules! make_interfaces {
             )*
 
             $(
-                pub fn $v_key<'a, K: UnsignedNumber>(&'a self, key: &'a K) -> &'a [VaST<$v_t>] {
+                pub fn $v_key<'a, K: UnsignedNumber>(&'a self, key: K) -> &'a [VaST<$v_t>] {
                     let uk = key.to_usize();
                     self.ifs.$v_key.get(&uk).expect(&format!("e: {}, k: {}", <$v_t as Entity>::NAME, uk))
 
@@ -196,9 +196,9 @@ make_interfaces!(
     wsubfields -> WorkSubfields,
     winsts -> WorkInstitutions,
     wships -> WorkAuthorships,
+    wsources -> WorkSources,
     shipis -> AuthorshipInstitutions,
-    country_insts -> CountryInsts,
-    sources -> WorkSources;
+    country_insts -> CountryInsts;
     sqy >> SourceYearQs
 );
 
@@ -288,8 +288,10 @@ impl Getters {
         let path = stowage.path_from_ns(WorksNames::NS);
         let wn_locators =
             <Locators<WorksNames, _> as BackendLoading<WorksNames>>::load_backend(&path);
+        let ifs = Interfaces::new(stowage.clone());
+        println!("loaded all ifs");
         Self {
-            ifs: Interfaces::new(stowage.clone()),
+            ifs,
             wn_locators,
             stowage,
         }
@@ -355,13 +357,16 @@ fn update_stats<E>(
     E: NodeInterfaceable,
 {
     let mut elevel = Vec::new();
-    let grate = 1.0 / f64::from(E::N as u32);
+    let numer_add = (full_cc / f64::from(E::N as u32)) * SPEC_CORR_RATE;
+    let full_denom = full_cc;
     for (i, name) in names.0.to_vec().into_iter().enumerate() {
         //TODO: u32 counts (max 4B) need to be ensured
-        let erate = f64::from(ccounts[i].to_usize() as u32) / full_cc;
+        let spec_baseline = (f64::from(ccounts[i].to_usize() as u32) * (1.0 - SPEC_CORR_RATE)
+            + numer_add)
+            / full_denom;
         elevel.push(AttributeLabel {
             name,
-            spec_baseline: grate * SPEC_CORR_RATE + erate * (1.0 - SPEC_CORR_RATE),
+            spec_baseline,
         });
     }
     stats.insert(E::NAME.to_string(), elevel.into());

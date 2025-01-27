@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs::File,
     io::{self, Write},
     path::PathBuf,
@@ -7,7 +8,7 @@ use std::{
 };
 
 use dmove_macro::{def_me_struct, derive_meta_trait};
-use hashbrown::HashSet;
+use hashbrown::{HashMap, HashSet};
 
 pub const MAX_BUF: usize = 0x1000;
 pub const MAX_NUMBUF: usize = 0x10;
@@ -23,6 +24,10 @@ pub struct MainBuilder {
     pub meta_elems: Vec<MetaElem>,
     pub definables: HashSet<String>,
     pub parent_root: PathBuf,
+}
+
+pub trait InitEmpty {
+    fn init_empty() -> Self;
 }
 
 pub trait BackendLoading<E>
@@ -113,6 +118,16 @@ pub trait CompactEntity: MappableEntity<KeyType = usize> {}
 
 impl<T> CompactEntity for T where T: MappableEntity<KeyType = usize> {}
 
+impl InitEmpty for () {
+    fn init_empty() -> Self {}
+}
+
+impl InitEmpty for String {
+    fn init_empty() -> Self {
+        "".to_string()
+    }
+}
+
 // pub trait ByteFixArrayInterface<const S: usize> {
 //     const S: usize = S;
 //     fn to_fbytes(&self) -> [u8; S];
@@ -133,7 +148,7 @@ pub trait ByteArrayInterface {
     fn from_bytes(buf: &[u8]) -> Self;
 }
 
-pub trait UnsignedNumber: Ord + Clone + Copy + Sized + ByteFixArrayInterface {
+pub trait UnsignedNumber: Ord + Clone + Copy + Sized + ByteFixArrayInterface + InitEmpty {
     fn to_usize(&self) -> usize;
     fn from_usize(n: usize) -> Self;
     fn cast_big_id(n: BigId) -> Self;
@@ -362,6 +377,32 @@ macro_rules! downcast_fun {
     };
 }
 pub(crate) use downcast_fun;
+
+macro_rules! empty_num {
+    ($($ty:ty),*) => {
+        $(impl InitEmpty for $ty {
+                fn init_empty() -> Self {
+                    0
+                }
+            }
+        )*
+    };
+}
+
+macro_rules! empty_coll {
+    ($($ty:ty;$($g:ident)-*),*) => {
+        $(impl <$($g),*> InitEmpty for $ty{
+                fn init_empty() -> Self {
+                    Self::new()
+                }
+            }
+        )*
+    };
+}
+
+empty_num!(u8, u16, u32, u64, u128);
+
+empty_coll!(Vec<T>; T, BTreeSet<T>; T, HashMap<K, V>; K-V);
 
 use crate::{var_size_attributes::VaST, VarSizedAttributeElement};
 

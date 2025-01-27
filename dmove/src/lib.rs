@@ -11,8 +11,8 @@ mod var_size_attributes;
 pub use common::{
     camel_case, BackendLoading, BigId, ByteArrayInterface, ByteFixArrayInterface, CompactEntity,
     Entity, EntityImmutableMapperBackend, EntityImmutableRefMapperBackend,
-    EntityMutableMapperBackend, Link, MainBuilder, MappableEntity, MarkedAttribute, MetaIntegrator,
-    NamespacedEntity, UnsignedNumber, VariableSizeAttribute, ET, MAA,
+    EntityMutableMapperBackend, InitEmpty, Link, MainBuilder, MappableEntity, MarkedAttribute,
+    MetaIntegrator, NamespacedEntity, UnsignedNumber, VariableSizeAttribute, ET, MAA,
 };
 pub use discontinuous_entity_mapper::{DiscoMapEntityBuilder, UniqueMap};
 pub use fixed_size_attributes::{

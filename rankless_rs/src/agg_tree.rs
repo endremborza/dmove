@@ -1,4 +1,4 @@
-use crate::common::InitEmpty;
+use dmove::InitEmpty;
 use dmove_macro::def_srecs;
 use serde::{Deserialize, Serialize};
 use std::{cmp::Reverse, collections::BinaryHeap as MaxHeap};

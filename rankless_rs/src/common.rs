@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::env;
 use std::fs::{DirEntry, ReadDir};
 use std::io::prelude::*;
@@ -17,9 +16,10 @@ use serde::{de::DeserializeOwned, Serialize};
 use tqdm::{Iter, Tqdm};
 
 use dmove::{
-    BackendLoading, BigId, CompactEntity, Entity, FixAttIterator, FixWriteSizeEntity, LoadedIdMap,
-    MainBuilder, MappableEntity, MarkedAttribute, MetaIntegrator, NamespacedEntity, VarAttIterator,
-    VarBox, VarSizedAttributeElement, VariableSizeAttribute, VattArrPair, VattReadingMap,
+    BackendLoading, BigId, CompactEntity, Entity, FixAttIterator, FixWriteSizeEntity, InitEmpty,
+    LoadedIdMap, MainBuilder, MappableEntity, MarkedAttribute, MetaIntegrator, NamespacedEntity,
+    VarAttIterator, VarBox, VarSizedAttributeElement, VariableSizeAttribute, VattArrPair,
+    VattReadingMap,
 };
 
 pub type StowReader = Reader<BufReader<GzDecoder<File>>>;
@@ -163,46 +163,6 @@ pathfields_fn!(
 
 pub trait ParsedId {
     fn get_parsed_id(&self) -> BigId;
-}
-
-pub trait InitEmpty {
-    fn init_empty() -> Self;
-}
-
-impl InitEmpty for () {
-    fn init_empty() -> Self {}
-}
-
-macro_rules! empty_num {
-    ($($ty:ty),*) => {
-        $(impl InitEmpty for $ty {
-                fn init_empty() -> Self {
-                    0
-                }
-            }
-        )*
-    };
-}
-
-macro_rules! empty_coll {
-    ($($ty:ty;$($g:ident)-*),*) => {
-        $(impl <$($g),*> InitEmpty for $ty{
-                fn init_empty() -> Self {
-                    Self::new()
-                }
-            }
-        )*
-    };
-}
-
-empty_num!(u8, u16, u32, u64);
-
-empty_coll!(Vec<T>; T, BTreeSet<T>; T, HashMap<K, V>; K-V);
-
-impl InitEmpty for String {
-    fn init_empty() -> Self {
-        "".to_string()
-    }
 }
 
 impl Stowage {
@@ -409,7 +369,14 @@ where
     fn load(stowage: &Stowage) -> Self::BE {
         let path = stowage.path_from_ns(E::NS);
         println!("loading {} from {:?}", E::NAME, path);
-        Marker::BE::load_backend(&path)
+        let now = std::time::Instant::now();
+        let out = Marker::BE::load_backend(&path);
+        println!(
+            "loaded {} from {path:?} in {}",
+            E::NAME,
+            now.elapsed().as_secs()
+        );
+        out
     }
 }
 
