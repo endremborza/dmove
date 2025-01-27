@@ -26,8 +26,6 @@ const MAX_PARTITIONS: usize = 16;
 
 pub type StackFr<S> = <<S as StackBasis>::SortedRec as SortedRecord>::FlatRecord;
 pub type PartitionId = u8;
-pub type CitingCoSuToForTM<'a, E> = PostRefIterWrap<'a, E, CitingCoSuToByRef<'a>>;
-pub type WCoiForTM<'a, E> = PostRefIterWrap<'a, E, WCoIByRef<'a>>;
 
 pub struct DisJ<E: Entity, const N: usize, const S: bool>(E::T);
 pub struct IntX<E: Entity, const N: usize, const S: bool>(E::T);
@@ -622,6 +620,7 @@ impl<'a> Iterator for WCoIByRef<'a> {
                     Some(iid) => iid,
                     None => {
                         self.cit_insts = None;
+                        self.cit_wids.next();
                         continue;
                     }
                 },

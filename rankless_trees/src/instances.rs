@@ -485,10 +485,10 @@ impl<C> FoldStackBase<C> for WorkTree {
 #[derive_tree_getter(Authors)]
 mod author_trees {
     use super::*;
-    use crate::components::{CitingCoSuToForTM, WCoiForTM};
+    use crate::components::{CitingCoSuToByRef, PostRefIterWrap, WCoIByRef};
 
-    pub type Tree1<'a> = CitingCoSuToForTM<'a, Authors>;
-    pub type Tree2<'a> = WCoiForTM<'a, Authors>;
+    pub type Tree1<'a> = PostRefIterWrap<'a, Authors, CitingCoSuToByRef<'a>>;
+    pub type Tree2<'a> = PostRefIterWrap<'a, Authors, WCoIByRef<'a>>;
 }
 
 #[derive_tree_getter(Institutions)]
@@ -797,35 +797,6 @@ mod country_trees {
 
     pub type Tree1<'a> = PostRefIterWrap<'a, Countries, InstSubfieldCountryInstByRef<'a>>;
 
-    // impl TreeMaker for TreeISuCoIn {
-    //     type StackBasis = (
-    // IntX<Institutions, 0, true>,
-    // IntX<Subfields, 1, true>,
-    // IntX<Countries, 2, false>,
-    // IntX<Institutions, 2, false>,
-    //     );
-    //     fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
-    //         let mut heap = MinHeap::new();
-    //         for refed_inst in gets.country_insts(&id) {
-    //             for refed_wid in gets.iworks(refed_inst) {
-    //                 for (refed_sf, citing_country, citing_inst, citing_wid) in
-    //                     iterators::SuCoInstIter::new(refed_wid, gets)
-    //                 {
-    //                     heap.push((
-    //                         refed_inst.lift(),
-    //                         refed_sf.lift(),
-    //                         citing_country.lift(),
-    //                         citing_inst.lift(),
-    //                         refed_wid.lift(),
-    //                         citing_wid.lift(),
-    //                     ))
-    //                 }
-    //             }
-    //         }
-    //         heap
-    //     }
-    // }
-    //
     // impl TreeMaker for TreeCoInSu {
     //     type StackBasis = (
     //         IntX<Countries, 0, true>,
