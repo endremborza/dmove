@@ -15,7 +15,7 @@ use rankless_rs::{
             WorkAuthorships, WorkSources, WorkTopics, WorkYears, WorksNames,
         },
         derive_links1::{WorkInstitutions, WorkSubfields},
-        derive_links2::WorkCitingCounts,
+        derive_links2::{WorkCitingCounts, WorkCountries},
     },
     steps::derive_links1::{CountryInsts, WorkPeriods},
     CiteCountMarker, NameExtensionMarker, NameMarker, SemanticIdMarker, WorkCountMarker,
@@ -197,6 +197,7 @@ make_interfaces!(
     winsts -> WorkInstitutions,
     wships -> WorkAuthorships,
     wsources -> WorkSources,
+    wcountries -> WorkCountries,
     shipis -> AuthorshipInstitutions,
     country_insts -> CountryInsts;
     sqy >> SourceYearQs
