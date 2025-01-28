@@ -286,7 +286,8 @@ pub trait PartitioningIterator<'a>:
                 "{req_id}: converted and wrote trees in {}",
                 now.elapsed().as_millis()
             );
-            ser_tree
+            ser_tree;
+            read_buf_path(get_path(period as usize)).unwrap()
         } else {
             //TODO WARN possible race condition! if multithreaded thing, one starts writing,
             //created the directory, but did not write all the files yet, this can start reading

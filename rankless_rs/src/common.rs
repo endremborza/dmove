@@ -1,5 +1,4 @@
 use std::env;
-use std::fs::{DirEntry, ReadDir};
 use std::io::prelude::*;
 use std::ops::Range;
 use std::{
@@ -114,12 +113,6 @@ where
     T: DeserializeOwned,
 {
     iterable: InIterator<T>,
-}
-
-pub struct QcPathIter {
-    builds: ReadDir,
-    inner_dir: PathBuf,
-    inner_reader: ReadDir,
 }
 
 //TODO: this is sort of a mess - can't tell the difference between box and vbox
@@ -243,18 +236,6 @@ impl Stowage {
         Ok(())
     }
 
-    pub fn write_cache<T: Serialize>(&self, obj: &T, path: &str) -> io::Result<()> {
-        let out_path = self.paths.cache.join(path);
-        create_dir_all(out_path.parent().unwrap())?;
-        write_gz(&out_path, obj)
-    }
-
-    pub fn write_cache_buf<T: Serialize>(&self, obj: &T, path: &str) -> io::Result<()> {
-        let out_path = self.paths.cache.join(path);
-        create_dir_all(out_path.parent().unwrap())?;
-        write_gz_buf(&out_path, obj)
-    }
-
     pub fn add_iter_owned<B, I, E>(&mut self, iter: I, name_o: Option<&str>)
     where
         B: MetaIntegrator<E>,
@@ -287,14 +268,6 @@ impl Stowage {
     pub fn read_sem_ids<E: Entity>(&self) -> ObjIter<SemanticElem> {
         let path = PathBuf::from(env::var_os("OA_PERSISTENT").unwrap());
         read_deser_obj::<SemanticElem>(&path, SEM_DIR, E::NAME)
-    }
-
-    pub fn iter_cached_qc_locs(&self) -> QcPathIter {
-        QcPathIter::new(&self.paths.cache)
-    }
-
-    pub fn iter_pruned_qc_locs(&self) -> QcPathIter {
-        QcPathIter::new(&self.paths.pruned_cache)
     }
 
     pub fn get_entity_interface<E, Marker>(&self) -> Marker::BE
@@ -330,19 +303,6 @@ impl Stowage {
 
     pub fn path_from_ns(&self, ns: &str) -> PathBuf {
         self.paths.entity_csvs.parent().unwrap().join(ns)
-    }
-}
-
-impl QcPathIter {
-    fn new(path: &PathBuf) -> Self {
-        let mut builds = read_dir(path.join(BUILD_LOC)).unwrap();
-        let inner_dir = builds.next().unwrap().unwrap().path();
-        let inner_reader = read_dir(&inner_dir).unwrap();
-        Self {
-            builds,
-            inner_dir,
-            inner_reader,
-        }
     }
 }
 
@@ -446,34 +406,6 @@ where
     type BE = Range<E::T>;
 }
 
-impl Iterator for QcPathIter {
-    type Item = (String, DirEntry);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.inner_reader.next() {
-            Some(inner_file) => {
-                return Some((
-                    self.inner_dir
-                        .file_name()
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .to_owned(),
-                    inner_file.unwrap(),
-                ))
-            }
-            None => {
-                if let Some(inner_next) = self.builds.next() {
-                    self.inner_dir = inner_next.unwrap().path();
-                    self.inner_reader = read_dir(&self.inner_dir).unwrap();
-                    return self.next();
-                }
-            }
-        }
-        None
-    }
-}
-
 impl<T: DeserializeOwned> Iterator for ObjIter<T> {
     type Item = T;
     fn next(&mut self) -> Option<Self::Item> {
@@ -502,49 +434,11 @@ where
     BufReader::new(gz_decoder)
 }
 
-pub fn write_gz<T>(out_path: &Path, obj: &T) -> io::Result<()>
-where
-    T: Serialize,
-{
-    write_gz_meta(
-        out_path,
-        obj,
-        |o| serde_json::to_string(o).unwrap().as_bytes().to_vec(),
-        "json",
-    )
-}
-
-pub fn write_gz_buf<T>(out_path: &Path, obj: &T) -> io::Result<()>
-where
-    T: Serialize,
-{
-    write_gz_meta(out_path, obj, |o| bincode::serialize(o).unwrap(), "buf")
-}
-
-pub fn write_gz_meta<T, F>(out_path: &Path, obj: &T, f: F, suffix: &str) -> io::Result<()>
-where
-    T: Serialize,
-    F: Fn(&T) -> Vec<u8>,
-{
-    let out_file = File::create(
-        out_path
-            .with_extension(format!("{suffix}.gz"))
-            .to_str()
-            .unwrap(),
-    )?;
-    let encoder = GzEncoder::new(out_file, Compression::default());
-    let mut writer = std::io::BufWriter::new(encoder);
-    writer.write_all(&f(obj))
-}
-
 pub fn read_buf_path<T, P>(fp: P) -> Result<T, bincode::Error>
 where
     T: DeserializeOwned,
     P: AsRef<Path>,
 {
-    // let mut buf: Vec<u8> = Vec::new();
-    // get_gz_buf(fp).read_to_end(&mut buf)?;
-    // bincode::deserialize(&buf)
     bincode::deserialize_from(&mut get_gz_buf(fp))
 }
 
@@ -553,8 +447,6 @@ where
     T: Serialize,
     P: AsRef<Path>,
 {
-    // let buf = bincode::serialize(&obj).unwrap();
-    // TODO: this reading writing is a bit of a wet mess
     let file = File::create(fp)?;
     let encoder = GzEncoder::new(file, Compression::default());
     let writer = std::io::BufWriter::new(encoder);

@@ -508,8 +508,8 @@ mod inst_trees {
     pub type Tree5<'a> = PostRefIterWrap<'a, Institutions, QedInf<'a>>;
     pub type Tree6<'a> = PostRefIterWrap<'a, Institutions, CitingCoInstSuToByRef<'a>>;
     pub type Tree7<'a> = InstBesties<'a>;
-    pub type Tree8<'a> = PostRefIterWrap<'a, Sources, SubfieldCountryInstSubfieldByRef<'a>>;
-    pub type Tree9<'a> = PostRefIterWrap<'a, Sources, SubfieldCountryInstSourceByRef<'a>>;
+    pub type Tree8<'a> = PostRefIterWrap<'a, Institutions, SubfieldCountryInstSubfieldByRef<'a>>;
+    pub type Tree9<'a> = PostRefIterWrap<'a, Institutions, SubfieldCountryInstSourceByRef<'a>>;
 }
 
 #[derive_tree_getter(Countries)]
