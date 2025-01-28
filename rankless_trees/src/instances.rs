@@ -791,44 +791,21 @@ mod inst_trees {
 #[derive_tree_getter(Countries)]
 mod country_trees {
 
-    use crate::components::{InstSubfieldCountryInstByRef, PostRefIterWrap};
+    use crate::components::{CountryBesties, CountryInstsPost, SubfieldCountryInstByRef};
 
     use super::*;
 
-    pub type Tree1<'a> = PostRefIterWrap<'a, Countries, InstSubfieldCountryInstByRef<'a>>;
-
-    // impl TreeMaker for TreeCoInSu {
-    //     type StackBasis = (
-    //         IntX<Countries, 0, true>,
-    //         IntX<Institutions, 0, true>,
-    //         IntX<Subfields, 1, true>,
-    //     );
-    //     fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
-    //         let mut heap = MinHeap::new();
-    //         for country_inst in gets.country_insts(&id) {
-    //             for refed_wid in gets.iworks(country_inst) {
-    //                 for refed_inst in gets.winsts(refed_wid) {
-    //                     let refed_country = gets.icountry(refed_inst);
-    //                     if *refed_country == id {
-    //                         continue;
-    //                     }
-    //                     for refed_sf in gets.subfield(refed_wid) {
-    //                         for citing_wid in gets.citing(refed_wid) {
-    //                             heap.push((
-    //                                 refed_country.lift(),
-    //                                 refed_inst.lift(),
-    //                                 refed_sf.lift(),
-    //                                 refed_wid.lift(),
-    //                                 citing_wid.lift(),
-    //                             ))
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         heap
-    //     }
-    // }
+    pub type Tree1<'a> = CountryInstsPost<
+        'a,
+        SubfieldCountryInstByRef<'a>,
+        (
+            IntX<Institutions, 0, true>,
+            IntX<Subfields, 1, true>,
+            IntX<Countries, 2, false>,
+            IntX<Institutions, 2, false>,
+        ),
+    >;
+    pub type Tree2<'a> = CountryBesties<'a>;
 }
 
 #[derive_tree_getter(Sources)]

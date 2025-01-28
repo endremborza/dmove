@@ -27,6 +27,13 @@ const MAX_PARTITIONS: usize = 16;
 pub type StackFr<S> = <<S as StackBasis>::SortedRec as SortedRecord>::FlatRecord;
 pub type PartitionId = u8;
 
+type ExtendedFr<'a, I> = (
+    PartitionId,
+    <<I as RefWorkBasedIter<'a>>::IT as ExtendWithRefWid>::To,
+);
+
+type ExtItem<'a, I> = <ExtendedFr<'a, I> as ExtendWithInst>::To;
+
 pub struct DisJ<E: Entity, const N: usize, const S: bool>(E::T);
 pub struct IntX<E: Entity, const N: usize, const S: bool>(E::T);
 
@@ -38,6 +45,22 @@ where
     gets: &'a Getters,
     refs_it: Peekable<Iter<'a, WT>>,
     p: PhantomData<E>,
+}
+
+pub struct CountryInstsPost<'a, I, SB> {
+    pr_it: Option<PostRefIterWrap<'a, Institutions, I>>,
+    gets: &'a Getters,
+    insts: Peekable<Iter<'a, ET<Institutions>>>,
+    p: PhantomData<SB>,
+}
+
+pub struct CountryBesties<'a> {
+    gets: &'a Getters,
+    id: ET<Countries>,
+    ref_wids: Peekable<Iter<'a, WT>>,
+    ref_insts: Option<Peekable<Iter<'a, ET<Institutions>>>>,
+    ref_sfs: Option<Peekable<Iter<'a, ET<Subfields>>>>,
+    cit_wids: Option<Iter<'a, ET<Works>>>,
 }
 
 pub struct CitingCoSuToByRef<'a> {
@@ -229,6 +252,11 @@ pub trait ExtendWithRefWid {
     fn extend(self, value: WT) -> Self::To;
 }
 
+pub trait ExtendWithInst {
+    type To;
+    fn extend(self, value: ET<Institutions>) -> (PartitionId, Self::To);
+}
+
 type FoldingStackLeaf = WorkTree;
 // type FoldingStackLeaf = ();
 
@@ -298,6 +326,16 @@ impl<T1, T2, T3, T4> ExtendWithRefWid for (T1, T2, T3, T4, WT) {
     type To = (T1, T2, T3, T4, WT, WT);
     fn extend(self, value: WT) -> Self::To {
         (self.0, self.1, self.2, self.3, value, self.4)
+    }
+}
+
+impl<T1, T2, T3> ExtendWithInst for (PartitionId, (T1, T2, T3, WT, WT)) {
+    type To = (ET<Institutions>, T1, T2, T3, WT, WT);
+    fn extend(self, value: ET<Institutions>) -> (PartitionId, Self::To) {
+        (
+            self.0,
+            (value, self.1 .0, self.1 .1, self.1 .2, self.1 .3, self.1 .4),
+        )
     }
 }
 
@@ -701,25 +739,6 @@ impl<'a> Iterator for InstSubfieldCountryInstByRef<'a> {
     }
 }
 
-impl<'a, E, I> PartitioningIterator<'a> for PostRefIterWrap<'a, E, I>
-where
-    E: NumberedEntity + WorksFromMemory,
-    I: RefWorkBasedIter<'a>,
-{
-    type Root = E;
-    type StackBasis = I::SB;
-    const PARTITIONS: usize = N_PERS;
-    fn new(id: NET<E>, gets: &'a Getters) -> Self {
-        let refs_it = E::works_from_ram(&gets, id.lift()).iter().peekable();
-        Self {
-            gets,
-            refs_it,
-            it: None,
-            p: PhantomData,
-        }
-    }
-}
-
 impl<'a, E, I> Iterator for PostRefIterWrap<'a, E, I>
 where
     E: NumberedEntity + WorksFromMemory,
@@ -748,6 +767,170 @@ where
                     self.it = Some(I::new(&ref_wid, &self.gets));
                 }
             }
+        }
+    }
+}
+
+impl<'a, I, SB> Iterator for CountryInstsPost<'a, I, SB>
+where
+    I: RefWorkBasedIter<'a>,
+    ExtendedFr<'a, I>: ExtendWithInst,
+{
+    type Item = (PartitionId, ExtItem<'a, I>);
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let ref_inst = match self.insts.peek() {
+                Some(v) => *v,
+                None => return None,
+            };
+            match &mut self.pr_it {
+                Some(it) => match it.next() {
+                    Some(sub_e) => {
+                        return Some(sub_e.extend(*ref_inst));
+                    }
+                    None => {
+                        self.pr_it = None;
+                        self.insts.next();
+                        continue;
+                    }
+                },
+                None => {
+                    self.pr_it = Some(PostRefIterWrap::new(*ref_inst, self.gets));
+                }
+            }
+        }
+    }
+}
+
+impl<'a> Iterator for CountryBesties<'a> {
+    type Item = (
+        PartitionId,
+        StackFr<<Self as PartitioningIterator<'a>>::StackBasis>,
+    );
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let ref_wid = match self.ref_wids.peek() {
+                Some(v) => *v,
+                None => return None,
+            };
+            let ref_per = self.gets.wperiod(ref_wid);
+
+            let ref_sf = match &mut self.ref_sfs {
+                Some(it) => match it.peek() {
+                    Some(sid) => *sid,
+                    None => {
+                        self.ref_wids.next();
+                        self.ref_sfs = None;
+                        continue;
+                    }
+                },
+                None => {
+                    self.ref_sfs = Some(self.gets.wsubfields(*ref_wid).iter().peekable());
+                    continue;
+                }
+            };
+
+            let (ref_country, ref_inst) = match &mut self.ref_insts {
+                Some(it) => match it.peek() {
+                    Some(iid) => {
+                        let rc = self.gets.icountry(*iid);
+                        if *rc == self.id {
+                            it.next();
+                            continue;
+                        }
+                        (*rc, *iid)
+                    }
+                    None => {
+                        self.ref_insts = None;
+                        self.ref_sfs.as_mut().unwrap().next();
+                        continue;
+                    }
+                },
+                None => {
+                    self.ref_insts = Some(self.gets.winsts(*ref_wid).iter().peekable());
+                    continue;
+                }
+            };
+
+            let cit_wid = match &mut self.cit_wids {
+                Some(it) => match it.next() {
+                    Some(wid) => *wid,
+                    None => {
+                        self.ref_insts.as_mut().unwrap().next();
+                        self.cit_wids = None;
+                        continue;
+                    }
+                },
+                None => {
+                    self.cit_wids = Some(self.gets.citing(*ref_wid).iter());
+                    continue;
+                }
+            };
+            return Some((
+                *ref_per,
+                (ref_country, *ref_inst, *ref_sf, *ref_wid, cit_wid),
+            ));
+        }
+    }
+}
+
+impl<'a, E, I> PartitioningIterator<'a> for PostRefIterWrap<'a, E, I>
+where
+    E: NumberedEntity + WorksFromMemory,
+    I: RefWorkBasedIter<'a>,
+{
+    type Root = E;
+    type StackBasis = I::SB;
+    const PARTITIONS: usize = N_PERS;
+    fn new(id: NET<E>, gets: &'a Getters) -> Self {
+        let refs_it = E::works_from_ram(&gets, id.lift()).iter().peekable();
+        Self {
+            gets,
+            refs_it,
+            it: None,
+            p: PhantomData,
+        }
+    }
+}
+
+impl<'a, I, SB> PartitioningIterator<'a> for CountryInstsPost<'a, I, SB>
+where
+    I: RefWorkBasedIter<'a>,
+    SB: StackBasis,
+    SB::SortedRec: SortedRecord<FlatRecord = ExtItem<'a, I>>,
+    (PartitionId, StackFr<I::SB>): ExtendWithInst,
+    ExtendedFr<'a, I>: ExtendWithInst,
+{
+    type Root = Countries;
+    type StackBasis = SB;
+    const PARTITIONS: usize = N_PERS;
+    fn new(id: NET<Countries>, gets: &'a Getters) -> Self {
+        let insts = gets.country_insts(id.lift()).iter().peekable();
+        Self {
+            gets,
+            insts,
+            pr_it: None,
+            p: PhantomData,
+        }
+    }
+}
+
+impl<'a> PartitioningIterator<'a> for CountryBesties<'a> {
+    type StackBasis = (
+        IntX<Countries, 0, true>,
+        IntX<Institutions, 0, true>,
+        IntX<Subfields, 1, true>,
+    );
+    type Root = Countries;
+    const PARTITIONS: usize = N_PERS;
+    fn new(id: NET<Self::Root>, gets: &'a Getters) -> Self {
+        Self {
+            gets,
+            id,
+            ref_wids: gets.cworks(id).iter().peekable(),
+            ref_insts: None,
+            ref_sfs: None,
+            cit_wids: None,
         }
     }
 }
