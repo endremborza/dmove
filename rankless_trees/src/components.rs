@@ -7,7 +7,9 @@ use rankless_rs::{
     common::{read_buf_path, write_buf_path},
     env_consts::START_YEAR,
     gen::{
-        a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Topics, Works},
+        a1_entity_mapping::{
+            Authors, Authorships, Countries, Institutions, Sources, Subfields, Topics, Works,
+        },
         a2_init_atts::WorksNames,
     },
     steps::{a1_entity_mapping::N_PERS, derive_links1::WorkPeriods},
@@ -23,16 +25,16 @@ use crate::{
 };
 
 const MAX_PARTITIONS: usize = 16;
+const UNKNOWN_ID: usize = 0;
 
 pub type StackFr<S> = <<S as StackBasis>::SortedRec as SortedRecord>::FlatRecord;
 pub type PartitionId = u8;
 
-type ExtendedFr<'a, I> = (
-    PartitionId,
-    <<I as RefWorkBasedIter<'a>>::IT as ExtendWithRefWid>::To,
-);
-
+type ExtendedFr<'a, I> = (PartitionId, StackFr<<I as RefWorkBasedIter<'a>>::SB>);
 type ExtItem<'a, I> = <ExtendedFr<'a, I> as ExtendWithInst>::To;
+type RwbiItem<'a, I> = <StackFr<<I as RefWorkBasedIter<'a>>::SB> as ExtendedWithRefWid>::From;
+type FoldingStackLeaf = WorkTree;
+// type FoldingStackLeaf = ();
 
 pub struct DisJ<E: Entity, const N: usize, const S: bool>(E::T);
 pub struct IntX<E: Entity, const N: usize, const S: bool>(E::T);
@@ -63,10 +65,27 @@ pub struct CountryBesties<'a> {
     cit_wids: Option<Iter<'a, ET<Works>>>,
 }
 
+pub struct WorkingAuthors<'a> {
+    gets: &'a Getters,
+    id: ET<Institutions>,
+    ref_wids: Peekable<Iter<'a, WT>>,
+    ref_ships: Option<Peekable<Iter<'a, ET<Authorships>>>>,
+    cit_insts: Option<Iter<'a, ET<Institutions>>>,
+    cit_wids: Option<Peekable<Iter<'a, ET<Works>>>>,
+}
+
 pub struct CitingCoSuToByRef<'a> {
     cit_wids: Peekable<Iter<'a, ET<Works>>>,
     cit_tops: Option<Peekable<Iter<'a, ET<Topics>>>>,
     cit_insts: Option<Iter<'a, ET<Institutions>>>,
+    gets: &'a Getters,
+}
+
+pub struct CitingSourceCoSuByRef<'a> {
+    cit_wids: Peekable<Iter<'a, ET<Works>>>,
+    cit_sfs: Option<Peekable<Iter<'a, ET<Subfields>>>>,
+    cit_insts: Option<Peekable<Iter<'a, ET<Institutions>>>>,
+    cit_sources: Option<Iter<'a, ET<Sources>>>,
     gets: &'a Getters,
 }
 
@@ -111,6 +130,21 @@ pub struct InstSubfieldCountryInstByRef<'a> {
     ref_wid: &'a WT,
     sci_top: Peekable<SubfieldCountryInstByRef<'a>>,
     ref_insts: Iter<'a, ET<Institutions>>,
+    gets: &'a Getters,
+}
+
+pub struct RefSubCiSubTByRef<'a> {
+    ref_wid: &'a WT,
+    ref_sfs: Peekable<Iter<'a, ET<Subfields>>>,
+    cit_wids: Peekable<Iter<'a, ET<Works>>>,
+    cit_topics: Option<Iter<'a, ET<Topics>>>,
+    gets: &'a Getters,
+}
+
+pub struct RefSubSourceTop<'a> {
+    ref_wid: &'a WT,
+    ref_sub_cst: Peekable<RefSubCiSubTByRef<'a>>,
+    cit_sources: Option<Iter<'a, ET<Sources>>>,
     gets: &'a Getters,
 }
 
@@ -241,24 +275,24 @@ pub trait PartitioningIterator<'a>:
     }
 }
 
-pub trait RefWorkBasedIter<'a>: Iterator<Item = Self::IT> {
+pub trait RefWorkBasedIter<'a>:
+    Iterator<Item = <StackFr<Self::SB> as ExtendedWithRefWid>::From>
+where
+    StackFr<Self::SB>: ExtendedWithRefWid,
+{
     type SB: StackBasis;
-    type IT: ExtendWithRefWid<To = StackFr<Self::SB>>;
     fn new(ref_wid: &'a WT, gets: &'a Getters) -> Self;
 }
 
-pub trait ExtendWithRefWid {
-    type To;
-    fn extend(self, value: WT) -> Self::To;
+pub trait ExtendedWithRefWid {
+    type From;
+    fn extend(src: Self::From, value: WT) -> Self;
 }
 
 pub trait ExtendWithInst {
     type To;
     fn extend(self, value: ET<Institutions>) -> (PartitionId, Self::To);
 }
-
-type FoldingStackLeaf = WorkTree;
-// type FoldingStackLeaf = ();
 
 impl<T> StackBasis for T
 where
@@ -315,17 +349,17 @@ impl FoldingStackConsumer for WorkTree {
     }
 }
 
-impl<T1, T2, T3> ExtendWithRefWid for (T1, T2, T3, WT) {
-    type To = (T1, T2, T3, WT, WT);
-    fn extend(self, value: WT) -> Self::To {
-        (self.0, self.1, self.2, value, self.3)
+impl<T1, T2, T3> ExtendedWithRefWid for (T1, T2, T3, WT, WT) {
+    type From = (T1, T2, T3, WT);
+    fn extend(src: Self::From, value: WT) -> Self {
+        (src.0, src.1, src.2, value, src.3)
     }
 }
 
-impl<T1, T2, T3, T4> ExtendWithRefWid for (T1, T2, T3, T4, WT) {
-    type To = (T1, T2, T3, T4, WT, WT);
-    fn extend(self, value: WT) -> Self::To {
-        (self.0, self.1, self.2, self.3, value, self.4)
+impl<T1, T2, T3, T4> ExtendedWithRefWid for (T1, T2, T3, T4, WT, WT) {
+    type From = (T1, T2, T3, T4, WT);
+    fn extend(src: Self::From, value: WT) -> Self {
+        (src.0, src.1, src.2, src.3, value, src.4)
     }
 }
 
@@ -345,7 +379,6 @@ impl<'a> RefWorkBasedIter<'a> for SubfieldCountryInstByRef<'a> {
         IntX<Countries, 1, false>,
         IntX<Institutions, 1, false>,
     );
-    type IT = (ET<Subfields>, ET<Countries>, ET<Institutions>, ET<Works>);
     fn new(ref_wid: &'a WT, gets: &'a Getters) -> Self {
         let ref_sfs = gets.wsubfields(*ref_wid).iter().peekable();
         let cit_wids = gets.citing(*ref_wid).iter().peekable();
@@ -365,7 +398,6 @@ impl<'a> RefWorkBasedIter<'a> for FullRefSourceCountryInstByRef<'a> {
         IntX<Countries, 1, true>,
         IntX<Institutions, 1, true>,
     );
-    type IT = (ET<Sources>, ET<Countries>, ET<Institutions>, ET<Works>);
     fn new(ref_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
         let cit_wids = gets.citing(*ref_wid).iter();
         let ref_insts = gets.winsts(*ref_wid).iter().peekable();
@@ -386,7 +418,6 @@ impl<'a> RefWorkBasedIter<'a> for FullRefCountryInstSubfieldByRef<'a> {
         IntX<Institutions, 0, true>,
         IntX<Subfields, 2, true>,
     );
-    type IT = (ET<Countries>, ET<Institutions>, ET<Subfields>, ET<Works>);
     fn new(ref_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
         let cit_wids = gets.citing(*ref_wid).iter();
         let ref_insts = gets.winsts(*ref_wid).iter().peekable();
@@ -407,12 +438,29 @@ impl<'a> RefWorkBasedIter<'a> for CitingCoSuToByRef<'a> {
         IntX<Subfields, 1, false>,
         IntX<Topics, 1, false>,
     );
-    type IT = (ET<Countries>, ET<Subfields>, ET<Topics>, ET<Works>);
     fn new(ref_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
         let cit_wids = gets.citing(*ref_wid).iter().peekable();
         Self {
             cit_wids,
             cit_tops: None,
+            cit_insts: None,
+            gets,
+        }
+    }
+}
+
+impl<'a> RefWorkBasedIter<'a> for CitingSourceCoSuByRef<'a> {
+    type SB = (
+        IntX<Sources, 0, false>,
+        IntX<Countries, 1, false>,
+        IntX<Subfields, 2, false>,
+    );
+    fn new(ref_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
+        let cit_wids = gets.citing(*ref_wid).iter().peekable();
+        Self {
+            cit_wids,
+            cit_sources: None,
+            cit_sfs: None,
             cit_insts: None,
             gets,
         }
@@ -425,7 +473,6 @@ impl<'a> RefWorkBasedIter<'a> for WCoIByRef<'a> {
         IntX<Countries, 1, false>,
         IntX<Institutions, 1, false>,
     );
-    type IT = (ET<Works>, ET<Countries>, ET<Institutions>, ET<Works>);
 
     fn new(ref_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
         let cit_wids = gets.citing(*ref_wid).iter().peekable();
@@ -445,13 +492,6 @@ impl<'a> RefWorkBasedIter<'a> for SubfieldCountryInstSourceByRef<'a> {
         IntX<Institutions, 1, false>,
         IntX<Sources, 3, false>,
     );
-    type IT = (
-        ET<Subfields>,
-        ET<Countries>,
-        ET<Institutions>,
-        ET<Sources>,
-        ET<Works>,
-    );
     fn new(ref_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
         Self {
             cit_sources: None,
@@ -468,13 +508,6 @@ impl<'a> RefWorkBasedIter<'a> for InstSubfieldCountryInstByRef<'a> {
         IntX<Countries, 2, false>,
         IntX<Institutions, 2, false>,
     );
-    type IT = (
-        ET<Institutions>,
-        ET<Subfields>,
-        ET<Countries>,
-        ET<Institutions>,
-        ET<Works>,
-    );
     fn new(ref_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
         Self {
             ref_wid,
@@ -485,8 +518,41 @@ impl<'a> RefWorkBasedIter<'a> for InstSubfieldCountryInstByRef<'a> {
     }
 }
 
+impl<'a> RefWorkBasedIter<'a> for RefSubCiSubTByRef<'a> {
+    type SB = (
+        IntX<Subfields, 0, true>,
+        IntX<Subfields, 1, false>,
+        IntX<Topics, 1, false>,
+    );
+    fn new(ref_wid: &'a WT, gets: &'a Getters) -> Self {
+        Self {
+            gets,
+            ref_wid,
+            cit_wids: gets.citing(*ref_wid).iter().peekable(),
+            ref_sfs: gets.wsubfields(*ref_wid).iter().peekable(),
+            cit_topics: None,
+        }
+    }
+}
+
+impl<'a> RefWorkBasedIter<'a> for RefSubSourceTop<'a> {
+    type SB = (
+        IntX<Subfields, 0, false>,
+        IntX<Sources, 1, false>,
+        IntX<Topics, 1, false>,
+    );
+    fn new(ref_wid: &'a WT, gets: &'a Getters) -> Self {
+        Self {
+            ref_wid,
+            gets,
+            ref_sub_cst: RefSubCiSubTByRef::new(ref_wid, gets).peekable(),
+            cit_sources: None,
+        }
+    }
+}
+
 impl<'a> Iterator for SubfieldCountryInstByRef<'a> {
-    type Item = <Self as RefWorkBasedIter<'a>>::IT;
+    type Item = RwbiItem<'a, Self>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -527,7 +593,7 @@ impl<'a> Iterator for SubfieldCountryInstByRef<'a> {
 }
 
 impl<'a> Iterator for FullRefSourceCountryInstByRef<'a> {
-    type Item = <Self as RefWorkBasedIter<'a>>::IT;
+    type Item = RwbiItem<'a, Self>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -562,7 +628,7 @@ impl<'a> Iterator for FullRefSourceCountryInstByRef<'a> {
 }
 
 impl<'a> Iterator for FullRefCountryInstSubfieldByRef<'a> {
-    type Item = <Self as RefWorkBasedIter<'a>>::IT;
+    type Item = RwbiItem<'a, Self>;
 
     fn next(&mut self) -> Option<Self::Item> {
         //TODO full-ref WET
@@ -598,7 +664,7 @@ impl<'a> Iterator for FullRefCountryInstSubfieldByRef<'a> {
 }
 
 impl<'a> Iterator for CitingCoSuToByRef<'a> {
-    type Item = <Self as RefWorkBasedIter<'a>>::IT;
+    type Item = RwbiItem<'a, Self>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -644,8 +710,49 @@ impl<'a> Iterator for CitingCoSuToByRef<'a> {
     }
 }
 
+impl<'a> Iterator for CitingSourceCoSuByRef<'a> {
+    type Item = RwbiItem<'a, Self>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let citing_wid = match self.cit_wids.peek() {
+                Some(v) => *v,
+                None => return None,
+            };
+            let citing_sf = match peek_and_roll(&mut self.cit_sfs, &mut self.cit_wids, || {
+                self.gets.wsubfields(*citing_wid).iter()
+            }) {
+                Some(e) => e,
+                None => continue,
+            };
+            let citing_inst = match peek_and_roll(
+                &mut self.cit_insts,
+                &mut self.cit_sfs.as_mut().unwrap(),
+                || self.gets.winsts(*citing_wid).iter(),
+            ) {
+                Some(e) => e,
+                None => continue,
+            };
+            let citing_source = match next_and_roll(
+                &mut self.cit_sources,
+                &mut self.cit_insts.as_mut().unwrap(),
+                || self.gets.wsources(*citing_wid).iter(),
+            ) {
+                Some(e) => e,
+                None => continue,
+            };
+            return Some((
+                *citing_source,
+                self.gets.icountry(citing_inst).lift(),
+                citing_sf.lift(),
+                citing_wid.lift(),
+            ));
+        }
+    }
+}
+
 impl<'a> Iterator for WCoIByRef<'a> {
-    type Item = <Self as RefWorkBasedIter<'a>>::IT;
+    type Item = RwbiItem<'a, Self>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -678,7 +785,7 @@ impl<'a> Iterator for WCoIByRef<'a> {
 }
 
 impl<'a> Iterator for SubfieldCountryInstSourceByRef<'a> {
-    type Item = <Self as RefWorkBasedIter<'a>>::IT;
+    type Item = RwbiItem<'a, Self>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -712,7 +819,7 @@ impl<'a> Iterator for SubfieldCountryInstSourceByRef<'a> {
 }
 
 impl<'a> Iterator for InstSubfieldCountryInstByRef<'a> {
-    type Item = <Self as RefWorkBasedIter<'a>>::IT;
+    type Item = RwbiItem<'a, Self>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -739,10 +846,80 @@ impl<'a> Iterator for InstSubfieldCountryInstByRef<'a> {
     }
 }
 
+impl<'a> Iterator for RefSubCiSubTByRef<'a> {
+    type Item = RwbiItem<'a, Self>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let ref_sf = match self.ref_sfs.peek() {
+                Some(v) => *v,
+                None => return None,
+            };
+            let cit_wid = match self.cit_wids.peek() {
+                Some(v) => *v,
+                None => {
+                    self.cit_wids = self.gets.citing(*self.ref_wid).iter().peekable();
+                    self.ref_sfs.next();
+                    continue;
+                }
+            };
+            let cit_topic = match &mut self.cit_topics {
+                Some(it) => match it.next() {
+                    Some(tid) => tid,
+                    None => {
+                        self.cit_wids.next();
+                        self.cit_topics = None;
+                        continue;
+                    }
+                },
+                None => {
+                    self.cit_topics = Some(self.gets.wtopics(*cit_wid).iter());
+                    continue;
+                }
+            };
+            return Some((
+                ref_sf.lift(),
+                self.gets.tsuf(cit_topic).lift(),
+                cit_topic.lift(),
+                cit_wid.lift(),
+            ));
+        }
+    }
+}
+
+impl<'a> Iterator for RefSubSourceTop<'a> {
+    type Item = RwbiItem<'a, Self>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let (ref_sub, _, cit_topic, cit_wid) = match self.ref_sub_cst.peek() {
+                Some(v) => *v,
+                None => return None,
+            };
+            let cit_source = match &mut self.cit_sources {
+                Some(cit_sources) => match cit_sources.next() {
+                    Some(sid) => sid,
+                    None => {
+                        self.ref_sub_cst.next();
+                        self.cit_sources = None;
+                        continue;
+                    }
+                },
+                None => {
+                    self.cit_sources = Some(self.gets.wsources(cit_wid).iter());
+                    continue;
+                }
+            };
+            return Some((ref_sub, cit_source.lift(), cit_topic, cit_wid));
+        }
+    }
+}
+
 impl<'a, E, I> Iterator for PostRefIterWrap<'a, E, I>
 where
     E: NumberedEntity + WorksFromMemory,
     I: RefWorkBasedIter<'a>,
+    StackFr<I::SB>: ExtendedWithRefWid,
 {
     type Item = (PartitionId, StackFr<I::SB>);
     fn next(&mut self) -> Option<Self::Item> {
@@ -755,7 +932,8 @@ where
             match &mut self.it {
                 Some(it) => match it.next() {
                     Some(cts) => {
-                        return Some((*ref_per, cts.extend(*ref_wid)));
+                        let ext_fr = <StackFr<I::SB> as ExtendedWithRefWid>::extend(cts, *ref_wid);
+                        return Some((*ref_per, ext_fr));
                     }
                     None => {
                         self.it = None;
@@ -775,6 +953,7 @@ impl<'a, I, SB> Iterator for CountryInstsPost<'a, I, SB>
 where
     I: RefWorkBasedIter<'a>,
     ExtendedFr<'a, I>: ExtendWithInst,
+    StackFr<I::SB>: ExtendedWithRefWid,
 {
     type Item = (PartitionId, ExtItem<'a, I>);
     fn next(&mut self) -> Option<Self::Item> {
@@ -874,10 +1053,94 @@ impl<'a> Iterator for CountryBesties<'a> {
     }
 }
 
+impl<'a> Iterator for WorkingAuthors<'a> {
+    type Item = (
+        PartitionId,
+        StackFr<<Self as PartitioningIterator<'a>>::StackBasis>,
+    );
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let ref_wid = match self.ref_wids.peek() {
+                Some(v) => *v,
+                None => return None,
+            };
+            let ref_per = self.gets.wperiod(ref_wid);
+
+            let ref_ship = match &mut self.ref_ships {
+                Some(it) => match it.peek() {
+                    Some(sid) => *sid,
+                    None => {
+                        self.ref_wids.next();
+                        self.ref_ships = None;
+                        continue;
+                    }
+                },
+                None => {
+                    self.ref_ships = Some(self.gets.wships(*ref_wid).iter().peekable());
+                    continue;
+                }
+            };
+            let au_id = self.gets.shipa(ref_ship);
+            if (au_id.to_usize() == UNKNOWN_ID)
+                || self
+                    .gets
+                    .shipis(*ref_ship)
+                    .into_iter()
+                    .find(|e| **e == self.id)
+                    .is_none()
+            {
+                self.ref_ships.as_mut().unwrap().next();
+                continue;
+            }
+            let cit_wid = match &mut self.cit_wids {
+                Some(it) => match it.peek() {
+                    Some(wid) => *wid,
+                    None => {
+                        self.ref_ships.as_mut().unwrap().next();
+                        self.cit_wids = None;
+                        continue;
+                    }
+                },
+                None => {
+                    self.cit_wids = Some(self.gets.citing(*ref_wid).iter().peekable());
+                    continue;
+                }
+            };
+
+            let cit_inst = match &mut self.cit_insts {
+                Some(it) => match it.next() {
+                    Some(iid) => *iid,
+                    None => {
+                        self.cit_insts = None;
+                        self.cit_wids.as_mut().unwrap().next();
+                        continue;
+                    }
+                },
+                None => {
+                    self.cit_insts = Some(self.gets.winsts(*cit_wid).iter());
+                    continue;
+                }
+            };
+
+            return Some((
+                *ref_per,
+                (
+                    *au_id,
+                    *self.gets.icountry(&cit_inst),
+                    cit_inst,
+                    *ref_wid,
+                    *cit_wid,
+                ),
+            ));
+        }
+    }
+}
+
 impl<'a, E, I> PartitioningIterator<'a> for PostRefIterWrap<'a, E, I>
 where
     E: NumberedEntity + WorksFromMemory,
     I: RefWorkBasedIter<'a>,
+    StackFr<I::SB>: ExtendedWithRefWid,
 {
     type Root = E;
     type StackBasis = I::SB;
@@ -896,6 +1159,7 @@ where
 impl<'a, I, SB> PartitioningIterator<'a> for CountryInstsPost<'a, I, SB>
 where
     I: RefWorkBasedIter<'a>,
+    StackFr<I::SB>: ExtendedWithRefWid,
     SB: StackBasis,
     SB::SortedRec: SortedRecord<FlatRecord = ExtItem<'a, I>>,
     (PartitionId, StackFr<I::SB>): ExtendWithInst,
@@ -935,6 +1199,26 @@ impl<'a> PartitioningIterator<'a> for CountryBesties<'a> {
     }
 }
 
+impl<'a> PartitioningIterator<'a> for WorkingAuthors<'a> {
+    type StackBasis = (
+        IntX<Authors, 0, true>,
+        IntX<Countries, 1, false>,
+        IntX<Institutions, 1, false>,
+    );
+    type Root = Institutions;
+    const PARTITIONS: usize = N_PERS;
+    fn new(id: NET<Self::Root>, gets: &'a Getters) -> Self {
+        Self {
+            gets,
+            id,
+            ref_wids: gets.iworks(id).iter().peekable(),
+            cit_insts: None,
+            ref_ships: None,
+            cit_wids: None,
+        }
+    }
+}
+
 pub fn to_bds<T, C>() -> BreakdownSpec
 where
     T: FoldStackBase<C>,
@@ -944,4 +1228,56 @@ where
         spec_denom_ind: T::SPEC_DENOM_IND as u8,
         source_side: T::SOURCE_SIDE,
     }
+}
+
+fn peek_and_roll<IC, IP, TC, TP, F>(
+    i_child: &mut Option<Peekable<IC>>,
+    i_parent: &mut IP,
+    getter: F,
+) -> Option<TC>
+where
+    IC: Iterator<Item = TC>,
+    IP: Iterator<Item = TP>,
+    F: Fn() -> IC,
+    TC: Copy,
+{
+    match i_child {
+        Some(it) => match it.peek() {
+            Some(eid) => return Some(*eid),
+            None => {
+                i_parent.next();
+                *i_child = None;
+            }
+        },
+        None => {
+            *i_child = Some(getter().peekable());
+        }
+    }
+    None
+}
+
+fn next_and_roll<IC, IP, TC, TP, F>(
+    i_child: &mut Option<IC>,
+    i_parent: &mut IP,
+    getter: F,
+) -> Option<TC>
+where
+    IC: Iterator<Item = TC>,
+    IP: Iterator<Item = TP>,
+    F: Fn() -> IC,
+    TC: Copy,
+{
+    match i_child {
+        Some(it) => match it.next() {
+            Some(eid) => return Some(eid),
+            None => {
+                i_parent.next();
+                *i_child = None;
+            }
+        },
+        None => {
+            *i_child = Some(getter());
+        }
+    }
+    None
 }

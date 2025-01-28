@@ -493,137 +493,17 @@ mod author_trees {
 
 #[derive_tree_getter(Institutions)]
 mod inst_trees {
-    //
-    // use super::*;
-    //
-    // impl TreeMaker for TreeSuSuTo {
-    //     type StackBasis = (
-    //         IntX<Subfields, 0, true>,
-    //         IntX<Subfields, 1, false>,
-    //         IntX<Topics, 1, false>,
-    //     );
-    //     fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
-    //         let mut heap = MinHeap::new();
-    //         for refed_wid in gets.iworks(&id) {
-    //             for refed_topic in gets.topic(refed_wid) {
-    //                 let refed_sf = gets.tsuf(refed_topic);
-    //                 for citing_wid in gets.citing(refed_wid) {
-    //                     for citing_topic in gets.topic(citing_wid) {
-    //                         let citing_sf = gets.tsuf(citing_topic);
-    //                         let record = (
-    //                             refed_sf.lift(),
-    //                             citing_sf.lift(),
-    //                             citing_topic.lift(),
-    //                             refed_wid.lift(),
-    //                             citing_wid.lift(),
-    //                         );
-    //                         heap.push(record);
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         heap
-    //     }
-    // }
-    //
-    // impl TreeMaker for TreeSuSoTo {
-    //     type StackBasis = (
-    //         IntX<Subfields, 0, false>,
-    //         IntX<Sources, 1, false>,
-    //         IntX<Topics, 1, false>,
-    //     );
-    //     fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
-    //         let mut heap = MinHeap::new();
-    //         for refed_wid in gets.iworks(&id) {
-    //             for citing_wid in gets.citing(refed_wid) {
-    //                 for citing_source in gets.sources(citing_wid) {
-    //                     for citing_topic in gets.topic(citing_wid) {
-    //                         let citing_sf = gets.tsuf(citing_topic);
-    //                         let record = (
-    //                             citing_sf.lift(),
-    //                             citing_source.lift(),
-    //                             citing_topic.lift(),
-    //                             refed_wid.lift(),
-    //                             citing_wid.lift(),
-    //                         );
-    //                         heap.push(record);
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         heap
-    //     }
-    // }
-    //
-    // impl TreeMaker for TreeAuCoIn {
-    //     type StackBasis = (
-    //         IntX<Authors, 0, true>,
-    //         IntX<Countries, 1, false>,
-    //         IntX<Institutions, 1, false>,
-    //     );
-    //     fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
-    //         let mut heap = MinHeap::new();
-    //         for refed_wid in gets.iworks(&id) {
-    //             for refed_ship in gets.wships(refed_wid) {
-    //                 let refed_author = gets.shipa(refed_ship);
-    //                 if refed_author.to_usize() == UNKNOWN_ID {
-    //                     continue;
-    //                 }
-    //                 for refed_ship_inst in gets.shipis(refed_ship) {
-    //                     if refed_ship_inst != &id {
-    //                         continue;
-    //                     }
-    //                     for citing_wid in gets.citing(refed_wid) {
-    //                         for citing_inst in gets.winsts(citing_wid) {
-    //                             let citing_country = gets.icountry(citing_inst);
-    //                             let record = (
-    //                                 refed_author.lift(),
-    //                                 citing_country.lift(),
-    //                                 citing_inst.lift(),
-    //                                 refed_wid.lift(),
-    //                                 citing_wid.lift(),
-    //                             );
-    //                             heap.push(record);
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         heap
-    //     }
-    // }
-    //
-    // impl TreeMaker for TreeSoCuSu {
-    //     type StackBasis = (
-    //         IntX<Sources, 0, false>,
-    //         IntX<Countries, 1, false>,
-    //         IntX<Subfields, 2, false>,
-    //     );
-    //     fn get_heap(id: NET<Self::Root>, gets: &Getters) -> MinHeap<FrTm<Self>> {
-    //         let mut heap = MinHeap::new();
-    //         for refed_wid in gets.iworks(&id) {
-    //             for citing_wid in gets.citing(refed_wid) {
-    //                 for citing_source in gets.sources(citing_wid) {
-    //                     for citing_sf in gets.subfield(citing_wid) {
-    //                         for citing_inst in gets.winsts(citing_wid) {
-    //                             let citing_country = gets.icountry(citing_inst);
-    //                             let record = (
-    //                                 citing_source.lift(),
-    //                                 citing_country.lift(),
-    //                                 citing_sf.lift(),
-    //                                 refed_wid.lift(),
-    //                                 citing_wid.lift(),
-    //                             );
-    //                             heap.push(record);
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         heap
-    //     }
-    // }
-    //
+    use super::*;
+
+    use crate::components::{
+        CitingSourceCoSuByRef, PostRefIterWrap, RefSubCiSubTByRef, RefSubSourceTop, WorkingAuthors,
+    };
+
+    pub type Tree1<'a> = PostRefIterWrap<'a, Institutions, RefSubCiSubTByRef<'a>>;
+    pub type Tree2<'a> = PostRefIterWrap<'a, Institutions, RefSubSourceTop<'a>>;
+    pub type Tree3<'a> = WorkingAuthors<'a>;
+    pub type Tree4<'a> = PostRefIterWrap<'a, Institutions, CitingSourceCoSuByRef<'a>>;
+
     // impl TreeMaker for TreeQSoSuCo {
     //     type StackBasis = (
     //         IntX<Qs, 0, true>,
