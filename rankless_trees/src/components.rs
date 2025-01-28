@@ -172,6 +172,15 @@ pub struct RefSubSourceTop<'a> {
     gets: &'a Getters,
 }
 
+pub struct CiteSubSourceTop<'a> {
+    ref_wid: &'a WT,
+    cit_wids: Peekable<Iter<'a, ET<Works>>>,
+    cit_sfs: Option<Peekable<Iter<'a, ET<Subfields>>>>,
+    cit_sources: Option<Peekable<Iter<'a, ET<Sources>>>>,
+    cit_topics: Option<Iter<'a, ET<Topics>>>,
+    gets: &'a Getters,
+}
+
 pub struct QedInf<'a> {
     ref_wid: &'a WT,
     ref_sources: Peekable<Iter<'a, ET<Sources>>>,
@@ -613,9 +622,27 @@ impl<'a> RefWorkBasedIter<'a> for RefSubCiSubTByRef<'a> {
     }
 }
 
-impl<'a> RefWorkBasedIter<'a> for RefSubSourceTop<'a> {
+impl<'a> RefWorkBasedIter<'a> for CiteSubSourceTop<'a> {
     type SB = (
         IntX<Subfields, 0, false>,
+        IntX<Sources, 1, false>,
+        IntX<Topics, 1, false>,
+    );
+    fn new(ref_wid: &'a WT, gets: &'a Getters) -> Self {
+        Self {
+            ref_wid,
+            gets,
+            cit_wids: gets.citing(*ref_wid).iter().peekable(),
+            cit_topics: None,
+            cit_sfs: None,
+            cit_sources: None,
+        }
+    }
+}
+
+impl<'a> RefWorkBasedIter<'a> for RefSubSourceTop<'a> {
+    type SB = (
+        IntX<Subfields, 0, true>,
         IntX<Sources, 1, false>,
         IntX<Topics, 1, false>,
     );
@@ -1047,6 +1074,38 @@ impl<'a> Iterator for RefSubSourceTop<'a> {
                 self.gets.wtopics(*cit_wid)
             );
             return Some((*ref_sf, *cit_source, *cit_topic, *cit_wid));
+        }
+    }
+}
+
+impl<'a> Iterator for CiteSubSourceTop<'a> {
+    type Item = RwbiItem<'a, Self>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let cit_wid = match self.cit_wids.peek() {
+                Some(v) => *v,
+                None => return None,
+            };
+            let cit_sf = wrap_or_next!(
+                self.cit_sfs,
+                self.cit_wids,
+                peek_and_roll,
+                self.gets.wsubfields(*cit_wid)
+            );
+            let cit_source = wrap_or_next!(
+                self.cit_sources,
+                self.cit_sfs.as_mut().unwrap(),
+                peek_and_roll,
+                self.gets.wsources(*cit_wid)
+            );
+            let cit_topic = wrap_or_next!(
+                self.cit_topics,
+                self.cit_sources.as_mut().unwrap(),
+                next_and_roll,
+                self.gets.wtopics(*cit_wid)
+            );
+            return Some((*cit_sf, *cit_source, *cit_topic, *cit_wid));
         }
     }
 }

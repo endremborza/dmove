@@ -496,13 +496,13 @@ mod inst_trees {
     use super::*;
 
     use crate::components::{
-        CitingCoInstSuToByRef, CitingSourceCoSuByRef, InstBesties, PostRefIterWrap, QedInf,
-        RefSubCiSubTByRef, RefSubSourceTop, SubfieldCountryInstSourceByRef,
+        CiteSubSourceTop, CitingCoInstSuToByRef, CitingSourceCoSuByRef, InstBesties,
+        PostRefIterWrap, QedInf, RefSubCiSubTByRef, SubfieldCountryInstSourceByRef,
         SubfieldCountryInstSubfieldByRef, WorkingAuthors,
     };
 
     pub type Tree1<'a> = PostRefIterWrap<'a, Institutions, RefSubCiSubTByRef<'a>>;
-    pub type Tree2<'a> = PostRefIterWrap<'a, Institutions, RefSubSourceTop<'a>>;
+    pub type Tree2<'a> = PostRefIterWrap<'a, Institutions, CiteSubSourceTop<'a>>;
     pub type Tree3<'a> = WorkingAuthors<'a>;
     pub type Tree4<'a> = PostRefIterWrap<'a, Institutions, CitingSourceCoSuByRef<'a>>;
     pub type Tree5<'a> = PostRefIterWrap<'a, Institutions, QedInf<'a>>;
