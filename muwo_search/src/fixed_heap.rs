@@ -31,9 +31,9 @@ where
         }
     }
 
-    pub fn into_iter(mut self) -> std::array::IntoIter<T, S> {
+    pub fn into_iter(mut self) -> impl Iterator<Item = T> {
         self.sort();
-        self.arr.into_iter()
+        self.arr.into_iter().take_while(|e| *e < T::max_value())
     }
 
     fn find_in(&self, e: &T, i: usize, limit: usize) -> bool {

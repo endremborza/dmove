@@ -1,7 +1,14 @@
 mod fixed_heap;
+mod merging;
 
 use deunicode::deunicode;
 pub use fixed_heap::FixedHeap;
+pub use merging::{
+    log_search, ordered_calls, sorted_iters_to_arr, ArrExtender, ExtendableArr, OrderedMapper,
+};
+use merging::{logfound, merge_box_into_sorted_vec, merge_into_sorted_vec};
+
+use std::cmp::min;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::{ops::AddAssign, sync::Arc, usize};
@@ -79,6 +86,12 @@ trait Construct {
 
 trait QueriableLevel {
     fn query(&self, word: &[u8], char_arr: &[u8]) -> Vec<IndType>;
+    fn query_prefiltered(
+        &self,
+        word: &[u8],
+        char_arr: &[u8],
+        include: &Vec<IndType>,
+    ) -> Vec<IndType>;
 }
 
 impl<T> Construct for Vec<T> {
@@ -115,6 +128,24 @@ impl<T: QueriableLevel> QueriableLevel for IndOutTrie<T> {
         }
         self.children[word[0] as usize].query(&word[1..], char_arr)
     }
+
+    fn query_prefiltered(
+        &self,
+        word: &[u8],
+        char_arr: &[u8],
+        include: &Vec<IndType>,
+    ) -> Vec<IndType> {
+        if word.len() == 0 {
+            return self
+                .out
+                .arr
+                .into_iter()
+                .filter(|e| logfound(include, *e))
+                .take_while(|e| *e < IndType::MAX)
+                .collect();
+        }
+        self.children[word[0] as usize].query_prefiltered(&word[1..], char_arr, include)
+    }
 }
 
 impl QueriableLevel for TrieLeaves {
@@ -123,9 +154,29 @@ impl QueriableLevel for TrieLeaves {
         let l = log_search(&self.0, |e| e.suffix.under(char_arr, word));
         let r = log_search(&self.0[l..], |e| e.suffix.not_over(char_arr, word)) + l;
         for leaf in self.0[l..r].iter() {
-            out.extend(leaf.ids.iter());
+            merge_box_into_sorted_vec(&mut out, &leaf.ids);
         }
-        out.sort();
+        out
+    }
+
+    fn query_prefiltered(
+        &self,
+        word: &[u8],
+        char_arr: &[u8],
+        include: &Vec<IndType>,
+    ) -> Vec<IndType> {
+        let mut out = Vec::new();
+        let l = log_search(&self.0, |e| e.suffix.under(char_arr, word));
+        let r = log_search(&self.0[l..], |e| e.suffix.not_over(char_arr, word)) + l;
+        for leaf in self.0[l..r].iter() {
+            let lids: Vec<IndType> = leaf
+                .ids
+                .iter()
+                .filter(|e| logfound(include, **e))
+                .map(|e| *e)
+                .collect();
+            merge_into_sorted_vec(&mut out, lids);
+        }
         out
     }
 }
@@ -162,7 +213,11 @@ impl PrepTrieRoot {
         let ln = suffix.len();
         let suff_by_idx = WordViaCharr((char_array.len() - ln) as u32, ln as u16);
         let l2_idx = get_i(l2, suff_by_idx);
-        l2[l2_idx].ids.push(idxed_word.outer_idx as IndType);
+        let oind = idxed_word.outer_idx as IndType;
+        //maybe just check last one?
+        if !l2[l2_idx].ids.contains(&oind) {
+            l2[l2_idx].ids.push(idxed_word.outer_idx as IndType);
+        }
         suffix.into()
     }
 }
@@ -263,7 +318,29 @@ impl CustomTrie {
             }
             matches
         } else {
-            Vec::new()
+            let mut out = Vec::new();
+            let mut bs = 0;
+            for i in 0..(min(sword.breaks_count, 3)) {
+                let be = sword.break_array[i] as usize;
+                let word = &sword.char_array[bs..be];
+                if i == 0 {
+                    out = self.prefix_tree.query(word, &self.char_array);
+                    let ins = self.inner_tree.query(word, &self.char_array);
+                    merge_into_sorted_vec(&mut out, ins);
+                } else {
+                    let mut prefs =
+                        self.prefix_tree
+                            .query_prefiltered(word, &self.char_array, &out);
+                    let ins = self
+                        .inner_tree
+                        .query_prefiltered(word, &self.char_array, &out);
+                    merge_into_sorted_vec(&mut prefs, ins);
+                    out = prefs;
+                }
+                println!("w: {:?}", out);
+                bs = be;
+            }
+            out
         }
     }
 }
@@ -339,26 +416,7 @@ impl SearchEngine {
     }
 }
 
-/// gets i so that arr\[..i\] all true arr\[i..\] all false
-fn log_search<T, F: Fn(&T) -> bool>(arr: &[T], f: F) -> usize {
-    if arr.len() == 0 {
-        return 0;
-    }
-    let (mut l, mut r) = (0, arr.len());
-    loop {
-        let m = (l + r) / 2;
-        if f(&arr[m]) {
-            l = m + 1;
-        } else {
-            r = m;
-        }
-        if l >= r {
-            break;
-        }
-    }
-    l
-}
-
+//adds elems that are not present
 fn extend_sorted<T: PartialOrd>(int_v: &mut Vec<T>, add_v: Vec<T>) {
     let mut i = 0;
     let init_i_len = int_v.len();
@@ -463,6 +521,14 @@ mod tests {
     }
 
     #[test]
+    fn test_extend_sorted() {
+        let mut v1 = vec![1, 2, 3];
+        let v2 = vec![2, 3, 4];
+        extend_sorted(&mut v1, v2);
+        assert_eq!(v1, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
     fn gets_empty() {
         let engine = get_test_engine();
         assert_eq!(engine.query("").len(), 6);
@@ -510,6 +576,27 @@ mod tests {
         //cant find based on one character that is the last one
         println!("{:?}", engine.query("c"));
         assert_eq!(engine.query("c").len(), 0);
+    }
+
+    #[test]
+    fn no_multiplied_result() {
+        let haystacks = vec!["aba aba aba", "xxx", "zzz"];
+        let engine = SearchEngine::new(haystacks.iter().map(|s| s.to_string()));
+        println!("tlen: {}", engine.tree.char_array.len());
+        assert_eq!(engine.query("ab").len(), 1);
+
+        let haystacks = vec!["abas abazz abaxy", "tabaxi", "zzz"];
+        let engine = SearchEngine::new(haystacks.iter().map(|s| s.to_string()));
+        assert_eq!(engine.query("ab").len(), 2);
+    }
+
+    #[test]
+    fn multi_word_query() {
+        let haystacks = vec!["aba cdx", "aba", "cdx", "crum brabn", "udx crtasba"];
+        let engine = SearchEngine::new(haystacks.iter().map(|s| s.to_string()));
+        assert_eq!(engine.query("ab cd"), vec![0]);
+        assert_eq!(engine.query("ru ra"), vec![3]);
+        assert_eq!(engine.query("dx ba"), vec![0, 4]);
     }
 
     #[test]

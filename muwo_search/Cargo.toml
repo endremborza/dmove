@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 tqdm = "0.7"
 deunicode = "1.6.0"
+rand = "0.8"
