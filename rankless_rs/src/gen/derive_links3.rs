@@ -12,7 +12,7 @@ pub struct TopicsWorkCount { }
 
 pub struct CountryWorks { }
 
-impl Entity for SourcesWorkCount { type T = u32; const N: usize =  26948; const NAME: & str =  "sources-work-count"; }
+impl Entity for SourcesWorkCount { type T = u32; const N: usize =  28671; const NAME: & str =  "sources-work-count"; }
 
 impl MappableEntity for SourcesWorkCount { type KeyType = usize; }
 
@@ -20,7 +20,7 @@ impl NamespacedEntity for SourcesWorkCount { const NS: & str =  "derive_links3";
 
 impl MarkedAttribute<crate::common::WorkCountMarker> for crate::gen::a1_entity_mapping::Sources { type AttributeEntity = SourcesWorkCount; }
 
-impl Entity for InstitutionsWorkCount { type T = u32; const N: usize =  16371; const NAME: & str =  "institutions-work-count"; }
+impl Entity for InstitutionsWorkCount { type T = u32; const N: usize =  17783; const NAME: & str =  "institutions-work-count"; }
 
 impl MappableEntity for InstitutionsWorkCount { type KeyType = usize; }
 
@@ -28,7 +28,7 @@ impl NamespacedEntity for InstitutionsWorkCount { const NS: & str =  "derive_lin
 
 impl MarkedAttribute<crate::common::WorkCountMarker> for crate::gen::a1_entity_mapping::Institutions { type AttributeEntity = InstitutionsWorkCount; }
 
-impl Entity for AuthorsWorkCount { type T = u32; const N: usize =  1918517; const NAME: & str =  "authors-work-count"; }
+impl Entity for AuthorsWorkCount { type T = u32; const N: usize =  2294555; const NAME: & str =  "authors-work-count"; }
 
 impl MappableEntity for AuthorsWorkCount { type KeyType = usize; }
 

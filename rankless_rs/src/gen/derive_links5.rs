@@ -14,7 +14,7 @@ pub struct InstitutionsCiteCount { }
 
 pub struct SubfieldsCiteCount { }
 
-impl Entity for InstitutionsCiteCount { type T = u32; const N: usize =  16371; const NAME: & str =  "institutions-cite-count"; }
+impl Entity for InstitutionsCiteCount { type T = u32; const N: usize =  17783; const NAME: & str =  "institutions-cite-count"; }
 
 impl MappableEntity for InstitutionsCiteCount { type KeyType = usize; }
 
@@ -22,7 +22,7 @@ impl NamespacedEntity for InstitutionsCiteCount { const NS: & str =  "derive_lin
 
 impl MarkedAttribute<crate::common::CiteCountMarker> for crate::gen::a1_entity_mapping::Institutions { type AttributeEntity = InstitutionsCiteCount; }
 
-impl Entity for AuthorsCiteCount { type T = u32; const N: usize =  1918517; const NAME: & str =  "authors-cite-count"; }
+impl Entity for AuthorsCiteCount { type T = u32; const N: usize =  2294555; const NAME: & str =  "authors-cite-count"; }
 
 impl MappableEntity for AuthorsCiteCount { type KeyType = usize; }
 
@@ -54,7 +54,7 @@ impl NamespacedEntity for TopicsCiteCount { const NS: & str =  "derive_links5"; 
 
 impl MarkedAttribute<crate::common::CiteCountMarker> for crate::gen::a1_entity_mapping::Topics { type AttributeEntity = TopicsCiteCount; }
 
-impl Entity for SourcesCiteCount { type T = u32; const N: usize =  26948; const NAME: & str =  "sources-cite-count"; }
+impl Entity for SourcesCiteCount { type T = u32; const N: usize =  28671; const NAME: & str =  "sources-cite-count"; }
 
 impl MappableEntity for SourcesCiteCount { type KeyType = usize; }
 
