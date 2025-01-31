@@ -42,12 +42,4 @@ pub fn runner(comm: &str, root_str: &str, in_root_o: Option<String>) -> io::Resu
     }
     subrun(comm, stowage)
 }
-mods_as_comms!(
-    a1_entity_mapping,
-    a2_init_atts,
-    derive_links1,
-    derive_links2,
-    derive_links3,
-    derive_links4,
-    derive_links5
-);
+mods_as_comms!(a1_entity_mapping, a2_init_atts, derive_links1, derive_links2, derive_links3, derive_links4, derive_links5);

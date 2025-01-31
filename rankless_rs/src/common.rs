@@ -1,5 +1,6 @@
 use std::env;
-use std::io::prelude::*;
+use std::fmt::Debug;
+use std::io::{prelude::*, BufWriter};
 use std::ops::Range;
 use std::{
     fs::{create_dir_all, read_dir, File},
@@ -434,6 +435,16 @@ where
     BufReader::new(gz_decoder)
 }
 
+pub fn get_gz_bufw<P>(file_name: P) -> BufWriter<GzEncoder<File>>
+where
+    P: AsRef<Path> + Debug,
+{
+    let msg = format!("could not create {file_name:?}");
+    let file = File::create(file_name).expect(&msg);
+    let encoder = GzEncoder::new(file, Compression::default());
+    std::io::BufWriter::new(encoder)
+}
+
 pub fn read_buf_path<T, P>(fp: P) -> Result<T, bincode::Error>
 where
     T: DeserializeOwned,
@@ -445,12 +456,25 @@ where
 pub fn write_buf_path<T, P>(obj: T, fp: P) -> Result<(), Box<bincode::ErrorKind>>
 where
     T: Serialize,
+    P: AsRef<Path> + Debug,
+{
+    bincode::serialize_into(get_gz_bufw(fp), &obj)
+}
+
+pub fn read_json_path<T, P>(fp: P) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
     P: AsRef<Path>,
 {
-    let file = File::create(fp)?;
-    let encoder = GzEncoder::new(file, Compression::default());
-    let writer = std::io::BufWriter::new(encoder);
-    bincode::serialize_into(writer, &obj)
+    serde_json::from_reader(&mut get_gz_buf(fp))
+}
+
+pub fn write_json_path<T, P>(obj: T, fp: P) -> Result<(), serde_json::Error>
+where
+    T: Serialize,
+    P: AsRef<Path> + Debug,
+{
+    serde_json::to_writer(get_gz_bufw(fp), &obj)
 }
 
 pub fn short_string_to_u64(input: &str) -> BigId {

@@ -3,7 +3,7 @@ use dmove_macro::def_srecs;
 use serde::{Deserialize, Serialize};
 use std::{cmp::Reverse, collections::BinaryHeap as MaxHeap};
 
-def_srecs!();
+def_srecs!(7);
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct AggTreeBase<IdType, Node, Child> {
@@ -144,117 +144,4 @@ impl<I: PartialEq, N, C> PartialEq for AggTreeBase<I, N, C> {
     fn eq(&self, other: &Self) -> bool {
         self.id.eq(&other.id)
     }
-}
-
-pub struct ArrExtender<'a, T> {
-    v: &'a mut T,
-}
-
-pub trait OrderedMapper<T> {
-    type Elem;
-    fn left_map(&mut self, e: &Self::Elem);
-    fn right_map(&mut self, e: &Self::Elem);
-    fn common_map(&mut self, l: &Self::Elem, r: &Self::Elem);
-}
-
-pub trait ExtendableArr<T> {
-    fn add(&mut self, e: T);
-}
-
-impl<T> ExtendableArr<T> for Vec<T> {
-    fn add(&mut self, e: T) {
-        self.push(e)
-    }
-}
-
-impl<'a, T, V> OrderedMapper<T> for ArrExtender<'a, V>
-where
-    T: Clone,
-    V: ExtendableArr<T>,
-{
-    type Elem = T;
-    fn left_map(&mut self, e: &Self::Elem) {
-        self.v.add(e.clone())
-    }
-    fn right_map(&mut self, e: &Self::Elem) {
-        self.v.add(e.clone())
-    }
-    fn common_map(&mut self, l: &Self::Elem, _r: &Self::Elem) {
-        self.v.add(l.clone())
-    }
-}
-
-pub fn merge_sorted_vecs<T>(left_vec: Vec<T>, right_vec: Vec<T>) -> Vec<T>
-where
-    T: PartialOrd + Clone,
-{
-    let mut v = Vec::new();
-    sorted_iters_to_arr(&mut v, left_vec.iter(), right_vec.iter());
-    v
-}
-
-pub fn sorted_iters_to_arr<'a, 'b, T, IL, IR, V>(out: &mut V, left_it: IL, right_it: IR)
-where
-    T: PartialOrd + Clone + 'a + 'b,
-    IL: Iterator<Item = &'a T>,
-    IR: Iterator<Item = &'b T>,
-    V: ExtendableArr<T>,
-{
-    let mut vadd = ArrExtender { v: out };
-    ordered_calls(left_it, right_it, &mut vadd);
-}
-
-pub fn ordered_calls<'a, 'b, T, IL, IR, M>(mut left_it: IL, mut right_it: IR, merger: &mut M)
-where
-    T: PartialOrd + 'a + 'b,
-    IL: Iterator<Item = &'a T>,
-    IR: Iterator<Item = &'b T>,
-    M: OrderedMapper<T, Elem = T> + ?Sized,
-{
-    let mut left_elem = match left_it.next() {
-        Some(v) => v,
-        None => return right_it.for_each(|e| merger.right_map(e)),
-    };
-
-    let mut right_elem = match right_it.next() {
-        Some(v) => v,
-        None => return left_it.for_each(|e| merger.left_map(e)),
-    };
-
-    loop {
-        if left_elem == right_elem {
-            merger.common_map(left_elem, right_elem);
-            match right_it.next() {
-                Some(el) => right_elem = el,
-                None => break,
-            }
-            match left_it.next() {
-                Some(el) => left_elem = el,
-                None => {
-                    merger.right_map(right_elem);
-                    break;
-                }
-            }
-        } else if right_elem < left_elem {
-            merger.right_map(right_elem);
-            match right_it.next() {
-                Some(el) => right_elem = el,
-                None => {
-                    merger.left_map(left_elem);
-                    break;
-                }
-            }
-        } else {
-            merger.left_map(left_elem);
-            match left_it.next() {
-                Some(el) => left_elem = el,
-                None => {
-                    merger.right_map(right_elem);
-                    break;
-                }
-            }
-        }
-    }
-    left_it.for_each(|e| merger.left_map(e));
-    right_it.for_each(|e| merger.right_map(e));
 }
