@@ -1,27 +1,26 @@
-use std::{fs::create_dir_all, iter::Peekable, marker::PhantomData, slice::Iter};
+use std::{fs::create_dir_all, iter::Peekable, marker::PhantomData, slice::Iter, sync::Mutex};
 
-use dmove::{Entity, NamespacedEntity, UnsignedNumber, VattReadingRefMap, ET};
+use dmove::{Entity, InitEmpty, UnsignedNumber, ET};
 use dmove_macro::impl_stack_basees;
+use hashbrown::hash_map::Entry;
 use rankless_rs::{
     agg_tree::{FoldingStackConsumer, HeapIterator, MinHeap, ReinstateFrom, SortedRecord, Updater},
-    common::{read_buf_path, write_buf_path},
-    env_consts::START_YEAR,
-    gen::{
-        a1_entity_mapping::{
-            Authors, Authorships, Countries, Institutions, Qs, Sources, Subfields, Topics, Works,
-        },
-        a2_init_atts::WorksNames,
+    common::{read_json_path, write_buf_path, write_json_path},
+    gen::a1_entity_mapping::{
+        Authors, Authorships, Countries, Institutions, Qs, Sources, Subfields, Topics, Works,
     },
-    steps::{a1_entity_mapping::N_PERS, derive_links1::WorkPeriods},
+    steps::a1_entity_mapping::N_PERS,
 };
 
 use crate::{
     ids::get_atts,
     instances::{Collapsing, DisJTree, FoldStackBase, IntXTree, TopTree, WorkTree},
     interfacing::{Getters, NumberedEntity, WorksFromMemory, NET},
-    io::{BreakdownSpec, BufSerTree, TreeQ, TreeResponse, TreeSpec, WT},
+    io::{
+        BoolCvp, BreakdownSpec, BufSerTree, CacheMap, CacheValue, FullTreeQuery, JsSerTree, ResCvp,
+        TreeBasisState, TreeResponse, TreeSpec, WT,
+    },
     prune::prune,
-    AttributeLabelUnion,
 };
 
 const MAX_PARTITIONS: usize = 16;
@@ -173,7 +172,6 @@ pub struct RefSubSourceTop<'a> {
 }
 
 pub struct CiteSubSourceTop<'a> {
-    ref_wid: &'a WT,
     cit_wids: Peekable<Iter<'a, ET<Works>>>,
     cit_sfs: Option<Peekable<Iter<'a, ET<Subfields>>>>,
     cit_sources: Option<Peekable<Iter<'a, ET<Sources>>>>,
@@ -189,6 +187,36 @@ pub struct QedInf<'a> {
     cite_countries: Option<Iter<'a, ET<Countries>>>,
 
     gets: &'a Getters,
+}
+
+enum Progress {
+    Wait(BoolCvp),
+    Calculate,
+    // Prune,
+    Load,
+}
+
+impl Progress {
+    fn from_e(value: &Mutex<CacheMap>, fq: &FullTreeQuery) -> Self {
+        //if any of the periods in progress, somehow queue this period too?
+        //in full progress, vs in pruning progress
+        match value.lock().unwrap().entry(fq.ck.clone()) {
+            Entry::Vacant(e) => {
+                e.insert(CacheValue::InProgress(BoolCvp::init_empty()));
+                Progress::Calculate
+            }
+            Entry::Occupied(cv) => match cv.get() {
+                CacheValue::InProgress(cvp) => Progress::Wait(cvp.clone()),
+                CacheValue::Done(done_periods) => {
+                    if done_periods.contains(&fq.period) {
+                        Progress::Load
+                    } else {
+                        panic!("not implemented partial waiting");
+                    }
+                }
+            },
+        }
+    }
 }
 
 macro_rules! wrap_or_next {
@@ -230,11 +258,7 @@ pub trait PartitioningIterator<'a>:
         }
     }
 
-    fn tree_resp<CT, SR, FR>(
-        q: TreeQ,
-        gets: &'a Getters,
-        stats: &AttributeLabelUnion,
-    ) -> TreeResponse
+    fn fill_res_cvp<CT, SR, FR>(fq: FullTreeQuery, state: &'a TreeBasisState, res_cvp: ResCvp)
     where
         Self::StackBasis: StackBasis<TopTree = CT, SortedRec = SR>,
         SR: SortedRecord<FlatRecord = FR>,
@@ -243,88 +267,135 @@ pub trait PartitioningIterator<'a>:
         DisJTree<Self::Root, CT>: Into<BufSerTree>,
         IntXTree<Self::Root, CT>: Updater<CT>,
     {
-        let tid = q.tid.unwrap_or(0);
-        let eid = q.eid.to_usize();
-        let req_id = format!("{}({}:{})", Self::Root::NAME, eid, tid);
-        println!("requested entity: {req_id}");
-        let period = WorkPeriods::from_year(q.year.unwrap_or(START_YEAR));
-        let tree_cache_dir = gets
-            .stowage
-            .paths
-            .cache
-            .join(Self::Root::NAME)
-            .join(q.eid.to_string())
-            .join(tid.to_string());
-        let get_path = |pid: usize| tree_cache_dir.join(format!("{pid}.gz"));
-        let mut full_tree: BufSerTree = if !tree_cache_dir.exists() {
-            create_dir_all(tree_cache_dir.clone()).unwrap();
-            let mut heaps = [(); MAX_PARTITIONS].map(|_| MinHeap::<FR>::new());
-            let et_id = NET::<Self::Root>::from_usize(eid);
-            let now = std::time::Instant::now();
-            let maker = Self::new(et_id, &gets);
-            for (pid, rec) in maker {
-                heaps[pid as usize].push(rec)
+        println!("requested entity: {fq}");
+        let resp_path = state.resp_cache_file(&fq);
+        let prog = Progress::from_e(&state.im_cache, &fq);
+        //getting one of e(tid) might trigger all others
+        match prog {
+            Progress::Calculate => {
+                return Self::fill_calculate(fq, state, res_cvp);
             }
-            println!("{req_id}: got heaps in {}", now.elapsed().as_millis());
-            let now = std::time::Instant::now();
-            let mut roots = Vec::new();
-            heaps.into_iter().take(Self::PARTITIONS).for_each(|heap| {
-                let hither_o: Option<HeapIterator<<Self::StackBasis as StackBasis>::SortedRec>> =
-                    heap.into();
-                let mut part_root: IntXTree<Self::Root, CT> = et_id.into();
-                if let Some(hither) = hither_o {
-                    Self::StackBasis::fold_into(&mut part_root, hither);
-                } else {
-                    println!("nothing in a partition")
+            Progress::Wait(cvp) => {
+                let (lock, cvar) = &*cvp;
+                let mut done = lock.lock().unwrap();
+                while !*done {
+                    done = cvar.wait(done).unwrap();
                 }
-                roots.push(part_root.collapse());
-            });
-            println!("{req_id}: got roots in {}", now.elapsed().as_millis());
-
-            let now = std::time::Instant::now();
-            let mut root_it = roots.into_iter().enumerate().rev();
-            let (pid, root_n) = root_it.next().unwrap();
-            let mut ser_tree: BufSerTree = root_n.into();
-            write_buf_path(&ser_tree, get_path(pid)).unwrap();
-            for (pid, part_root) in root_it {
-                let part_ser: BufSerTree = part_root.into();
-                ser_tree.ingest_disjunct(part_ser);
-                write_buf_path(&ser_tree, get_path(pid)).unwrap();
             }
-            println!(
-                "{req_id}: converted and wrote trees in {}",
-                now.elapsed().as_millis()
-            );
-            ser_tree;
-            read_buf_path(get_path(period as usize)).unwrap()
-        } else {
-            //TODO WARN possible race condition! if multithreaded thing, one starts writing,
-            //created the directory, but did not write all the files yet, this can start reading
-            //shit
-            //need ot fix it with some lock store like thing
-            read_buf_path(get_path(period as usize)).unwrap()
-        };
+            Progress::Load => {}
+        }
 
+        let now = std::time::Instant::now();
+        let resp: TreeResponse = read_json_path(resp_path).unwrap();
+        {
+            let (lock, cvar) = &*res_cvp;
+            let mut data = lock.lock().unwrap();
+            *data = Some(resp);
+            cvar.notify_all();
+        }
+        println!(
+            "{fq}: loaded and sent cache in {}",
+            now.elapsed().as_millis()
+        );
+    }
+
+    fn fill_calculate<CT, SR, FR>(fq: FullTreeQuery, state: &'a TreeBasisState, res_cvp: ResCvp)
+    where
+        Self::StackBasis: StackBasis<TopTree = CT, SortedRec = SR>,
+        SR: SortedRecord<FlatRecord = FR>,
+        FR: Ord + Clone,
+        CT: Collapsing + TopTree,
+        DisJTree<Self::Root, CT>: Into<BufSerTree>,
+        IntXTree<Self::Root, CT>: Updater<CT>,
+    {
+        let mut heaps = [(); MAX_PARTITIONS].map(|_| MinHeap::<FR>::new());
+        let et_id = NET::<Self::Root>::from_usize(fq.ck.eid as usize);
+        let now = std::time::Instant::now();
+        let maker = Self::new(et_id, &state.gets);
+        let mut pids = Vec::new();
+        for (pid, rec) in maker {
+            heaps[pid as usize].push(rec);
+        }
+        println!("{fq}: got heaps in {}", now.elapsed().as_millis());
+        let now = std::time::Instant::now();
+        let mut roots = Vec::new();
+        heaps.into_iter().take(Self::PARTITIONS).for_each(|heap| {
+            let hither_o: Option<HeapIterator<<Self::StackBasis as StackBasis>::SortedRec>> =
+                heap.into();
+            let mut part_root: IntXTree<Self::Root, CT> = et_id.into();
+            if let Some(hither) = hither_o {
+                Self::StackBasis::fold_into(&mut part_root, hither);
+            } else {
+                println!("nothing in a partition")
+            }
+            roots.push(part_root.collapse());
+        });
+        println!("{fq}: got roots in {}", now.elapsed().as_millis());
+        let get_path = |pid: u8| state.full_cache_file_period(&fq, pid);
+        let mut check_w = |pid: usize, tree: &BufSerTree| {
+            let pid8 = pid as u8;
+            Self::write_resp(&tree, &fq, state, res_cvp.clone(), pid8);
+            pids.push(pid8);
+            pid8
+        };
+        create_dir_all(get_path(0).parent().unwrap()).unwrap();
+
+        let now = std::time::Instant::now();
+        let mut root_it = roots.into_iter().enumerate().rev();
+        let (pid, root_n) = root_it.next().unwrap();
+        let mut ser_tree: BufSerTree = root_n.into();
+        let pid8 = check_w(pid, &ser_tree);
+        write_buf_path(&ser_tree, get_path(pid8)).unwrap();
+        for (pid, part_root) in root_it {
+            let part_ser: BufSerTree = part_root.into();
+            ser_tree.ingest_disjunct(part_ser);
+            let pid8 = check_w(pid, &ser_tree);
+            write_buf_path(&ser_tree, get_path(pid8)).unwrap();
+        }
+        println!(
+            "{fq}: converted and wrote trees in {}",
+            now.elapsed().as_millis()
+        );
+        let mut cache_map = state.im_cache.lock().unwrap();
+        let cv = CacheValue::Done(pids);
+        let bcvp = match cache_map.insert(fq.ck, cv).unwrap() {
+            CacheValue::InProgress(cvp) => cvp,
+            _ => panic!("non inprogress cache"),
+        };
+        let (lock, cvar) = &*bcvp;
+        let mut data = lock.lock().unwrap();
+        *data = true;
+        cvar.notify_all();
+    }
+
+    fn write_resp(
+        full_tree: &BufSerTree,
+        fq: &FullTreeQuery,
+        state: &'a TreeBasisState,
+        res_cvp: ResCvp,
+        pid: u8,
+    ) {
         let now = std::time::Instant::now();
         let bds = Self::get_spec().breakdowns;
-        prune(&mut full_tree, stats, &bds);
-        println!("{req_id}: pruned in {}", now.elapsed().as_millis());
+        let pruned_tree = prune(full_tree, &state.att_union, &bds);
+        println!("{fq}: pruned in {}", now.elapsed().as_millis());
         //cache pruned response, use it if no connections are requested
 
-        let parent = gets
-            .stowage
-            .path_from_ns(<WorksNames as NamespacedEntity>::NS);
-        let mut work_name_basis =
-            VattReadingRefMap::<WorksNames>::from_locator(&gets.wn_locators, &parent);
+        let now = std::time::Instant::now();
+        let atts = get_atts(&pruned_tree, &bds, state, fq);
+        println!("{fq}: got atts in {}", now.elapsed().as_millis());
 
         let now = std::time::Instant::now();
-        let atts = get_atts(&full_tree, &bds, stats, &mut work_name_basis);
-        println!("{req_id}: got atts in {}", now.elapsed().as_millis());
-
-        let now = std::time::Instant::now();
-        let tree = full_tree.into();
-        println!("{req_id}: converted in {}", now.elapsed().as_millis());
-        TreeResponse { tree, atts }
+        let tree = JsSerTree::from_buf(pruned_tree, &state.gets);
+        println!("{fq}: converted in {}", now.elapsed().as_millis());
+        let full_resp = TreeResponse { tree, atts };
+        if pid == fq.period {
+            let (lock, cvar) = &*res_cvp;
+            let mut data = lock.lock().unwrap();
+            *data = Some(full_resp.clone());
+            cvar.notify_all();
+        }
+        write_json_path(full_resp, state.full_cache_file_period(fq, pid)).unwrap();
     }
 }
 
@@ -630,7 +701,6 @@ impl<'a> RefWorkBasedIter<'a> for CiteSubSourceTop<'a> {
     );
     fn new(ref_wid: &'a WT, gets: &'a Getters) -> Self {
         Self {
-            ref_wid,
             gets,
             cit_wids: gets.citing(*ref_wid).iter().peekable(),
             cit_topics: None,

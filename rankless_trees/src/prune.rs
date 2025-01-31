@@ -6,25 +6,25 @@ use muwo_search::FixedHeap;
 
 use crate::{
     ids::AttributeLabelUnion,
-    io::{BreakdownSpec, BufSerChildren, BufSerTree},
+    io::{BreakdownSpec, BufSerChildren, BufSerTree, CollapsedNode},
 };
 
 const MAX_SIBLINGS: usize = 16;
 const MAX_DEPTH: usize = 8;
 type IndType = u32;
 
-pub fn prune(tree: &mut BufSerTree, astats: &AttributeLabelUnion, bds: &[BreakdownSpec]) {
+pub fn prune(tree: &BufSerTree, astats: &AttributeLabelUnion, bds: &[BreakdownSpec]) -> BufSerTree {
     let mut denoms = [0; MAX_DEPTH];
     prune_tree::<MAX_SIBLINGS>(tree, astats, bds, &mut denoms, 0)
 }
 
 fn prune_tree<const SIZE: usize>(
-    tree: &mut BufSerTree,
+    tree: &BufSerTree,
     astats: &AttributeLabelUnion,
     bds: &[BreakdownSpec],
     denoms: &mut [u32],
     depth: usize,
-) {
+) -> BufSerTree {
     let mut top_weights: FixedHeap<Reverse<(u32, IndType)>, SIZE> = FixedHeap::new();
     let mut top_specs: FixedHeap<Reverse<(f64, IndType)>, SIZE> = FixedHeap::new();
     denoms[depth] = tree.node.link_count;
@@ -52,30 +52,31 @@ fn prune_tree<const SIZE: usize>(
         .map(|e| e.0 .1)
         .chain(top_specs.into_iter().map(|e| e.0 .1))
         .collect();
-    match tree.children.as_mut() {
-        BufSerChildren::Nodes(ref mut nodes) => {
-            keep_keys(nodes, &to_keep);
-            for node in &mut nodes.values_mut() {
-                prune_tree::<SIZE>(node, astats, &bds, denoms, depth + 1);
-            }
+    let node = tree.node.clone();
+    let children = match tree.children.as_ref() {
+        BufSerChildren::Nodes(nodes) => {
+            BufSerChildren::Nodes(keep_keys(&nodes, &to_keep, |e: &BufSerTree| {
+                prune_tree::<SIZE>(e, astats, &bds, denoms, depth + 1)
+            }))
         }
-        BufSerChildren::Leaves(ref mut leaves) => {
-            keep_keys(leaves, &to_keep);
+        BufSerChildren::Leaves(leaves) => {
+            BufSerChildren::Leaves(keep_keys(&leaves, &to_keep, |e: &CollapsedNode| e.clone()))
         }
+    };
+    BufSerTree {
+        node,
+        children: Box::new(children),
     }
 }
 
-fn keep_keys<K, V>(map: &mut HashMap<K, V>, to_keep: &Vec<K>)
+fn keep_keys<K, V, F>(map: &HashMap<K, V>, to_keep: &Vec<K>, mut keep_map: F) -> HashMap<K, V>
 where
     K: std::cmp::Eq + std::hash::Hash + Copy,
+    F: FnMut(&V) -> V,
 {
-    let mut to_dump = Vec::new();
-    for k in map.keys() {
-        if !to_keep.contains(k) {
-            to_dump.push(*k);
-        }
+    let mut out = HashMap::new();
+    for k in to_keep.iter() {
+        out.insert(*k, keep_map(&map[k]));
     }
-    for k in to_dump {
-        map.remove(&k);
-    }
+    out
 }

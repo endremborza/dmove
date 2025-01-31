@@ -2,18 +2,15 @@ use std::vec::IntoIter;
 
 use crate::{
     components::{IntX, PartitioningIterator, StackBasis, StackFr},
-    ids::AttributeLabelUnion,
     interfacing::{Getters, NumberedEntity, NET},
     io::{
-        BufSerChildren, BufSerTree, CollapsedNode, TreeQ, TreeResponse, TreeSpec, WorkCiteT,
-        WorkWInd, WT,
+        BufSerChildren, BufSerTree, CollapsedNode, FullTreeQuery, ResCvp, TreeBasisState, TreeQ,
+        TreeResponse, TreeSpec, WorkCiteT, WorkWInd, WT,
     },
 };
+use muwo_search::{ordered_calls, sorted_iters_to_arr, ExtendableArr, OrderedMapper};
 use rankless_rs::{
-    agg_tree::{
-        ordered_calls, sorted_iters_to_arr, AggTreeBase, ExtendableArr, OrderedMapper,
-        ReinstateFrom, Updater,
-    },
+    agg_tree::{AggTreeBase, ReinstateFrom, Updater},
     gen::a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Works},
 };
 
@@ -55,9 +52,7 @@ struct WVecMerger<'a> {
 
 pub trait TreeGetter: NumberedEntity {
     #[allow(unused_variables)]
-    fn get_tree(gets: &Getters, att_union: &AttributeLabelUnion, q: TreeQ) -> Option<TreeResponse> {
-        None
-    }
+    fn set_tree(state: &TreeBasisState, fq: FullTreeQuery, res_cvp: ResCvp) {}
 
     fn get_specs() -> Vec<TreeSpec>;
 }
@@ -600,8 +595,10 @@ pub mod test_tools {
 }
 
 pub mod big_test_tree {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::io::AttributeLabel;
+    use crate::io::{AttributeLabel, TreeRunManager};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use test_tools::*;
 
@@ -611,6 +608,20 @@ pub mod big_test_tree {
         IntX<Institutions, 0, true>,
         IntX<Countries, 0, true>,
     );
+
+    struct TestEntity;
+
+    impl Entity for TestEntity {
+        const N: usize = 0;
+        const NAME: &str = "test";
+        type T = u8;
+    }
+
+    #[derive_tree_getter(TestEntity)]
+    mod submod {
+        use super::*;
+        pub type Tree1 = Tither<BigStack>;
+    }
 
     struct BigStack;
 
@@ -635,8 +646,6 @@ pub mod big_test_tree {
         }
     }
 
-    type BigTree = Tither<BigStack>;
-
     pub fn get_big_tree(n: usize) -> TreeResponse {
         let mut fake_attu = HashMap::new();
         let gatts = |i: u32, pref: &str| {
@@ -655,21 +664,44 @@ pub mod big_test_tree {
             tid: None,
             connections: None,
         };
-        BigTree::tree_resp(q, &Getters::fake(), &fake_attu)
+
+        let tstate = TreeRunManager::<(TestEntity, TestEntity)>::fake();
+        let name = TestEntity::NAME.to_string();
+        let r = tstate.get_resp(q, &name).unwrap();
+        Arc::into_inner(tstate).unwrap().join();
+        r
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::JsSerChildren;
-    use std::ops::Deref;
+    use crate::io::{JsSerChildren, TreeRunManager};
+    use std::{ops::Deref, sync::Arc};
     use test_tools::{TestSB, Tither};
 
     use serde_json::to_string_pretty;
 
     type SimpleStack = IntX<Works, 0, true>;
     type L2Stack = (IntX<Countries, 0, true>, IntX<Subfields, 0, true>);
+
+    struct TestEntity;
+
+    impl Entity for TestEntity {
+        const N: usize = 0;
+        const NAME: &str = "test";
+        type T = u8;
+    }
+
+    #[derive_tree_getter(TestEntity)]
+    mod submod {
+        use super::*;
+        pub type Tree1 = Tither<SimpleStackBasisL2>;
+
+        pub type Tree2 = Tither<SimpleStackBasis>;
+
+        pub type Tree3 = Tither<SimpleStackBasis3>;
+    }
 
     struct SimpleStackBasis;
 
@@ -714,25 +746,22 @@ mod tests {
         }
     }
 
-    type Tree1 = Tither<SimpleStackBasisL2>;
-
-    type Tree2 = Tither<SimpleStackBasis>;
-
-    type Tree3 = Tither<SimpleStackBasis3>;
-
-    fn q() -> TreeQ {
+    fn q(i: u8) -> TreeQ {
         TreeQ {
             eid: 0,
             year: None,
-            tid: None,
+            tid: Some(i),
             connections: None,
         }
     }
 
     #[test]
     fn to_tree1() {
-        let g = Getters::fake();
-        let r = Tree1::tree_resp(q(), &g, &HashMap::new());
+        let tstate = TreeRunManager::<(TestEntity, TestEntity)>::fake();
+
+        let r = tstate
+            .get_resp(q(0), &TestEntity::NAME.to_string())
+            .unwrap();
         println!("{}", to_string_pretty(&r).unwrap());
         match &r.tree.children.deref() {
             JsSerChildren::Nodes(nodes) => match &nodes[&30].children.deref() {
@@ -760,23 +789,27 @@ mod tests {
 
         assert_eq!(r.tree.node.source_count, 5);
         assert_eq!(r.tree.node.link_count, 12);
-        assert_eq!(r.tree.node.top_source, 13);
+        assert_eq!(r.tree.node.top_source, Some(13));
         assert_eq!(r.tree.node.top_cite_count, 4);
+        Arc::into_inner(tstate).unwrap().join();
     }
 
     #[test]
     fn to_tree2() {
-        let g = Getters::fake();
-        let r = Tree2::tree_resp(q(), &g, &HashMap::new());
+        let tstate = TreeRunManager::<(TestEntity, TestEntity)>::fake();
+        let name = TestEntity::NAME.to_string();
+        let r = tstate.get_resp(q(1), &name).unwrap();
         println!("{}", to_string_pretty(&r).unwrap());
         assert_eq!(r.tree.node.source_count, 2);
         assert_eq!(r.tree.node.link_count, 3);
-        assert_eq!(r.atts.keys().len(), 1);
+        assert_eq!(r.atts.keys().len(), 2); //added the key of root entity
 
-        let r = Tree3::tree_resp(q(), &g, &HashMap::new());
+        let r = tstate.get_resp(q(2), &name).unwrap();
         println!("{}", to_string_pretty(&r).unwrap());
         assert_eq!(r.tree.node.source_count, 2);
         assert_eq!(r.tree.node.link_count, 3);
+
+        Arc::into_inner(tstate).unwrap().join();
     }
 
     #[test]
@@ -784,13 +817,13 @@ mod tests {
         let r = big_test_tree::get_big_tree(20);
         let node = &r.tree.node;
         println!(
-            "lc: {}, sc: {}, ts: {},",
+            "lc: {}, sc: {}, ts: {:?},",
             node.link_count, node.source_count, node.top_source,
         );
 
         assert_eq!(r.tree.node.link_count, 1048576); //20 - full
         assert_eq!(r.tree.node.source_count, 1048434); //20 - full
-        assert_eq!(r.tree.node.top_source, 16735219); //20 - full
+        assert_eq!(r.tree.node.top_source, Some(16735219)); //20 - full
 
         // assert_eq!(r.tree.node.link_count, 1048448); //20 - nano
         // assert_eq!(r.tree.node.source_count, 65536); //20 - nano

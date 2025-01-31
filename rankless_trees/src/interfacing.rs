@@ -6,7 +6,8 @@ use crate::{
 };
 use rankless_rs::{
     common::{
-        BackendSelector, MainWorkMarker, QuickAttPair, QuickMap, QuickestBox, QuickestVBox, Stowage,
+        init_empty_slice, BackendSelector, MainWorkMarker, QuickAttPair, QuickMap, QuickestBox,
+        QuickestVBox, Stowage,
     },
     gen::{
         a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Works},
@@ -18,11 +19,11 @@ use rankless_rs::{
         derive_links2::{WorkCitingCounts, WorkCountries},
     },
     steps::derive_links1::{CountryInsts, WorkPeriods},
-    CiteCountMarker, NameExtensionMarker, NameMarker, SemanticIdMarker, WorkCountMarker,
+    CiteCountMarker, NameExtensionMarker, NameMarker, Quickest, SemanticIdMarker, WorkCountMarker,
 };
 
 use dmove::{
-    BackendLoading, CompactEntity, Entity, EntityImmutableRefMapperBackend, Locators,
+    BackendLoading, BigId, CompactEntity, Entity, EntityImmutableRefMapperBackend, Locators,
     MappableEntity, MarkedAttribute, NamespacedEntity, UnsignedNumber, VaST, VarAttBuilder, VarBox,
     VarSizedAttributeElement, VariableSizeAttribute, VattArrPair, ET, MAA,
 };
@@ -41,6 +42,8 @@ pub struct Getters {
     ifs: Interfaces,
     pub stowage: Arc<Stowage>,
     pub wn_locators: Locators<WorksNames, u64>,
+    pub inst_oa: Box<[BigId]>,
+    pub work_oa: Box<[BigId]>,
 }
 
 macro_rules! make_interfaces {
@@ -286,6 +289,8 @@ impl Getters {
     }
 
     pub fn new(stowage: Arc<Stowage>) -> Self {
+        let inst_oa = reverse_id::<Institutions>(&stowage);
+        let work_oa = reverse_id::<Works>(&stowage);
         let path = stowage.path_from_ns(WorksNames::NS);
         let wn_locators =
             <Locators<WorksNames, _> as BackendLoading<WorksNames>>::load_backend(&path);
@@ -295,6 +300,8 @@ impl Getters {
             ifs,
             wn_locators,
             stowage,
+            inst_oa,
+            work_oa,
         }
     }
 
@@ -322,6 +329,8 @@ impl Getters {
             stowage: Arc::new(stowage),
             wn_locators,
             ifs: Interfaces::fake(),
+            inst_oa: Vec::new().into(),
+            work_oa: (0..20000000).collect::<Vec<BigId>>().into(),
         }
     }
 }
@@ -347,6 +356,19 @@ where
         let nums = stowage.get_marked_interface::<Self, Mark, QuickestBox>();
         nums
     }
+}
+
+fn reverse_id<E>(stowage: &Stowage) -> Box<[BigId]>
+where
+    E: Entity + MappableEntity<KeyType = BigId> + NamespacedEntity,
+    E::T: UnsignedNumber,
+{
+    let interface = stowage.get_entity_interface::<E, Quickest>();
+    let mut out = init_empty_slice::<E, BigId>();
+    for (k, v) in interface.0 {
+        out[v.to_usize()] = k;
+    }
+    out
 }
 
 fn update_stats<E>(
