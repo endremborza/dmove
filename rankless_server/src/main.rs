@@ -1,4 +1,3 @@
-#![feature(future_join)]
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -7,7 +6,6 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use axum_server::tls_rustls::RustlsConfig;
 use dmove::{Entity, UnsignedNumber};
 use hashbrown::HashMap;
 use kd_tree::{KdPoint, KdTree};
@@ -15,10 +13,9 @@ use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::{max, min},
-    future::join,
     net::SocketAddr,
-    ops::Deref,
     sync::{Arc, Condvar, Mutex},
+    thread::JoinHandle,
 };
 
 use tower::ServiceBuilder;
@@ -34,13 +31,15 @@ use rankless_rs::{
     Stowage,
 };
 use rankless_trees::{
-    instances::TreeGetter,
     interfacing::{Getters, NodeInterfaces, RootInterfaceable, RootInterfaces},
-    io::{TreeQ, TreeResponse, TreeSpecMap, TreeSpecs},
+    io::{TreeQ, TreeResponse, TreeRunManager},
     AttributeLabelUnion,
 };
 
+const N_THREADS: usize = 16;
+
 type SemanticIdMap = HashMap<String, usize>;
+type InstTrm = TreeRunManager<(Institutions, Authors, Subfields, Countries, Sources)>;
 
 #[derive(Deserialize)]
 struct BasicQ {
@@ -76,16 +75,6 @@ struct NameState {
     vars: Box<[f64; 2]>,
     semantic_id_map: SemanticIdMap,
     query_tree: KdTree<KDItem>,
-}
-
-struct TreeBasisState {
-    gets: Arc<Getters>,
-    att_union: Arc<AttributeLabelUnion>,
-    //tree_calculating thread(s) stored here
-    //a thread starts up with these two ^^
-    //starts listening to a queue/channel
-    //in the queue, gets a TreeQ and a channel to respond to, with a TreeResponse
-    //after response is piped into the channel, thread still runs with e.g. caching
 }
 
 #[derive(Serialize, Clone)]
@@ -204,51 +193,27 @@ impl NameState {
     }
 }
 
+impl EntityDescription {
+    fn new<E: Entity>() -> Self {
+        Self {
+            name: <E as Entity>::NAME.to_string(),
+            count: <E as Entity>::N,
+        }
+    }
+}
+
 macro_rules! multi_route {
     ($s: ident, $($T: ty),*) => {
         {
-            let mut v = Vec::new();
-            let mut tops = Vec::new();
-            let mut specs: TreeSpecMap = HashMap::new();
             let static_att_union: Arc<Mutex<AttributeLabelUnion>> = Arc::new(Mutex::new(HashMap::new()));
-            $(v.push(
-                    EntityDescription {
-                        name: <$T as Entity>::NAME.to_string(),
-                        count:<$T as Entity>::N
-                    }
-                );
-            )*
             let mut ei_ns_map = HashMap::new();
             let cv_pair = Arc::new((Mutex::new(None), Condvar::new()));
-
             $(
-                let stowage_clone = Arc::clone(&$s);
-                let au_clone = Arc::clone(&static_att_union);
-                let shared_cvp = Arc::clone(&cv_pair);
-                let thread = std::thread::spawn( move || {
-                    let ent_intf = RootInterfaces::<$T>::new(&stowage_clone);
-                    let nstate = NameState::new::<$T>(&ent_intf);
-
-                    let (lock, cvar) = &*shared_cvp;
-                    println!("waiting for data in {}", <$T>::NAME);
-                    let mut data = lock.lock().unwrap();
-                    println!("whiling data in {}", <$T>::NAME);
-                    while data.is_none() {
-                        println!("unlocking data in {}", <$T>::NAME);
-                        data = cvar.wait(data).unwrap();
-                    }
-                    let ccount = *data.as_ref().unwrap();
-                    println!("got data in {}", <$T>::NAME);
-
-                    ent_intf.update_stats(&mut au_clone.lock().unwrap(), ccount);
-                    nstate
-                });
-                ei_ns_map.insert(<$T>::NAME, thread);
+                add_thread::<$T>(&$s, &static_att_union, &cv_pair, &mut ei_ns_map);
             )*
 
-            let gets = Arc::new(Getters::new($s.clone()));
+            let gets = Getters::new($s.clone());
             let ccount = gets.total_cite_count();
-
             {
                 let (lock, cvar) = &*cv_pair;
                 let mut data = lock.lock().unwrap();
@@ -258,12 +223,12 @@ macro_rules! multi_route {
             NodeInterfaces::<Topics>::new(&$s).update_stats(&mut static_att_union.lock().unwrap(), ccount);
             NodeInterfaces::<Qs>::new(&$s).update_stats(&mut static_att_union.lock().unwrap(), ccount);
 
+            let mut tops = Vec::new();
             let name_state_route = Router::new()
             $(.route(&format!("/names/{}", <$T as Entity>::NAME), get(name_get))
                 .route(&format!("/slice/{}/:from/:to", <$T as Entity>::NAME), get(slice_get))
                 .route(&format!("/views/{}/:semantic_id", <$T as Entity>::NAME), get(view_get))
                 .with_state({
-                    specs.insert(<$T as Entity>::NAME.to_string(), <$T as TreeGetter>::get_specs());
                     let nstate = ei_ns_map.remove(<$T>::NAME).unwrap().join().expect("NState thread panicked");
                     let entities = top_slice(&nstate.responses);
                     tops.push(
@@ -273,25 +238,42 @@ macro_rules! multi_route {
                 })
             )*;
 
-            let att_union = Arc::new(Arc::into_inner(static_att_union).unwrap().into_inner().unwrap());
-            let tree_route = Router::new()
-            $(
-                .route(&format!("/{}", <$T as Entity>::NAME), get(tree_get::<$T>))
-                .with_state({
-                    let ts = TreeBasisState {
-                        gets: gets.clone(),
-                        att_union: att_union.clone(),
-                    };
-                    ts.into()
-                })
-            )*;
+            let tm: Arc<InstTrm> = TreeRunManager::new(gets, static_att_union, N_THREADS);
+            let mut v = Vec::new();
+            $(v.push(EntityDescription::new::<$T>());)*
 
-            (name_state_route, tree_route, v, tops, specs)
+            (name_state_route, tm, v, tops)
         }
     };
 }
 
-#[tokio::main]
+fn add_thread<E>(
+    stowgae: &Arc<Stowage>,
+    atts: &Arc<Mutex<AttributeLabelUnion>>,
+    cv_pair: &Arc<(Mutex<Option<f64>>, Condvar)>,
+    ei_ns_map: &mut HashMap<&'static str, JoinHandle<NameState>>,
+) where
+    E: RootInterfaceable + PrepFilter,
+{
+    let stowage_clone = Arc::clone(&stowgae);
+    let au_clone = Arc::clone(&atts);
+    let shared_cvp = Arc::clone(&cv_pair);
+    let thread = std::thread::spawn(move || {
+        let ent_intf = RootInterfaces::<E>::new(&stowage_clone);
+        let nstate = NameState::new::<E>(&ent_intf);
+        let (lock, cvar) = &*shared_cvp;
+        let mut data = lock.lock().unwrap();
+        while data.is_none() {
+            data = cvar.wait(data).unwrap();
+        }
+        let ccount = *data.as_ref().unwrap();
+        ent_intf.update_stats(&mut au_clone.lock().unwrap(), ccount);
+        nstate
+    });
+    ei_ns_map.insert(<E>::NAME, thread);
+}
+
+#[tokio::main(worker_threads = 16)]
 async fn main() {
     let path: String = std::env::args().last().unwrap();
     let now = std::time::Instant::now();
@@ -305,15 +287,19 @@ async fn main() {
         .quality(CompressionLevel::Fastest);
 
     let astow = Arc::new(Stowage::new(&path));
-    let (response_api, tree_api, entity_descriptions, tops, specs) =
+    let (response_api, tree_manager, entity_descriptions, tops) =
         multi_route!(astow, Authors, Institutions, Sources, Subfields, Countries);
 
     let count_api = static_router(&entity_descriptions);
-    let specs_api = static_router(&TreeSpecs::new(specs));
+    let specs_api = static_router(&tree_manager.specs);
 
     let tops_api = Router::new()
         .route("/", get(tops_get))
         .with_state(Arc::new(tops));
+
+    let tree_api = Router::new()
+        .route("/:root_type", get(tree_get))
+        .with_state(tree_manager);
 
     let api = Router::new()
         .nest("/", response_api)
@@ -325,28 +311,13 @@ async fn main() {
 
     let app = Router::new().nest("/v1", api);
 
-    // let listener = tokio::net::TcpListener::bind("0.0.0.0:3039").await.unwrap();
-    // axum::serve(listener, app).await.unwrap();
-
-    let config = RustlsConfig::from_pem_file(
-        "ssl/alpha.rankless.org/fullchain1.pem",
-        "ssl/alpha.rankless.org/privkey1.pem",
-    )
-    .await
-    .unwrap();
-
     let loc_addr = SocketAddr::from(([127, 0, 0, 1], 3038));
-    let rem_addr = SocketAddr::from(([0, 0, 0, 0], 3039));
     println!("loaded and set-up in {}", now.elapsed().as_secs());
-    println!("listening on local: {}; remote: {}", loc_addr, rem_addr);
-    let a1 = axum_server::bind(loc_addr).serve(app.clone().into_make_service());
-    let a2 = axum_server::bind(SocketAddr::from(([127, 0, 0, 1], 3040)))
-        .serve(app.clone().into_make_service());
-    let a3 = axum_server::bind_rustls(rem_addr, config).serve(app.into_make_service());
-    let (r1, r2, r3) = join!(a1, a2, a3).await;
-    r1.unwrap();
-    r2.unwrap();
-    r3.unwrap();
+    println!("listening on local: {}", loc_addr);
+    axum_server::bind(loc_addr)
+        .serve(app.clone().into_make_service())
+        .await
+        .unwrap()
 }
 
 async fn slice_get(
@@ -366,18 +337,12 @@ async fn state_get(str_state: State<Arc<str>>) -> (HeaderMap, Response<Body>) {
     (cache_header(60), str_state.to_string().into_response())
 }
 
-async fn tree_get<E>(
+async fn tree_get(
+    Path(root_type): Path<String>,
     tree_q: Query<TreeQ>,
-    state: State<Arc<TreeBasisState>>,
-) -> (HeaderMap, Json<Option<TreeResponse>>)
-where
-    E: Entity + TreeGetter,
-{
-    let resp = Json(E::get_tree(
-        &state.gets,
-        &state.att_union,
-        tree_q.deref().to_owned(),
-    ));
+    state: State<Arc<InstTrm>>,
+) -> (HeaderMap, Json<Option<TreeResponse>>) {
+    let resp = Json(state.get_resp(tree_q.0, &root_type));
     (cache_header(60), resp)
 }
 
