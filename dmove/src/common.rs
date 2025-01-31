@@ -1,10 +1,10 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     fs::File,
     io::{self, Write},
     path::PathBuf,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex},
 };
 
 use dmove_macro::{def_me_struct, derive_meta_trait};
@@ -120,6 +120,12 @@ impl<T> CompactEntity for T where T: MappableEntity<KeyType = usize> {}
 
 impl InitEmpty for () {
     fn init_empty() -> Self {}
+}
+
+impl InitEmpty for bool {
+    fn init_empty() -> Self {
+        false
+    }
 }
 
 impl InitEmpty for String {
@@ -294,6 +300,30 @@ where
     }
 }
 
+impl<T> InitEmpty for Option<T> {
+    fn init_empty() -> Self {
+        None
+    }
+}
+
+impl<T> InitEmpty for Arc<T>
+where
+    T: InitEmpty,
+{
+    fn init_empty() -> Self {
+        Arc::new(T::init_empty())
+    }
+}
+
+impl<T> InitEmpty for (Mutex<T>, Condvar)
+where
+    T: InitEmpty,
+{
+    fn init_empty() -> Self {
+        (Mutex::new(T::init_empty()), Condvar::new())
+    }
+}
+
 macro_rules! iter_ba_impl {
     ($($iter_type:ty),*) => {
         $(impl<T> ByteArrayInterface for $iter_type
@@ -402,7 +432,7 @@ macro_rules! empty_coll {
 
 empty_num!(u8, u16, u32, u64, u128);
 
-empty_coll!(Vec<T>; T, BTreeSet<T>; T, HashMap<K, V>; K-V);
+empty_coll!(Vec<T>; T, BTreeSet<T>; T, HashMap<K, V>; K-V, VecDeque<T>; T);
 
 use crate::{var_size_attributes::VaST, VarSizedAttributeElement};
 
