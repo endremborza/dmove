@@ -13,8 +13,8 @@ const SRECORD_PREFIX: &str = "rankless_rs::agg_tree";
 const SRECORD_ENUM: &str = "SRecord";
 const BASIS_TRAIT: &str = "FoldStackBase";
 const FC_TRAIT: &str = "FoldingStackConsumer";
-
-const MAX_DEPTH: usize = 7;
+const TG_TRAIT: &str = "TreeGetter";
+const E_TRAIT: &str = "Entity";
 
 #[proc_macro]
 pub fn def_me_struct(_: TokenStream) -> TokenStream {
@@ -25,6 +25,46 @@ pub fn def_me_struct(_: TokenStream) -> TokenStream {
 }}"
     );
     TokenStream::from_str(&struct_def).unwrap()
+}
+
+#[proc_macro]
+pub fn impl_subs(ts: TokenStream) -> TokenStream {
+    let n: usize = ts.to_string().parse().unwrap();
+
+    // let types = parse_macro_input!(etypes as Types);
+    // let n = types.0.len();
+    let pts = prefed(0..n, "T");
+    let ttup: syn::Expr = syn::parse_str(&format!("({})", pts)).expect("Ts");
+    let t_gens: syn::AngleBracketedGenericArguments =
+        syn::parse_str(&format!("<{}>", pts)).expect("GTs");
+    let where_inner = cjoin((0..n).map(|e| format!("T{e}: {TG_TRAIT} + {E_TRAIT}")));
+    let wheres: syn::WhereClause = syn::parse_str(&format!("where {where_inner}")).unwrap();
+    let if_inner = (0..n).map(|e| {
+        format!(
+            "if fq.ck.etype == {e} {{ return <T{e} as TreeGetter>::set_tree(state, fq, res_cvp) }}",
+        )
+    });
+    let spec_pairs = cjoin((0..n).map(|e| format!("(T{e}::NAME.to_string(), T{e}::get_specs())")));
+    let kv_vec: syn::Expr = parse_str(&format!("vec![{spec_pairs}]")).unwrap();
+    let ijoined = join(if_inner, " else ");
+    let in_expr: syn::Expr = parse_str(&ijoined).unwrap();
+
+    quote! {
+
+            impl #t_gens RunManagerSub for #ttup #wheres {
+                fn fill_res_cvp(state: &TreeBasisState, fq: FullTreeQuery, res_cvp: ResCvp) {
+                    #in_expr
+                }
+
+                fn get_specs() -> TreeSpecs {
+                    let kv_vec = #kv_vec;
+                    let specm = HashMap::from_iter(kv_vec.into_iter());
+                    TreeSpecs::new(specm)
+
+                }
+            }
+    }
+    .into()
 }
 
 #[proc_macro_attribute]
@@ -119,9 +159,10 @@ pub fn derive_meta_trait(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
-pub fn def_srecs(_: TokenStream) -> TokenStream {
+pub fn def_srecs(ts: TokenStream) -> TokenStream {
     let mut out = Vec::new();
-    for i in 2..(MAX_DEPTH + 1) {
+    let n: usize = ts.to_string().parse().unwrap();
+    for i in 2..(n + 1) {
         let its = prefed(1..i + 1, "T");
         let s_gens = prefed(1..i, "S");
         let it_tup: syn::Expr = syn::parse_str(&format!("({its})")).expect("Ts");
@@ -310,7 +351,7 @@ pub fn derive_tree_getter(attr: TokenStream, item: TokenStream) -> TokenStream {
         tree_types.iter().enumerate().map(|(i, tn)| {
             format!(
                 "if tid == {i} {{
-            return Some({mod_name}::{tn}::tree_resp(q, gets, stats));
+            return {mod_name}::{tn}::fill_res_cvp(fq, state, res_cvp);
         }}"
             )
         }),
@@ -319,14 +360,10 @@ pub fn derive_tree_getter(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let added_impl = format!(
         "impl TreeGetter for {attr} {{
-    fn get_tree(
-        gets: &Getters,
-        stats: &AttributeLabelUnion,
-        q: TreeQ,
-    ) -> Option<TreeResponse> {{
-        let tid = q.tid.unwrap_or(0);
+    
+    fn set_tree(state: &TreeBasisState, fq: FullTreeQuery, res_cvp: ResCvp) {{
+        let tid = fq.q.tid.unwrap_or(0);
         {if_inners}
-        None
     }}
 
     fn get_specs() -> Vec<TreeSpec> {{
