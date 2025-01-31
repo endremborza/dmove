@@ -57,9 +57,7 @@ pub fn impl_subs(ts: TokenStream) -> TokenStream {
                 }
 
                 fn get_specs() -> TreeSpecs {
-                    let kv_vec = #kv_vec;
-                    let specm = HashMap::from_iter(kv_vec.into_iter());
-                    TreeSpecs::new(specm)
+                    TreeSpecs::new(#kv_vec)
 
                 }
             }

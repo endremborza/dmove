@@ -25,7 +25,7 @@ use rankless_rs::{
 
 use dmove::{BigId, Entity, InitEmpty, UnsignedNumber, ET};
 
-use crate::{instances::TreeGetter, interfacing::Getters, AttributeLabelUnion};
+use crate::{ids::get_atts, instances::TreeGetter, interfacing::Getters, AttributeLabelUnion};
 
 pub type WT = ET<Works>;
 pub type WorkCiteT = u32;
@@ -79,7 +79,7 @@ pub struct AttributeLabel {
     pub spec_baseline: f64,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Clone)]
 pub struct AttributeLabelOut {
     pub name: String,
     #[serde(rename = "specBaseline")]
@@ -108,20 +108,20 @@ pub struct CollapsedNodeGen<T> {
     pub top_cite_count: u32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct BufSerTree {
     pub node: CollapsedNode,
     pub children: Box<BufSerChildren>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Clone)]
 pub struct JsSerTree {
     #[serde(flatten)]
     pub node: CollapsedNodeJson,
     pub children: Box<JsSerChildren>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize)]
 pub struct TreeResponse {
     pub tree: JsSerTree,
     pub atts: AttributeLabels,
@@ -129,6 +129,8 @@ pub struct TreeResponse {
 
 #[derive(Serialize)]
 pub struct TreeSpecs {
+    #[serde(skip_serializing)]
+    root_types: Vec<String>,
     specs: TreeSpecMap,
     #[serde(rename = "yearBreaks")]
     year_breaks: YBT,
@@ -164,13 +166,13 @@ pub enum CacheValue {
     Done(Vec<u8>),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum BufSerChildren {
     Leaves(HashMap<u32, CollapsedNode>),
     Nodes(HashMap<u32, BufSerTree>),
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Clone)]
 #[serde(untagged)]
 pub enum JsSerChildren {
     Leaves(HashMap<u32, CollapsedNodeJson>),
@@ -215,19 +217,38 @@ impl Display for FullTreeQuery {
     }
 }
 
+impl TreeResponse {
+    pub fn from_pruned(
+        pruned_tree: BufSerTree,
+        fq: &FullTreeQuery,
+        bds: &Vec<BreakdownSpec>,
+        state: &TreeBasisState,
+    ) -> Self {
+        let now = std::time::Instant::now();
+        let atts = get_atts(&pruned_tree, &bds, state, fq);
+        println!("{fq}: got atts in {}", now.elapsed().as_millis());
+
+        let now = std::time::Instant::now();
+        let tree = JsSerTree::from_buf(pruned_tree, &state.gets);
+        println!("{fq}: converted in {}", now.elapsed().as_millis());
+        Self { tree, atts }
+    }
+}
+
 impl TreeSpecs {
-    pub fn new(specs: TreeSpecMap) -> Self {
+    pub fn new(spec_kvs: Vec<(String, Vec<TreeSpec>)>) -> Self {
+        let root_types = spec_kvs.iter().map(|e| e.0.clone()).collect();
+        let specs = HashMap::from_iter(spec_kvs.into_iter());
         Self {
+            root_types,
             specs,
             year_breaks: POSSIBLE_YEAR_FILTERS,
         }
     }
 
     pub fn to_eid(&self, name: &String) -> Option<u8> {
-        let mut v: Vec<String> = self.specs.keys().map(|e| e.clone()).collect();
-        v.sort();
-        for (i, e) in v.into_iter().enumerate() {
-            if name == &e {
+        for (i, e) in self.root_types.iter().enumerate() {
+            if name == e {
                 return Some(i as u8);
             }
         }
@@ -390,8 +411,6 @@ where
             }
             return std::mem::replace(&mut out, None);
         }
-        // let (resp, _cv) = Arc::into_inner(res_cvp).unwrap();
-        // resp.into_inner().unwrap()
     }
 
     pub fn join(self) {
@@ -460,11 +479,11 @@ impl TreeBasisState {
         self.cache_dir(fq).join(format!("{}.gz", period))
     }
 
-    pub fn resp_cache_file(&self, fq: &FullTreeQuery) -> PathBuf {
-        self.full_cache_file_period(fq, fq.period)
+    pub fn pruned_cache_file(&self, fq: &FullTreeQuery) -> PathBuf {
+        self.pruned_cache_file_period(fq, fq.period)
     }
-    pub fn resp_cache_file_period(&self, fq: &FullTreeQuery, period: u8) -> PathBuf {
-        self.cache_dir(fq).join(format!("response-{}.gz", period))
+    pub fn pruned_cache_file_period(&self, fq: &FullTreeQuery, period: u8) -> PathBuf {
+        self.cache_dir(fq).join(format!("pruned-{}.gz", period))
     }
     pub fn fake() -> Self {
         Self {
@@ -510,7 +529,7 @@ impl TreeBasisState {
                                 .unwrap()
                                 .to_str()
                                 .unwrap()
-                                .starts_with("res")
+                                .starts_with("pru")
                             {
                                 continue;
                             }

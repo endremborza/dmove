@@ -5,7 +5,7 @@ use dmove_macro::impl_stack_basees;
 use hashbrown::hash_map::Entry;
 use rankless_rs::{
     agg_tree::{FoldingStackConsumer, HeapIterator, MinHeap, ReinstateFrom, SortedRecord, Updater},
-    common::{read_json_path, write_buf_path, write_json_path},
+    common::{read_buf_path, write_buf_path},
     gen::a1_entity_mapping::{
         Authors, Authorships, Countries, Institutions, Qs, Sources, Subfields, Topics, Works,
     },
@@ -13,11 +13,10 @@ use rankless_rs::{
 };
 
 use crate::{
-    ids::get_atts,
     instances::{Collapsing, DisJTree, FoldStackBase, IntXTree, TopTree, WorkTree},
     interfacing::{Getters, NumberedEntity, WorksFromMemory, NET},
     io::{
-        BoolCvp, BreakdownSpec, BufSerTree, CacheMap, CacheValue, FullTreeQuery, JsSerTree, ResCvp,
+        BoolCvp, BreakdownSpec, BufSerTree, CacheMap, CacheValue, FullTreeQuery, ResCvp,
         TreeBasisState, TreeResponse, TreeSpec, WT,
     },
     prune::prune,
@@ -268,7 +267,7 @@ pub trait PartitioningIterator<'a>:
         IntXTree<Self::Root, CT>: Updater<CT>,
     {
         println!("requested entity: {fq}");
-        let resp_path = state.resp_cache_file(&fq);
+        let pruned_path = state.pruned_cache_file(&fq);
         let prog = Progress::from_e(&state.im_cache, &fq);
         //getting one of e(tid) might trigger all others
         match prog {
@@ -286,7 +285,10 @@ pub trait PartitioningIterator<'a>:
         }
 
         let now = std::time::Instant::now();
-        let resp: TreeResponse = read_json_path(resp_path).unwrap();
+        let pruned_tree: BufSerTree =
+            read_buf_path(&pruned_path).expect(&format!("failed reading {pruned_path:?}"));
+        let bds = Self::get_spec().breakdowns;
+        let resp = TreeResponse::from_pruned(pruned_tree, &fq, &bds, state);
         {
             let (lock, cvar) = &*res_cvp;
             let mut data = lock.lock().unwrap();
@@ -366,6 +368,7 @@ pub trait PartitioningIterator<'a>:
         let mut data = lock.lock().unwrap();
         *data = true;
         cvar.notify_all();
+        println!("notified done");
     }
 
     fn write_resp(
@@ -380,22 +383,16 @@ pub trait PartitioningIterator<'a>:
         let pruned_tree = prune(full_tree, &state.att_union, &bds);
         println!("{fq}: pruned in {}", now.elapsed().as_millis());
         //cache pruned response, use it if no connections are requested
-
-        let now = std::time::Instant::now();
-        let atts = get_atts(&pruned_tree, &bds, state, fq);
-        println!("{fq}: got atts in {}", now.elapsed().as_millis());
-
-        let now = std::time::Instant::now();
-        let tree = JsSerTree::from_buf(pruned_tree, &state.gets);
-        println!("{fq}: converted in {}", now.elapsed().as_millis());
-        let full_resp = TreeResponse { tree, atts };
+        let full_resp = TreeResponse::from_pruned(pruned_tree.clone(), fq, &bds, state);
         if pid == fq.period {
             let (lock, cvar) = &*res_cvp;
             let mut data = lock.lock().unwrap();
-            *data = Some(full_resp.clone());
+            *data = Some(full_resp);
             cvar.notify_all();
         }
-        write_json_path(full_resp, state.full_cache_file_period(fq, pid)).unwrap();
+        let resp_path = state.pruned_cache_file_period(fq, pid);
+        write_buf_path(pruned_tree, &resp_path).unwrap();
+        println!("{fq}: wrote to {:?}", resp_path);
     }
 }
 

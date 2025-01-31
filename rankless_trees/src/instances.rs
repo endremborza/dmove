@@ -595,7 +595,7 @@ pub mod test_tools {
 }
 
 pub mod big_test_tree {
-    use std::sync::Arc;
+    use std::{sync::Arc, thread, time::Duration};
 
     use super::*;
     use crate::io::{AttributeLabel, TreeRunManager};
@@ -667,7 +667,18 @@ pub mod big_test_tree {
 
         let tstate = TreeRunManager::<(TestEntity, TestEntity)>::fake();
         let name = TestEntity::NAME.to_string();
-        let r = tstate.get_resp(q, &name).unwrap();
+
+        let ts1 = tstate.clone();
+        let (q1, n1) = (q.clone(), name.clone());
+        let t = thread::spawn(move || ts1.get_resp(q1, &n1).unwrap());
+        thread::sleep(Duration::from_millis(100));
+        let ts2 = tstate.clone();
+        let t2 = thread::spawn(move || ts2.get_resp(q, &name).unwrap());
+
+        let r = t.join().unwrap();
+        let r2 = t2.join().unwrap();
+        assert_eq!(r2.tree.node.top_source, r.tree.node.top_source);
+
         Arc::into_inner(tstate).unwrap().join();
         r
     }
@@ -800,9 +811,9 @@ mod tests {
         let name = TestEntity::NAME.to_string();
         let r = tstate.get_resp(q(1), &name).unwrap();
         println!("{}", to_string_pretty(&r).unwrap());
-        assert_eq!(r.tree.node.source_count, 2);
-        assert_eq!(r.tree.node.link_count, 3);
-        assert_eq!(r.atts.keys().len(), 2); //added the key of root entity
+        val_res2(&r);
+        let rcached = tstate.get_resp(q(1), &name).unwrap();
+        val_res2(&rcached);
 
         let r = tstate.get_resp(q(2), &name).unwrap();
         println!("{}", to_string_pretty(&r).unwrap());
@@ -810,6 +821,12 @@ mod tests {
         assert_eq!(r.tree.node.link_count, 3);
 
         Arc::into_inner(tstate).unwrap().join();
+    }
+
+    fn val_res2(r: &TreeResponse) {
+        assert_eq!(r.tree.node.source_count, 2);
+        assert_eq!(r.tree.node.link_count, 3);
+        assert_eq!(r.atts.keys().len(), 2); //added the key of root entity
     }
 
     #[test]
