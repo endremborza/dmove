@@ -184,21 +184,21 @@ where
 
     pub fn get(&mut self, k: &K) -> Option<V> {
         let hfile = File::open(&self.map_path).unwrap();
-        let mut br = BufReader::new(&hfile); //TODO: this might be too slow here
-                                             //test it!!
+
         let k_arr = k.to_fbytes();
         let rec_u64: u64 = self.full_size as u64;
 
         let (key_buffer, value_buffer) =
             self.main_buf[..self.full_size].split_at_mut(self.key_size);
-        // let mut key_buffer = &mut self.main_buf[..self.key_size];
-        // let mut value_buffer = &mut self.main_buf[self.key_size..self.full_size];
         let mut seek_blocks_l: u64 = 0;
         let mut seek_blocks_r: u64 = file_record_count(&hfile, self.full_size);
         let mut seek_mid = (seek_blocks_r + seek_blocks_l) / 2;
+
+        let mut reader = hfile;
+        // let mut reader = BufReader::new(&hfile);
         'outer: loop {
-            br.seek(SeekFrom::Start(seek_mid * rec_u64)).unwrap();
-            if let Err(_e) = br.read_exact(key_buffer) {
+            reader.seek(SeekFrom::Start(seek_mid * rec_u64)).unwrap();
+            if let Err(_e) = reader.read_exact(key_buffer) {
                 break;
             }
             for i in 0..self.key_size {
@@ -212,7 +212,7 @@ where
                     seek_blocks_r = seek_mid - 1;
                     break;
                 } else if i == (self.key_size - 1) {
-                    br.read_exact(value_buffer).unwrap();
+                    reader.read_exact(value_buffer).unwrap();
                     return Some(V::from_fbytes(value_buffer));
                 }
             }
@@ -311,5 +311,48 @@ mod chunk_test {
         let a: Vec<u8> = vec![0, 1, 0, 1];
         let sorted = chunk_sort(a, &2);
         assert_eq!(sorted, vec![0, 1])
+    }
+}
+
+#[cfg(test)]
+mod map_test {
+    use std::{
+        fs::{create_dir_all, remove_dir_all, remove_file},
+        path::PathBuf,
+        str::FromStr,
+    };
+
+    use hashbrown::HashMap;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+
+    use crate::UniqueMap;
+
+    #[test]
+    fn test_unique_map() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let path = PathBuf::from_str("/tmp/dm-map-test/map-blob").unwrap();
+        remove_file(&path).unwrap_or(());
+        create_dir_all(&path.parent().unwrap()).unwrap();
+        let mut map = UniqueMap::<u32, u16>::new(&path);
+        let mut cmp_map: HashMap<u32, u16> = HashMap::new();
+        (0..200_000).for_each(|_| {
+            let tup = (rng.gen(), rng.gen());
+            map.push(tup.clone());
+            if !cmp_map.contains_key(&tup.0) {
+                cmp_map.insert(tup.0, tup.1);
+            }
+        });
+        map.extend();
+
+        let now = std::time::Instant::now();
+
+        for (k, v) in cmp_map.iter() {
+            assert_eq!(*v, map.get(k).unwrap());
+        }
+
+        println!("got in {}", now.elapsed().as_millis());
+        assert_eq!(cmp_map, map.to_map());
+
+        remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
