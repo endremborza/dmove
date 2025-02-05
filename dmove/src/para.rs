@@ -5,6 +5,8 @@ where
     T: Send,
     Self: Sized + Sync,
 {
+    const CAPACITY_PER_THREAD: usize = 100;
+
     fn proc(&self, input: T);
 
     fn post(self) -> Self {
@@ -33,7 +35,7 @@ where
     I: Iterator<Item = T>,
     T: Send,
 {
-    let capacity = n_threads * 100; //TODO useless constant
+    let capacity = n_threads * W::CAPACITY_PER_THREAD;
     let (sender, r) = bounded(capacity);
 
     std::thread::scope(|s| {
