@@ -9,8 +9,7 @@ use crate::{
         field_id_parse, oa_id_parse, short_string_to_u64, ObjIter, ParsedId, Stowage, MAIN_NAME,
     },
     csv_writers::{authors, fields, institutions, sources, subfields, topics, works},
-    env_consts::START_YEAR,
-    filter::FINAL_YEAR,
+    env_consts::{FINAL_YEAR, START_YEAR},
     oa_structs::{post::Authorship, post::Institution, IdStruct},
 };
 use dmove::{
@@ -100,15 +99,12 @@ pub fn main(mut stowage: Stowage) -> io::Result<()> {
         short_string_to_u64(&e.country_code.unwrap_or("".to_string()))
     });
 
-    //TODO: MeaningfulId - is it worh it to make the usize meaningful
-    //definitely for Qs
-    //TODO: distinguish as no null value here
+    //TODO: distinguish as no null value here (??)
     let ship_n = iter_authorships(&stowage).count();
 
     let builder = &mut stowage.builder.as_mut().unwrap();
-    builder.add_scaled_entity(works::atts::authorships, ship_n, false); //TODO: these might
-                                                                        //actually be compact
-    builder.add_scaled_entity("qs", 5, false);
+    builder.add_scaled_entity(works::atts::authorships, ship_n, true);
+    builder.add_scaled_entity("qs", 5, true);
 
     for sw in vec![fields::C, subfields::C] {
         ids_from_atts::<IdStruct, _>(&mut stowage, sw, sw, |e| field_id_parse(&e.id.unwrap()));

@@ -2,7 +2,7 @@ use std::io;
 
 use crate::{
     common::{
-        init_empty_slice, BackendSelector, MainWorkMarker, MarkedBackendLoader, QuickAttPair,
+        init_empty_slice, BackendSelector, BeS, MainWorkMarker, MarkedBackendLoader, QuickAttPair,
         QuickestBox, QuickestVBox, ReadIter, Stowage,
     },
     gen::{
@@ -38,7 +38,7 @@ impl WorkPeriods {
 }
 
 impl MarkedBackendLoader<QuickestBox> for WorkPeriods {
-    type BE = <QuickestBox as BackendSelector<Self>>::BE;
+    type BE = BeS<QuickestBox, Self>;
     fn load(stowage: &Stowage) -> Self::BE {
         let wys = stowage.get_entity_interface::<WorkYears, ReadFixIter>();
         wys.map(|y_id| {
@@ -50,7 +50,7 @@ impl MarkedBackendLoader<QuickestBox> for WorkPeriods {
 }
 
 impl MarkedBackendLoader<QuickestVBox> for CountryInsts {
-    type BE = <QuickestVBox as BackendSelector<Self>>::BE;
+    type BE = BeS<QuickestVBox, Self>;
     fn load(stowage: &Stowage) -> Self::BE {
         let inst_c = stowage.get_entity_interface::<InstCountries, ReadFixIter>();
         let mut c_insts = init_empty_slice::<Countries, Vec<ET<Institutions>>>();
@@ -146,8 +146,7 @@ where
     <Link1 as Entity>::T: ByteArrayInterface + VarSizedAttributeElement,
     <<Link1 as Link>::Target as Entity>::T: UnsignedNumber,
     <<Link2 as Link>::Target as Entity>::T: PartialEq + UnsignedNumber,
-    <ReadIter as BackendSelector<Link1>>::BE:
-        Iterator<Item = Box<[<<Link1 as Link>::Target as Entity>::T]>>,
+    BeS<ReadIter, Link1>: Iterator<Item = Box<[<<Link1 as Link>::Target as Entity>::T]>>,
 {
     let cloj = |ends: &mut Vec<Link2::T>, fw_target: &Link2::T| {
         if !ends.contains(fw_target) {
@@ -168,8 +167,7 @@ where
     <Link1 as Entity>::T: ByteArrayInterface + VarSizedAttributeElement,
     <<Link1 as Link>::Target as Entity>::T: UnsignedNumber,
     <<Link2 as Link>::Target as Entity>::T: PartialEq + UnsignedNumber,
-    <ReadIter as BackendSelector<Link1>>::BE:
-        Iterator<Item = Box<[<<Link1 as Link>::Target as Entity>::T]>>,
+    BeS<ReadIter, Link1>: Iterator<Item = Box<[<<Link1 as Link>::Target as Entity>::T]>>,
 {
     let cloj = |ends: &mut Vec<<Link2::Target as Entity>::T>, fw_targets: &Link2::T| {
         for fw_target in fw_targets {
@@ -205,8 +203,7 @@ where
     Link1::T: ByteArrayInterface + VarSizedAttributeElement,
     <Link1::Target as Entity>::T: UnsignedNumber,
     <<Link2 as Link>::Target as Entity>::T: ByteFixArrayInterface,
-    <ReadIter as BackendSelector<Link1>>::BE:
-        Iterator<Item = Box<[<<Link1 as Link>::Target as Entity>::T]>>,
+    BeS<ReadIter, Link1>: Iterator<Item = Box<[<<Link1 as Link>::Target as Entity>::T]>>,
     <IfMarker as BackendSelector<Link2>>::BE:
         EntityImmutableRefMapperBackend<Link2> + BackendLoading<Link2>,
 {

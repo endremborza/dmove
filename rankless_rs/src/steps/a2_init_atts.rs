@@ -1,6 +1,6 @@
 use crate::{
     common::{
-        field_id_parse, init_empty_slice, oa_id_parse, short_string_to_u64, BackendSelector,
+        field_id_parse, init_empty_slice, oa_id_parse, short_string_to_u64, BeS,
         NameExtensionMarker, NameMarker, ParsedId, Quickest, SemanticIdMarker, Stowage, MAIN_NAME,
     },
     csv_writers::{institutions, works},
@@ -21,6 +21,8 @@ use dmove::{
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use std::{io, marker::PhantomData, sync::Mutex, usize};
+
+const MIN_TOPIC_SCORE: f64 = 0.7;
 
 #[derive(Deserialize)]
 struct SourceQ {
@@ -350,7 +352,7 @@ impl<'a> StrWriter<'a> {
         self
     }
 
-    fn write_name<CsvObj, Source>(&mut self) -> <Quickest as BackendSelector<Source>>::BE
+    fn write_name<CsvObj, Source>(&mut self) -> BeS<Quickest, Source>
     where
         CsvObj: DeserializeOwned + ParsedId + AttGetter<String, NameMarker> + Send,
         Source: MappableEntity<KeyType = BigId> + NamespacedEntity,
@@ -362,7 +364,7 @@ impl<'a> StrWriter<'a> {
         interface
     }
 
-    fn write_name_ext<CsvObj, E>(&mut self, interface: &<Quickest as BackendSelector<E>>::BE)
+    fn write_name_ext<CsvObj, E>(&mut self, interface: &BeS<Quickest, E>)
     where
         CsvObj: DeserializeOwned + ParsedId + AttGetter<String, NameExtensionMarker> + Send,
         E: Entity + MappableEntity<KeyType = BigId> + NamespacedEntity,
@@ -372,11 +374,8 @@ impl<'a> StrWriter<'a> {
         self.write_meta::<E, CsvObj, NameExtensionMarker>(interface, prop_name);
     }
 
-    fn write_meta<E, CsvObj, Marker>(
-        &mut self,
-        interface: &<Quickest as BackendSelector<E>>::BE,
-        prop_name: &str,
-    ) where
+    fn write_meta<E, CsvObj, Marker>(&mut self, interface: &BeS<Quickest, E>, prop_name: &str)
+    where
         CsvObj: DeserializeOwned + ParsedId + AttGetter<String, Marker> + Send,
         E: Entity + MappableEntity<KeyType = BigId> + NamespacedEntity,
         <E as Entity>::T: UnsignedNumber + Sync,
@@ -521,8 +520,7 @@ impl ObjAttGetter<Subfields> for Topic {
 
 impl ObjAttGetter<Topics> for WorkTopic {
     fn get_obj_att(&self) -> Option<<Topics as MappableEntity>::KeyType> {
-        if self.score.unwrap_or(0.0) > 0.7 {
-            //TODO: specific, hard-coded
+        if self.score.unwrap_or(0.0) > MIN_TOPIC_SCORE {
             return Some(oa_id_parse(self.topic_id.as_ref().unwrap()));
         }
         None
