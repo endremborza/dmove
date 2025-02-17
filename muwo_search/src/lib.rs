@@ -77,7 +77,7 @@ struct PrepLeaf {
 struct IndexedWord {
     word: Vec<u8>,
     outer_idx: usize,
-    _inner_idx: usize, //TODO: use this somehow
+    _inner_idx: usize, //TODO/improvement: use this somehow
 }
 
 trait Construct {
@@ -337,7 +337,7 @@ impl CustomTrie {
                     merge_into_sorted_vec(&mut prefs, ins);
                     out = prefs;
                 }
-                println!("w: {:?}", out);
+                // println!("w: {:?}", out);
                 bs = be;
             }
             out
@@ -397,7 +397,7 @@ impl StackWordSet {
 
 impl SearchEngine {
     pub fn new<I: Iterator<Item = String>>(haystacks: I) -> Self {
-        //TODO:
+        //TODO/performance:
         // involve sizetype (authors-names is only u8 max len!)
         // maybe if small enough precompile the whole whing with the data - store on stack
         // 26, 676, 17576, 456976
@@ -458,7 +458,7 @@ fn get_idxed_words<I: Iterator<Item = String>>(haystacks: I) -> Vec<IndexedWord>
 }
 
 fn _n_unique<T: PartialEq + Ord>(arr: &mut [T]) -> u8 {
-    //TODO: use this for better matches
+    //TODO/improvement: use this for better matches
     arr.sort();
     let mut o = 0;
     for (i, e) in arr.iter().enumerate().skip(1) {
