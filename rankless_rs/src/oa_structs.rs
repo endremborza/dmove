@@ -248,7 +248,7 @@ pub struct Source {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Work {
     id: String,
-    doi: Option<String>,
+    pub doi: Option<String>,
     title: Option<String>,
     display_name: Option<String>,
     pub publication_year: Option<u16>,

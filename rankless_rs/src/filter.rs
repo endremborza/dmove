@@ -7,8 +7,8 @@ use crate::{
     common::{oa_id_parse, ParsedId, Stowage, MAIN_NAME},
     csv_writers::{authors, institutions, sources, works},
     env_consts::{
-        MIN_AUTHOR_CITE_COUNT, MIN_AUTHOR_WORK_COUNT, MIN_PAPERS_FOR_INST, MIN_PAPERS_FOR_SOURCE,
-        START_YEAR,
+        FINAL_YEAR, MIN_AUTHOR_CITE_COUNT, MIN_AUTHOR_WORK_COUNT, MIN_PAPERS_FOR_INST,
+        MIN_PAPERS_FOR_SOURCE, START_YEAR,
     },
     oa_structs::{
         post::{Author, Authorship, Location},
@@ -18,11 +18,12 @@ use crate::{
 
 use dmove::BigId;
 
-pub const FINAL_YEAR: u16 = 2025;
 const MAX_AUTHORS: usize = 20;
-const MIN_CITATIONS: usize = 2;
+const MIN_CITATIONS: usize = 1;
 
-const FIX_AUTHORS: [BigId; 3] = [5064297795, 5005839111, 5078032253];
+const FIX_AUTHORS: [BigId; 6] = [
+    5064297795, 5005839111, 5078032253, 5045634725, 5082456380, 5017880363,
+];
 
 #[derive(Deserialize)]
 struct PersonAuthorship {
@@ -31,24 +32,12 @@ struct PersonAuthorship {
 }
 
 trait FilterBase {
-    fn entity_c() -> &'static str {
-        works::C
-    }
-
-    fn entity_att() -> &'static str;
-
-    fn get_min() -> usize {
-        0
-    }
-    fn get_max() -> usize {
-        usize::max_value()
-    }
-    fn has_max() -> bool {
-        false
-    }
-    fn filter_targets() -> bool {
-        true
-    }
+    const ENTITY_C: &'static str = works::C;
+    const ENTITY_ATT: &'static str;
+    const MIN: usize = 0;
+    const MAX: usize = usize::MAX;
+    const HAS_MAX: bool = false;
+    const FILTER_TARGETS: bool = true;
     fn iter_edges(&self) -> Vec<[String; 2]>;
 }
 
@@ -62,13 +51,8 @@ impl Authorship {
 }
 
 impl FilterBase for Authorship {
-    fn entity_att() -> &'static str {
-        works::atts::authorships
-    }
-
-    fn get_min() -> usize {
-        MIN_PAPERS_FOR_INST as usize
-    }
+    const ENTITY_ATT: &'static str = works::atts::authorships;
+    const MIN: usize = MIN_PAPERS_FOR_INST as usize;
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
         self.iter_insts()
@@ -79,32 +63,19 @@ impl FilterBase for Authorship {
 }
 
 impl FilterBase for ReferencedWork {
-    fn entity_att() -> &'static str {
-        works::atts::referenced_works
-    }
-
-    fn get_min() -> usize {
-        MIN_CITATIONS
-    }
+    const ENTITY_ATT: &'static str = works::atts::referenced_works;
+    const MIN: usize = MIN_CITATIONS;
+    const FILTER_TARGETS: bool = false;
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
         let pid = self.parent_id.clone().unwrap();
         vec![[self.referenced_work_id.to_string(), pid]]
     }
-
-    fn filter_targets() -> bool {
-        false
-    }
 }
 
 impl FilterBase for Location {
-    fn entity_att() -> &'static str {
-        works::atts::locations
-    }
-
-    fn get_min() -> usize {
-        MIN_PAPERS_FOR_SOURCE as usize
-    }
+    const ENTITY_ATT: &'static str = works::atts::locations;
+    const MIN: usize = MIN_PAPERS_FOR_SOURCE as usize;
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
         match &self.source_id {
@@ -115,21 +86,10 @@ impl FilterBase for Location {
 }
 
 impl FilterBase for PersonAuthorship {
-    fn entity_att() -> &'static str {
-        works::atts::authorships
-    }
-
-    fn get_max() -> usize {
-        MAX_AUTHORS
-    }
-
-    fn has_max() -> bool {
-        true
-    }
-
-    fn filter_targets() -> bool {
-        true
-    }
+    const ENTITY_ATT: &'static str = works::atts::authorships;
+    const MAX: usize = MAX_AUTHORS;
+    const HAS_MAX: bool = true;
+    const FILTER_TARGETS: bool = true;
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
         if self.author.len() > 0 {
@@ -155,8 +115,7 @@ fn single_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
             & (o.work_type.as_deref().unwrap_or("") == "article")
             & (o.publication_year.unwrap_or(0) > START_YEAR)
             & (o.publication_year.unwrap_or(0) <= FINAL_YEAR)
-    })?;
-    Ok(())
+    })
 }
 
 fn author_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
@@ -206,29 +165,29 @@ where
     let [source_set_o, target_set_o] = types.map(|t| stowage.get_last_filter(t));
 
     println!(
-        "filtering {:?} - {:?} --> {:?}. pre-filtered to {} pre-filtered to {}\nMIN: {}",
+        "filtering {:?} - {:?} --> {:?}. pre-filtered to {} pre-filtered to {}",
         step_id,
         source_type,
         target_type,
         olen(&source_set_o),
         olen(&target_set_o),
-        T::get_min(),
     );
 
     let mut source_map: HashMap<u64, HashSet<u64>> = HashMap::new();
 
-    for rec in stowage.read_csv_objs::<T>(T::entity_c(), T::entity_att()) {
+    for rec in stowage.read_csv_objs::<T>(T::ENTITY_C, T::ENTITY_ATT) {
         'endloop: for ends in rec.iter_edges().into_iter() {
             let [source_key, target_key] = ends.map(|e| oa_id_parse(&e));
             for (seto, key) in [(&source_set_o, &source_key), (&target_set_o, &target_key)] {
                 if let Some(set) = seto {
                     if !set.contains(key) {
+                        //prefiltered out;
                         continue 'endloop;
                     }
                 }
             }
             let set_entry = source_map.entry(source_key).or_insert_with(HashSet::new);
-            if T::filter_targets() | (set_entry.len() < T::get_min()) | T::has_max() {
+            if T::FILTER_TARGETS | (set_entry.len() < T::MIN) | T::HAS_MAX {
                 set_entry.insert(target_key);
             }
         }
@@ -236,15 +195,15 @@ where
     let mut taken_sources = Vec::new();
     let mut taken_targets: HashSet<u64> = HashSet::new();
     for (k, v) in source_map.iter() {
-        if (v.len() >= T::get_min()) && (v.len() <= T::get_max()) {
+        if (v.len() >= T::MIN) && (v.len() <= T::MAX) {
             taken_sources.push(*k);
-            if T::filter_targets() {
+            if T::FILTER_TARGETS {
                 taken_targets.extend(v);
             }
         }
     }
 
-    if T::filter_targets() {
+    if T::FILTER_TARGETS {
         stowage.write_filter(step_id, target_type, &mut taken_targets.into_iter())?;
     }
     stowage.write_filter(step_id, source_type, &mut taken_sources.into_iter())?;

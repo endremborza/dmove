@@ -2,6 +2,7 @@ use std::env;
 use std::fmt::Debug;
 use std::io::{prelude::*, BufWriter};
 use std::ops::Range;
+use std::sync::Arc;
 use std::{
     fs::{create_dir_all, read_dir, File},
     io::{self, BufReader, Write},
@@ -19,10 +20,11 @@ use dmove::{
     BackendLoading, BigId, CompactEntity, Entity, FixAttIterator, FixWriteSizeEntity, InitEmpty,
     LoadedIdMap, MainBuilder, MappableEntity, MarkedAttribute, MetaIntegrator, NamespacedEntity,
     VarAttIterator, VarBox, VarSizedAttributeElement, VariableSizeAttribute, VattArrPair,
-    VattReadingMap,
+    VattReadingMap, ET, MAA,
 };
 
 pub type StowReader = Reader<BufReader<GzDecoder<File>>>;
+pub type BeS<M, E> = <M as BackendSelector<E>>::BE;
 
 type InIterator<T> = Tqdm<DeserializeRecordsIntoIter<BufReader<flate2::read::GzDecoder<File>>, T>>;
 
@@ -36,10 +38,16 @@ pub const ID_PREFIX: &str = "https://openalex.org/";
 
 pub struct NameMarker;
 pub struct NameExtensionMarker;
+pub struct DoiMarker;
 pub struct SemanticIdMarker;
 pub struct MainWorkMarker;
 pub struct WorkCountMarker;
 pub struct CiteCountMarker;
+pub struct RefSubfieldsArrayMarker;
+pub struct CitSubfieldsArrayMarker;
+pub struct YearlyPapersMarker;
+pub struct YearlyCitationsMarker;
+pub struct InstRelMarker;
 
 #[macro_export]
 macro_rules! add_parsed_id_traits {
@@ -76,6 +84,62 @@ macro_rules! add_parent_parsed_id_traits {
         }
         )*
     }
+}
+
+#[macro_export]
+macro_rules! make_interface_struct {
+    ($IT:ident, $($e_key:ident > $e_t:ty),*;$($f_key:ident => $f_t:ty),*; $($v_key:ident -> $v_t:ty),*; $($m_key:ident >> $m_t:ty),*) => {
+        struct $IT {
+            $($e_key: BeS<QuickAttPair, MAA<$e_t, MainWorkMarker>>,)*
+            $($f_key: BeS<QuickestBox, $f_t>,)*
+            $($v_key: BeS<QuickAttPair, $v_t>,)*
+            $($m_key: BeS<QuickMap, $m_t>,)*
+        }
+
+        impl $IT {
+            fn new(stowage: Arc<Stowage>) -> Self {
+                $(
+                    let stowage_clone = Arc::clone(&stowage);
+                    let $e_key = std::thread::spawn( move || {
+                        <$e_t as WorkLoader>::load_work_interface(stowage_clone)
+                    });
+                )*
+                $(
+                    let stowage_clone = Arc::clone(&stowage);
+                    let $f_key = std::thread::spawn( move || {
+                        stowage_clone.get_entity_interface::<$f_t, QuickestBox>()
+                    });
+                )*
+                $(
+                    let stowage_clone = Arc::clone(&stowage);
+                    let $v_key = std::thread::spawn( move || {
+                        stowage_clone.get_entity_interface::<$v_t, QuickAttPair>()
+                    });
+                )*
+                $(
+                    let stowage_clone = Arc::clone(&stowage);
+                    let $m_key = std::thread::spawn( move || {
+                        stowage_clone.get_entity_interface::<$m_t, QuickMap>()
+                    });
+                )*
+                Self {
+                    $($e_key: $e_key.join().expect("Thread panicked")),*,
+                    $($f_key: $f_key.join().expect("Thread panicked")),*,
+                    $($v_key: $v_key.join().expect("Thread panicked")),*,
+                    $($m_key: $m_key.join().expect("Thread panicked")),*
+                }
+            }
+
+            fn _fake() -> Self {
+                    Self {
+                        $($f_key: Vec::new().into()),*,
+                        $($e_key: VattArrPair::empty()),*,
+                        $($v_key: VattArrPair::empty()),*,
+                        $($m_key: HashMap::new().into()),*
+                    }
+            }
+        }
+    };
 }
 
 macro_rules! pathfields_fn {
@@ -116,8 +180,7 @@ where
     iterable: InIterator<T>,
 }
 
-//TODO: this is sort of a mess - can't tell the difference between box and vbox
-//varbox seems to be for variable sized entity
+//TODO/clarity: this is sort of a mess - could be just generic types
 pub struct Quickest {}
 pub struct QuickMap {}
 pub struct QuickestBox {}
@@ -145,6 +208,16 @@ pub trait MarkedBackendLoader<Mark>: Entity {
     type BE;
 
     fn load(stowage: &Stowage) -> Self::BE;
+}
+
+pub trait WorkLoader: MarkedAttribute<MainWorkMarker>
+where
+    MAA<Self, MainWorkMarker>: CompactEntity + VariableSizeAttribute + NamespacedEntity,
+    ET<MAA<Self, MainWorkMarker>>: VarSizedAttributeElement,
+{
+    fn load_work_interface(stowage: Arc<Stowage>) -> BeS<QuickAttPair, MAA<Self, MainWorkMarker>> {
+        stowage.get_entity_interface::<MAA<Self, MainWorkMarker>, QuickAttPair>()
+    }
 }
 
 pathfields_fn!(
@@ -405,6 +478,14 @@ where
     E: CompactEntity,
 {
     type BE = Range<E::T>;
+}
+
+impl<E> WorkLoader for E
+where
+    E: MarkedAttribute<MainWorkMarker>,
+    MAA<Self, MainWorkMarker>: CompactEntity + VariableSizeAttribute + NamespacedEntity,
+    ET<MAA<Self, MainWorkMarker>>: VarSizedAttributeElement,
+{
 }
 
 impl<T: DeserializeOwned> Iterator for ObjIter<T> {
