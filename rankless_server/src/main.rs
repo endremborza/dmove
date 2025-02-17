@@ -6,7 +6,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use dmove::{Entity, UnsignedNumber};
+use dmove::{Entity, UnsignedNumber, ET};
 use hashbrown::HashMap;
 use kd_tree::{KdPoint, KdTree};
 use rand::{seq::SliceRandom, Rng};
@@ -28,17 +28,22 @@ use tower_http::{
 use muwo_search::SearchEngine;
 use rankless_rs::{
     gen::a1_entity_mapping::{Authors, Countries, Institutions, Qs, Sources, Subfields, Topics},
+    steps::{
+        a1_entity_mapping::{RawYear, YearInterface, Years},
+        derive_links5::{EraRec, InstRelation},
+    },
     Stowage,
 };
 use rankless_trees::{
-    interfacing::{Getters, NodeInterfaces, RootInterfaceable, RootInterfaces},
+    interfacing::{Getters, NodeInterfaces, RootInterfaceable, RootInterfaces, NET},
     io::{TreeQ, TreeResponse, TreeRunManager},
     AttributeLabelUnion,
 };
 
 const N_THREADS: usize = 16;
+// const UPPER_LIMIT: u32 = 1_000_000;
+const UPPER_LIMIT: u32 = 100_000;
 
-type SemanticIdMap = HashMap<String, usize>;
 type InstTrm = TreeRunManager<(Institutions, Authors, Subfields, Countries, Sources)>;
 
 #[derive(Deserialize)]
@@ -48,12 +53,12 @@ struct BasicQ {
 
 #[derive(Serialize)]
 struct ViewResult {
-    name: String,
-    citations: usize,
-    #[serde(rename = "dmId")]
-    dm_id: usize,
-    papers: usize,
+    #[serde(flatten)]
+    sr: SearchResult,
+    #[serde(flatten)]
+    ext: ResultExtension,
     similars: Vec<SearchResult>,
+    comparisons: Vec<SearchResult>,
 }
 
 #[derive(Serialize)]
@@ -71,10 +76,29 @@ struct EntityDescription {
 struct NameState {
     engine: SearchEngine,
     responses: Box<[SearchResult]>,
+    exts: Box<[ResultExtension]>,
+    sf_touchstones: Box<[SearchResult]>,
     means: Box<[f64; 2]>,
     vars: Box<[f64; 2]>,
-    semantic_id_map: SemanticIdMap,
+    pub semantic_id_map: HashMap<String, SemVal>,
     query_tree: KdTree<KDItem>,
+}
+
+#[derive(Clone)]
+struct SemVal {
+    result_id: usize,
+    dm_id: usize,
+}
+#[derive(Serialize, Clone)]
+struct InstRelOut {
+    start: u16,
+    end: u16,
+    #[serde(rename = "semId")]
+    inst_sem_id: String,
+    #[serde(rename = "name")]
+    inst_name: String,
+    papers: u16,
+    citations: u32,
 }
 
 #[derive(Serialize, Clone)]
@@ -84,10 +108,24 @@ struct SearchResult {
     semantic_id: String,
     #[serde(skip_serializing)]
     full_name: String,
-    #[serde(skip_serializing)]
+    #[serde(rename = "dmId")]
     dm_id: usize,
     papers: u32,
     citations: u32,
+}
+
+#[derive(Serialize, Clone)]
+struct ResultExtension {
+    #[serde(rename = "instRels")]
+    inst_rels: Box<[InstRelOut]>,
+    #[serde(rename = "sfCoords")]
+    sf_coords: (f64, f64),
+    #[serde(rename = "startYear")]
+    start_year: RawYear,
+    #[serde(rename = "yearlyPapers")]
+    yearly_papers: EraRec,
+    #[serde(rename = "yearlyCites")]
+    yearly_cites: EraRec,
 }
 
 struct KDItem {
@@ -96,8 +134,12 @@ struct KDItem {
 }
 
 trait PrepFilter {
-    fn filter_sr(sr: &SearchResult) -> bool {
-        (sr.full_name.trim().len() > 0) & (sr.papers > 1) & (sr.citations > 2)
+    fn filter_sr(sr: &SearchResult, _gets: &Getters) -> bool {
+        (sr.full_name.trim().len() > 0)
+            & (sr.semantic_id.trim().len() > 0)
+            & (sr.papers > 1)
+            & (sr.citations > 2)
+            & (sr.citations <= UPPER_LIMIT)
     }
 }
 
@@ -107,11 +149,42 @@ macro_rules! i_fil {
     };
 }
 
-i_fil!(Countries, Subfields, Institutions, Sources);
+i_fil!(Countries, Subfields, Institutions);
 
 impl PrepFilter for Authors {
-    fn filter_sr(sr: &SearchResult) -> bool {
-        (sr.full_name.len() > 0) & (sr.papers > 1) & (sr.citations > 2) & (sr.papers < 1000)
+    fn filter_sr(sr: &SearchResult, _gets: &Getters) -> bool {
+        use serde_json::to_string_pretty;
+        let out = (sr.full_name.trim().len() > 0)
+            & (sr.semantic_id.trim().len() > 0)
+            & (sr.papers > 1)
+            & (sr.citations > 2)
+            & (sr.papers < 1000);
+        if [2261109, 2066590, 3253229].contains(&sr.dm_id) {
+            println!(
+                "\n\nFOUND ONE {out}\n{}\n\n\n",
+                to_string_pretty(sr).unwrap()
+            );
+        }
+        out
+    }
+}
+
+impl PrepFilter for Sources {
+    fn filter_sr(sr: &SearchResult, gets: &Getters) -> bool {
+        let id = NET::<Sources>::from_usize(sr.dm_id);
+        let mut best_q = 5;
+        for ty8 in YearInterface::iter() {
+            let q = gets.sqy(&(id, ty8)).lift();
+            if q != 0 {
+                best_q = min(best_q, q);
+            }
+        }
+        (sr.full_name.trim().len() > 0)
+            & (sr.semantic_id.trim().len() > 0)
+            & (sr.papers > 10)
+            & (sr.citations > 20)
+            & (sr.citations <= UPPER_LIMIT)
+            & (best_q <= 2)
     }
 }
 
@@ -123,42 +196,101 @@ impl KdPoint for KDItem {
     }
 }
 
+impl SearchResult {
+    fn new<E>(
+        i: usize,
+        name: String,
+        ext: String,
+        semantic_id: String,
+        entif: &RootInterfaces<E>,
+    ) -> Self
+    where
+        E: RootInterfaceable,
+    {
+        Self {
+            full_name: format!("{name} {ext}").trim().to_string(),
+            name,
+            semantic_id,
+            papers: entif.wcounts[i].to_usize() as u32,
+            citations: entif.ccounts[i].to_usize() as u32,
+            dm_id: i,
+        }
+    }
+}
+
+impl ResultExtension {
+    fn from_resps<E>(
+        responses: &Box<[SearchResult]>,
+        entif: &RootInterfaces<E>,
+        gets: &Getters,
+    ) -> Box<[Self]>
+    where
+        E: RootInterfaceable,
+    {
+        let iif = RootInterfaces::<Institutions>::new(&gets.stowage);
+        let mut out = Vec::new();
+        for res in responses.iter() {
+            let i = res.dm_id;
+            let inst_rels = entif.inst_rels[i]
+                .iter()
+                .take_while(|e| e.papers > 0)
+                .map(|e| InstRelOut::from(e, &iif, gets))
+                .collect();
+
+            let mut sy_ind = 0;
+            for (yi, ycount) in entif.yearly_papers[i].iter().enumerate() {
+                if (sy_ind == 0) & (*ycount > 0) {
+                    sy_ind = yi;
+                    break;
+                }
+            }
+            // let get_rem = |arr: &Box<[EraRec]>| arr[i].iter().skip(sy_ind).map(|e| *e).collect();
+            // let yearly_cites = get_rem(&entif.yearly_cites);
+            // let yearly_papers = get_rem(&entif.yearly_papers);
+
+            out.push(Self {
+                inst_rels,
+                sf_coords: (entif.ref_sfc[i], entif.cit_sfc[i]),
+                start_year: YearInterface::reverse(sy_ind as ET<Years>),
+                yearly_cites: entif.yearly_cites[i].clone(),
+                yearly_papers: entif.yearly_papers[i].clone(),
+            })
+        }
+
+        out.into()
+    }
+}
+
 impl NameState {
-    fn new<E>(entif: &RootInterfaces<E>) -> Self
+    fn new<E>(entif: &RootInterfaces<E>, gets: &Getters) -> Self
     where
         E: RootInterfaceable + PrepFilter,
     {
-        let mut responses: Vec<SearchResult> = entif
-            .names
-            .0
-            .iter()
-            .zip(entif.name_exts.0.iter())
-            .zip(entif.sem_ids.0.iter())
-            .enumerate()
-            .map(|(i, ((name, ext), semantic_id))| SearchResult {
-                full_name: format!("{} {}", name, ext).trim().to_string(),
-                name: name.to_string(),
-                semantic_id: semantic_id.to_string(),
-                papers: entif.wcounts[i].to_usize() as u32,
-                citations: entif.ccounts[i].to_usize() as u32,
-                dm_id: i,
-            })
-            .filter(|sr| E::filter_sr(sr))
-            .collect();
-        responses.sort_by_key(|e| u32::MAX - e.citations);
+        let responses = Self::get_resps(entif, gets);
+        let exts = ResultExtension::from_resps(&responses, entif, gets);
         let engine = SearchEngine::new(responses.iter().map(|e| e.full_name.clone()));
         let mut sem_map = HashMap::new();
         let mut kdt_base = Vec::new();
-        let mut means = [0.0, 0.0];
-        let mut vars = [0.0, 0.0];
+        let mut sf_kdt_base = Vec::new();
+        let (mut means, mut vars) = ([0.0, 0.0], [0.0, 0.0]);
         let float_n = f64::from(responses.len() as u32);
+        let n_max_comps: usize = min(max(20, responses.len() / 20), 1000);
         for (i, res) in responses.iter().enumerate() {
             let kd_rec = get_arr_base(res);
-            for i in 0..kd_rec.len() {
-                means[i] += kd_rec[i] / float_n;
+            for j in 0..kd_rec.len() {
+                means[j] += kd_rec[j] / float_n;
             }
             kdt_base.push(kd_rec);
-            sem_map.insert(res.semantic_id.clone(), i);
+            if i < n_max_comps {
+                sf_kdt_base.push([exts[i].sf_coords.0, exts[i].sf_coords.1]);
+            }
+            sem_map.insert(
+                res.semantic_id.clone(),
+                SemVal {
+                    result_id: i,
+                    dm_id: responses[i].dm_id,
+                },
+            );
         }
 
         for rec in kdt_base.iter_mut() {
@@ -174,30 +306,102 @@ impl NameState {
             }
         }
 
-        let query_tree = KdTree::build_by_ordered_float(
-            kdt_base
-                .into_iter()
-                .enumerate()
-                .map(|(id, point)| KDItem { id, point })
-                .collect(),
-        );
+        let query_tree = tree_from_iter(kdt_base);
+        let sf_tree = tree_from_iter(sf_kdt_base);
+
+        let mut sf_touchstones = Vec::new();
+        const ENDS: [f64; 2] = [-100.0, 100.0];
+        for x in ENDS {
+            for y in ENDS {
+                let query = [x, y];
+                let mut poss_tss: Vec<usize> = sf_tree
+                    .nearests(&query, 2)
+                    .iter()
+                    .map(|e| e.item.id.clone())
+                    .collect();
+                if coord_dist(&exts[poss_tss[0]], &exts[poss_tss[1]]) < 0.2 {
+                    poss_tss.pop();
+                }
+                sf_touchstones.extend(poss_tss.iter().map(|e| responses[*e].clone()));
+            }
+        }
 
         Self {
             engine: engine.into(),
-            responses: responses.into(),
+            responses,
+            exts,
             semantic_id_map: sem_map.into(),
-            query_tree: query_tree.into(),
+            query_tree,
             means: means.into(),
             vars: vars.into(),
+            sf_touchstones: sf_touchstones.into(),
+        }
+    }
+
+    fn get_resps<E>(entif: &RootInterfaces<E>, gets: &Getters) -> Box<[SearchResult]>
+    where
+        E: RootInterfaceable + PrepFilter,
+    {
+        let mut responses: Vec<SearchResult> = entif
+            .names
+            .0
+            .iter()
+            .zip(entif.name_exts.0.iter())
+            .zip(entif.sem_ids.0.iter())
+            .enumerate()
+            .map(|(i, ((name, ext), semantic_id))| {
+                SearchResult::new(
+                    i,
+                    name.to_string(),
+                    ext.to_string(),
+                    semantic_id.to_string(),
+                    entif,
+                )
+            })
+            .filter(|sr| E::filter_sr(sr, gets))
+            .collect();
+        responses.sort_by_key(|e| u32::MAX - e.citations);
+        responses.into()
+    }
+}
+
+fn coord_dist(l: &ResultExtension, r: &ResultExtension) -> f64 {
+    (l.sf_coords.0 - r.sf_coords.0).powf(2.0) + (l.sf_coords.1 - r.sf_coords.1).powf(2.0)
+}
+
+impl EntityDescription {
+    fn new<E: Entity>(count: usize) -> Self {
+        Self {
+            name: <E as Entity>::NAME.to_string(),
+            count,
         }
     }
 }
 
-impl EntityDescription {
-    fn new<E: Entity>() -> Self {
+impl InstRelOut {
+    fn from(v: &InstRelation, iif: &RootInterfaces<Institutions>, gets: &Getters) -> Self {
+        let iid = v.inst.to_usize();
+        let inst_name = iif.names.0.get(iid).unwrap().clone();
+        let mut inst_sem_id = iif.sem_ids.0.get(iid).unwrap().clone();
+
+        let i_sr = SearchResult::new(
+            iid,
+            inst_name.to_string(),
+            "".to_string(),
+            inst_sem_id.to_string(),
+            iif,
+        );
+        if !Institutions::filter_sr(&i_sr, gets) {
+            inst_sem_id = "".to_string();
+        }
+
         Self {
-            name: <E as Entity>::NAME.to_string(),
-            count: <E as Entity>::N,
+            start: YearInterface::reverse(v.start),
+            end: YearInterface::reverse(v.end),
+            inst_name,
+            inst_sem_id,
+            citations: v.citations,
+            papers: v.papers,
         }
     }
 }
@@ -205,14 +409,14 @@ impl EntityDescription {
 macro_rules! multi_route {
     ($s: ident, $($T: ty),*) => {
         {
+            let gets = Arc::new(Getters::new(Arc::new($s)));
             let static_att_union: Arc<Mutex<AttributeLabelUnion>> = Arc::new(Mutex::new(HashMap::new()));
             let mut ei_ns_map = HashMap::new();
             let cv_pair = Arc::new((Mutex::new(None), Condvar::new()));
             $(
-                add_thread::<$T>(&$s, &static_att_union, &cv_pair, &mut ei_ns_map);
+                add_thread::<$T>(&gets, &static_att_union, &cv_pair, &mut ei_ns_map);
             )*
 
-            let gets = Getters::new($s.clone());
             let ccount = gets.total_cite_count();
             {
                 let (lock, cvar) = &*cv_pair;
@@ -220,10 +424,12 @@ macro_rules! multi_route {
                 *data = Some(ccount);
                 cvar.notify_all();
             }
-            NodeInterfaces::<Topics>::new(&$s).update_stats(&mut static_att_union.lock().unwrap(), ccount);
-            NodeInterfaces::<Qs>::new(&$s).update_stats(&mut static_att_union.lock().unwrap(), ccount);
+            NodeInterfaces::<Topics>::new(&gets.stowage).update_stats(&mut static_att_union.lock().unwrap(), ccount);
+            NodeInterfaces::<Qs>::new(&gets.stowage).update_stats(&mut static_att_union.lock().unwrap(), ccount);
 
             let mut tops = Vec::new();
+            let mut v = Vec::new();
+            let mut sem_maps = HashMap::new();
             let name_state_route = Router::new()
             $(.route(&format!("/names/{}", <$T as Entity>::NAME), get(name_get))
                 .route(&format!("/slice/{}/:from/:to", <$T as Entity>::NAME), get(slice_get))
@@ -231,36 +437,39 @@ macro_rules! multi_route {
                 .with_state({
                     let nstate = ei_ns_map.remove(<$T>::NAME).unwrap().join().expect("NState thread panicked");
                     let entities = top_slice(&nstate.responses);
-                    tops.push(
-                        TopResult {name: <$T as Entity>::NAME.to_string(), entities }
-                    );
+                    let name = <$T as Entity>::NAME.to_string();
+                    let dmid_map = HashMap::from_iter(nstate.semantic_id_map.clone().into_iter().map(|(k, v)| (k, v.dm_id)));
+                    sem_maps.insert(name.clone(), dmid_map);
+                    tops.push(TopResult {name,  entities });
+                    v.push(EntityDescription::new::<$T>(nstate.responses.len()));
                     nstate.into()
                 })
             )*;
+            for t in ei_ns_map.into_values() {
+                t.join().unwrap();
+            }
 
-            let tm: Arc<InstTrm> = TreeRunManager::new(gets, static_att_union, N_THREADS);
-            let mut v = Vec::new();
-            $(v.push(EntityDescription::new::<$T>());)*
 
+            let tm: Arc<InstTrm> = TreeRunManager::new(gets, static_att_union, sem_maps, N_THREADS);
             (name_state_route, tm, v, tops)
         }
     };
 }
 
 fn add_thread<E>(
-    stowgae: &Arc<Stowage>,
+    gets: &Arc<Getters>,
     atts: &Arc<Mutex<AttributeLabelUnion>>,
     cv_pair: &Arc<(Mutex<Option<f64>>, Condvar)>,
     ei_ns_map: &mut HashMap<&'static str, JoinHandle<NameState>>,
 ) where
     E: RootInterfaceable + PrepFilter,
 {
-    let stowage_clone = Arc::clone(&stowgae);
+    let gets_clone = Arc::clone(&gets);
     let au_clone = Arc::clone(&atts);
     let shared_cvp = Arc::clone(&cv_pair);
     let thread = std::thread::spawn(move || {
-        let ent_intf = RootInterfaces::<E>::new(&stowage_clone);
-        let nstate = NameState::new::<E>(&ent_intf);
+        let ent_intf = RootInterfaces::<E>::new(&gets_clone.stowage);
+        let nstate = NameState::new::<E>(&ent_intf, &gets_clone);
         let (lock, cvar) = &*shared_cvp;
         let mut data = lock.lock().unwrap();
         while data.is_none() {
@@ -286,9 +495,15 @@ async fn main() {
         .gzip(true)
         .quality(CompressionLevel::Fastest);
 
-    let astow = Arc::new(Stowage::new(&path));
-    let (response_api, tree_manager, entity_descriptions, tops) =
-        multi_route!(astow, Authors, Institutions, Sources, Subfields, Countries);
+    let stowage = Stowage::new(&path);
+    let (response_api, tree_manager, entity_descriptions, tops) = multi_route!(
+        stowage,
+        Authors,
+        Institutions,
+        Sources,
+        Subfields,
+        Countries
+    );
 
     let count_api = static_router(&entity_descriptions);
     let specs_api = static_router(&tree_manager.specs);
@@ -298,8 +513,8 @@ async fn main() {
         .with_state(Arc::new(tops));
 
     let tree_api = Router::new()
-        .route("/:root_type", get(tree_get))
-        .with_state(tree_manager);
+        .route("/:root_type/:semantic_id", get(tree_get))
+        .with_state(tree_manager.clone());
 
     let api = Router::new()
         .nest("/", response_api)
@@ -338,11 +553,11 @@ async fn state_get(str_state: State<Arc<str>>) -> (HeaderMap, Response<Body>) {
 }
 
 async fn tree_get(
-    Path(root_type): Path<String>,
+    Path((root_type, semantic_id)): Path<(String, String)>,
     tree_q: Query<TreeQ>,
     state: State<Arc<InstTrm>>,
 ) -> (HeaderMap, Json<Option<TreeResponse>>) {
-    let resp = Json(state.get_resp(tree_q.0, &root_type));
+    let resp = Json(state.get_resp(tree_q.0, &root_type, &semantic_id));
     (cache_header(60), resp)
 }
 
@@ -368,19 +583,14 @@ async fn tops_get(tops_state: State<Arc<Vec<TopResult>>>) -> Json<Vec<TopResult>
 async fn view_get(
     Path(semantic_id): Path<String>,
     state: State<Arc<NameState>>,
-) -> Json<ViewResult> {
-    let default = ViewResult {
-        name: "-".to_string(),
-        citations: 0,
-        papers: 0,
-        dm_id: 0,
-        similars: Vec::new(),
-    };
+) -> Json<Option<ViewResult>> {
     let iopt = state.semantic_id_map.get(&semantic_id);
     let out = match iopt {
-        None => default,
-        Some(i) => {
-            let srs = &state.responses[*i];
+        None => None,
+        Some(sem_val) => {
+            let i = sem_val.result_id;
+            let srs = &state.responses[i];
+            let ext = &state.exts[i];
             let query = get_query_arr(&srs, &state);
             let n_close = min(state.responses.len() / 20, 500);
             let mut closes = state.query_tree.nearests(&query, n_close);
@@ -388,16 +598,18 @@ async fn view_get(
             let similars = closes
                 .iter()
                 .take(8)
-                .filter(|e| e.item.id != *i)
+                .filter(|e| e.item.id != i)
                 .map(|e| state.responses[e.item.id].clone())
                 .collect();
-            ViewResult {
-                name: srs.name.clone(),
-                dm_id: srs.dm_id.clone(),
-                citations: srs.citations as usize,
-                papers: srs.papers as usize,
+
+            let comparisons = state.sf_touchstones.clone().to_vec();
+            let vr = ViewResult {
                 similars,
-            }
+                comparisons,
+                ext: ext.clone(),
+                sr: srs.clone(),
+            };
+            Some(vr)
         }
     };
     Json(out)
@@ -453,4 +665,13 @@ fn top_slice<T: Clone>(v: &Box<[T]>) -> Vec<T> {
 fn static_router<O: Serialize>(o: &O) -> Router {
     let arc: Arc<str> = Arc::from(serde_json::to_string(o).unwrap().as_str());
     Router::new().route("/", get(state_get)).with_state(arc)
+}
+
+fn tree_from_iter(v: Vec<[f64; 2]>) -> KdTree<KDItem> {
+    KdTree::build_by_ordered_float(
+        v.into_iter()
+            .enumerate()
+            .map(|(id, point)| KDItem { id, point })
+            .collect(),
+    )
 }
