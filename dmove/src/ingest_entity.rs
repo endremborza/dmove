@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{create_dir_all, File};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -126,7 +126,9 @@ impl IdMap {
         let map_buffer = PathBuf::from(id_map_path);
         let mut current_non_null_count: u64 = 0;
         if !map_buffer.is_file() {
-            File::create(&map_buffer).unwrap();
+            let msg = format!("trying to create {map_buffer:?}");
+            create_dir_all(&map_buffer.parent().expect(&msg)).expect(&msg);
+            File::create(&map_buffer).expect(&msg);
         } else {
             current_non_null_count = file_record_count(&File::open(&map_buffer).unwrap());
         }

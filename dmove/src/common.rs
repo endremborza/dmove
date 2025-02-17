@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeSet, VecDeque},
+    fmt::Debug,
     fs::File,
     io::{self, Write},
     path::PathBuf,
@@ -7,12 +8,12 @@ use std::{
     sync::{Arc, Condvar, Mutex},
 };
 
-use dmove_macro::{def_me_struct, derive_meta_trait};
+use dmove_macro::{def_me_struct, derive_meta_trait, impl_fbarrs};
 use hashbrown::{HashMap, HashSet};
 
 pub const MAX_BUF: usize = 0x1000;
-pub const MAX_NUMBUF: usize = 0x10;
-pub const MAX_FIXBUF: usize = 0x100;
+pub const MAX_NUMBUF: usize = 0x20;
+pub const MAX_FIXBUF: usize = 0x400;
 
 const PACK_NAME: &'static str = "dmove";
 
@@ -49,7 +50,7 @@ where
     E: Entity + MappableEntity,
 {
     fn get_via_immut(&self, k: &E::KeyType) -> Option<E::T>;
-    //TODO: offer unsafe/unchecked, faster options
+    //TODO/performance: offer unsafe/unchecked, faster options
 }
 
 pub trait EntityImmutableRefMapperBackend<E>
@@ -283,26 +284,20 @@ impl ByteArrayInterface for String {
     }
 }
 
-impl<F, L> ByteFixArrayInterface for (F, L)
-where
-    F: ByteFixArrayInterface,
-    L: ByteFixArrayInterface,
-{
-    const S: usize = F::S + L::S;
-    fn to_fbytes(&self) -> Box<[u8]> {
-        let mut o = self.0.to_fbytes().to_vec();
-        o.extend(self.1.to_fbytes());
-        o.into()
-    }
-    fn from_fbytes(buf: &[u8]) -> Self {
-        let fsize = size_of::<F>();
-        (F::from_fbytes(&buf[..fsize]), L::from_fbytes(&buf[fsize..]))
-    }
-}
+impl_fbarrs!(6);
 
 impl<T> InitEmpty for Option<T> {
     fn init_empty() -> Self {
         None
+    }
+}
+
+impl<T, const S: usize> InitEmpty for [T; S]
+where
+    T: InitEmpty,
+{
+    fn init_empty() -> Self {
+        [(); S].map(|_| T::init_empty())
     }
 }
 
@@ -321,6 +316,31 @@ where
 {
     fn init_empty() -> Self {
         (Mutex::new(T::init_empty()), Condvar::new())
+    }
+}
+
+impl<T, const AS: usize> ByteFixArrayInterface for [T; AS]
+where
+    T: ByteFixArrayInterface + Debug,
+{
+    const S: usize = AS * T::S;
+    fn to_fbytes(&self) -> Box<[u8]> {
+        let mut out = Vec::new();
+        for e in self.iter() {
+            out.extend(e.to_fbytes().iter())
+        }
+        out.into()
+    }
+
+    fn from_fbytes(buf: &[u8]) -> Self {
+        let size = T::S;
+        let mut out = Vec::new();
+        let (mut s, mut e) = (0, size);
+        while e <= buf.len() {
+            out.push(T::from_fbytes(&buf[s..e]));
+            (s, e) = (e, e + size);
+        }
+        out.try_into().unwrap()
     }
 }
 
@@ -472,6 +492,10 @@ pub fn get_type_name<T>() -> String {
 }
 
 fn clean_name(base_name: String) -> String {
+    if base_name.starts_with("[") {
+        assert!(base_name.ends_with("]"));
+        return "[".to_owned() + &clean_name(base_name[1..].to_string());
+    }
     let mut base_iter = base_name.split("::");
 
     let mut clean_blocks = Vec::new(); // x::y::v<a::b::c> -> x, y, v<cleaned>

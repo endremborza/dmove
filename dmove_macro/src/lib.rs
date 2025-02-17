@@ -65,6 +65,49 @@ pub fn impl_subs(ts: TokenStream) -> TokenStream {
     .into()
 }
 
+#[proc_macro]
+pub fn impl_fbarrs(ts: TokenStream) -> TokenStream {
+    let maxn: usize = ts.to_string().parse().unwrap();
+    let mut out = Vec::new();
+    for n in 2..(maxn + 1) {
+        let ts = prefed(0..n, "T");
+        let t_wheres = cjoin((0..n).map(|e| format!("T{e}: ByteFixArrayInterface")));
+        let t_sum = join((0..n).map(|e| format!("T{e}::S")), " + ");
+        let o_extends = join(
+            (1..n).map(|e| format!("o.extend(self.{e}.to_fbytes());")),
+            "\n",
+        );
+        let mut ends = vec!["0".to_string()];
+        ends.extend((0..n).map(|e| join((0..(e + 1)).map(|j| format!("T{j}::S")), " + ")));
+        let tupelems =
+            cjoin((0..n).map(|e| format!("T{e}::from_fbytes(&buf[{}..{}])", ends[e], ends[e + 1])));
+
+        let impl_str = format!(
+            "
+    impl<{ts}> ByteFixArrayInterface for ({ts})
+    where
+        {t_wheres}
+    {{
+        const S: usize = {t_sum};
+        fn to_fbytes(&self) -> Box<[u8]> {{
+            let mut o = self.0.to_fbytes().to_vec();
+            {o_extends}
+            o.into()
+        }}
+        fn from_fbytes(buf: &[u8]) -> Self {{
+            (
+                {tupelems}
+            )
+        }}
+    }}
+    
+"
+        );
+        out.push(impl_str);
+    }
+    TokenStream::from_str(&out.join("\n\n")).unwrap()
+}
+
 #[proc_macro_attribute]
 pub fn derive_meta_trait(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut out = item.clone();
@@ -101,7 +144,7 @@ pub fn derive_meta_trait(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         let var_name = c.ident.to_string();
                         let ty = c.ty.to_token_stream().to_string();
                         apush(&var_name, &ty, true);
-                        meta_fmt_ext.push(format!("const {var_name}: {ty} = "));
+                        meta_fmt_ext.push(format!("const {var_name}: {ty} ="));
                         let mext = if ty == "& str" { "\\\"{}\\\"" } else { "{}" };
                         meta_fmt_ext.push(format!("{mext};"));
                     }
@@ -393,6 +436,63 @@ pub fn impl_stack_basees(ts: TokenStream) -> TokenStream {
     TokenStream::from_str(&out).unwrap()
 }
 
+#[proc_macro_derive(ByteFixArrayInterface)]
+pub fn derive_farr(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::Item);
+
+    if let syn::Item::Struct(sdef) = input {
+        let ident = sdef.ident;
+        let mut names = Vec::new();
+        let mut type_names = Vec::new();
+        let mut type_sizes = Vec::new();
+        match sdef.fields {
+            syn::Fields::Named(fnames) => {
+                fnames.named.iter().for_each(|e| {
+                    names.push(e.ident.to_token_stream().to_string());
+                    let tys = e.ty.to_token_stream().to_string();
+                    type_names.push(tys.clone());
+                    type_sizes.push(format!("<{tys} as ByteFixArrayInterface>::S"));
+                });
+            }
+            _ => panic!("so far, only names"),
+        }
+        let size_expr: syn::Expr = parse_exp(join(type_sizes.clone().into_iter(), " + "));
+        let ext_lines = join(
+            names
+                .iter()
+                .map(|e| format!("out.extend(self.{e}.to_fbytes());")),
+            "\n",
+        );
+        let ext_stmt: syn::Stmt = parse_exp(format!("{{ {ext_lines} }}"));
+        let mut fb_reads = Vec::new();
+        type_sizes.insert(0, "0".to_string());
+        for (i, tname) in type_names.iter().enumerate() {
+            let si = join(type_sizes[..(i + 1)].iter().map(String::clone), " + ");
+            let ei = join(type_sizes[..(i + 2)].iter().map(String::clone), " + ");
+            let field = names[i].clone();
+            fb_reads.push(format!("{field}: {tname}::from_fbytes(&buf[{si}..{ei}]),"));
+        }
+        let self_t: syn::Expr =
+            parse_exp(format!("Self {{ {} }}", join(fb_reads.into_iter(), "\n")));
+        return quote! {
+            impl ByteFixArrayInterface for #ident {
+                const S: usize = #size_expr;
+                fn to_fbytes(&self) -> Box<[u8]> {
+                    let mut out: Vec<u8> = Vec::new();
+                    #ext_stmt
+                    out.into()
+                }
+
+                fn from_fbytes(buf: &[u8]) -> Self {
+                    #self_t
+                }
+            }
+        }
+        .into();
+    }
+    panic!("not struct def");
+}
+
 fn derive_stack_basis(n: usize) -> TokenStream {
     let mut in_types = (1..(n + 1)).map(get_gen_basis).collect::<Vec<String>>();
     let all_gens = format!("<{}>", cjoin((1..(n + 1)).map(get_gen_set)));
@@ -530,6 +630,10 @@ fn spec_match(rec_size: usize, last_si: usize) -> String {
     }
     lines.push(format!("stack.{last_si}.consume(rec.0)"));
     join(lines.iter().map(|e| format!("            {e}")), ";\n")
+}
+
+fn parse_exp<T: syn::parse::Parse>(s: String) -> T {
+    parse_str(&s).expect(&format!("tried: {s}"))
 }
 
 fn sarg(arg: &str) -> String {
