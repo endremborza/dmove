@@ -17,12 +17,14 @@ fn main() {
         e_ind.add_assign(1);
     }
 
+    let year = 2025;
     let env_dependent_vars = vec![
+        ("FINAL_YEAR", [year, year, year, year]),
         ("START_YEAR", [1990, 1990, 1980, 1950]),
         ("MIN_PAPERS_FOR_INST", [40, 20, 30, 500]),
         ("MIN_PAPERS_FOR_SOURCE", [10, 20, 50, 200]),
-        ("MIN_AUTHOR_WORK_COUNT", [10, 10, 10, 10]),
-        ("MIN_AUTHOR_CITE_COUNT", [500, 500, 500, 1000]),
+        ("MIN_AUTHOR_WORK_COUNT", [10, 10, 10, 8]),
+        ("MIN_AUTHOR_CITE_COUNT", [500, 500, 500, 400]),
         // ("MIN_AUTHOR_H_INDEX", [3, 3, 3, 5]),
         // ("MIN_AUTHOR_I10_INDEX", [2, 2, 2, 3]),
     ];
