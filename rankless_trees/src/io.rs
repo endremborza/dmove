@@ -23,7 +23,7 @@ use rankless_rs::{
     },
 };
 
-use dmove::{BigId, Entity, InitEmpty, UnsignedNumber, ET};
+use dmove::{BigId, Entity, InitEmpty, ET};
 
 use crate::{ids::get_atts, instances::TreeGetter, interfacing::Getters, AttributeLabelUnion};
 
@@ -50,6 +50,7 @@ pub struct TreeBasisState {
 pub struct TreeRunManager<T> {
     state: Arc<TreeBasisState>,
     pub specs: TreeSpecs,
+    semantic_id_maps: HashMap<String, HashMap<String, usize>>,
     thread_pool: Vec<JoinHandle<()>>,
     cv_pair: BasisCvp,
     p: PhantomData<T>,
@@ -90,10 +91,10 @@ pub struct AttributeLabelOut {
 
 #[derive(Deserialize, Clone)]
 pub struct TreeQ {
-    pub eid: u32,
     pub year: Option<u16>,
     pub tid: Option<u8>,
     pub connections: Option<String>,
+    pub big: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -141,6 +142,12 @@ pub struct TreeSpec {
     #[serde(rename = "rootType")]
     pub root_type: String,
     pub breakdowns: Vec<BreakdownSpec>,
+    #[serde(rename = "defaultIsSpec")]
+    pub is_spec: bool,
+    #[serde(rename = "allowSpec")]
+    pub allow_spec: bool,
+    #[serde(rename = "defaultYear")]
+    pub default_partition: u16,
 }
 
 #[derive(Serialize)]
@@ -354,12 +361,17 @@ impl JsSerChildren {
 pub trait RunManagerSub {
     fn fill_res_cvp(state: &TreeBasisState, fq: FullTreeQuery, res_cvp: ResCvp);
     fn get_specs() -> TreeSpecs;
-    fn make_fq(q: TreeQ, root_type: &String, specs: &TreeSpecs) -> Option<FullTreeQuery> {
+    fn make_fq(
+        q: TreeQ,
+        eid: usize,
+        root_type: &String,
+        specs: &TreeSpecs,
+    ) -> Option<FullTreeQuery> {
         let etype = specs.to_eid(root_type)?;
         let ck = CacheKey {
             etype,
             tid: q.tid.unwrap_or(0),
-            eid: q.eid.to_usize(),
+            eid,
         };
         let period = WorkPeriods::from_year(q.year.unwrap_or(START_YEAR));
         let fq = FullTreeQuery {
@@ -380,11 +392,17 @@ impl<T> TreeRunManager<T>
 where
     T: RunManagerSub,
 {
-    pub fn new(gets: Getters, atts: Arc<Mutex<AttributeLabelUnion>>, n: usize) -> Arc<Self> {
+    pub fn new(
+        gets: Arc<Getters>,
+        atts: Arc<Mutex<AttributeLabelUnion>>,
+        maps: HashMap<String, HashMap<String, usize>>,
+        n: usize,
+    ) -> Arc<Self> {
         let specs = T::get_specs();
         let att_union = Arc::into_inner(atts).unwrap().into_inner().unwrap();
         let thread_pool = Vec::new();
-        let mut state = TreeBasisState::new(gets, att_union);
+        let mut state =
+            TreeBasisState::new(Arc::into_inner(gets).expect("gets for state"), att_union);
         state.fill_cache(&specs);
 
         Arc::new(
@@ -392,6 +410,7 @@ where
                 state: Arc::new(state),
                 thread_pool,
                 specs,
+                semantic_id_maps: maps,
                 cv_pair: BasisCvp::init_empty(),
                 p: PhantomData,
             }
@@ -399,9 +418,15 @@ where
         )
     }
 
-    pub fn get_resp(&self, q: TreeQ, root_type: &String) -> Option<TreeResponse> {
+    pub fn get_resp(
+        &self,
+        q: TreeQ,
+        root_type: &String,
+        semantic_id: &String,
+    ) -> Option<TreeResponse> {
         let res_cvp = ResCvp::init_empty();
-        let fq = T::make_fq(q, root_type, &self.specs)?;
+        let eid = self.semantic_id_maps.get(root_type)?.get(semantic_id)?;
+        let fq = T::make_fq(q, *eid, root_type, &self.specs)?;
         self.add_to_queue(Some(fq), res_cvp.clone());
         {
             let (lock, cvar) = &*res_cvp;
@@ -425,7 +450,9 @@ where
     pub fn fake() -> Arc<Self> {
         let gets = Getters::fake();
         let atts = Mutex::new(HashMap::new());
-        Self::new(gets, atts.into(), 2)
+        let tm = HashMap::from_iter(vec![("0".to_string(), 0)].into_iter());
+        let maps = HashMap::from_iter(vec![("test".to_string(), tm)].into_iter());
+        Self::new(Arc::new(gets), atts.into(), maps, 2)
     }
 
     fn add_to_queue(&self, fq: Option<FullTreeQuery>, res_cvp: ResCvp) {

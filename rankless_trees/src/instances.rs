@@ -1,12 +1,20 @@
 use std::vec::IntoIter;
 
 use crate::{
-    components::{IntX, PartitioningIterator, StackBasis, StackFr},
+    components::{
+        CiteSubSourceTop, CitingCoInstSuToByRef, CitingCoSuToByRef, CitingSourceCoSuByRef,
+        CountryBesties, CountryInstsPost, FullRefCountryInstSubfieldByRef, InstBesties, IntX,
+        PostRefIterWrap, QedInf, RefSubCiSubTByRef, SourceSubfieldCiCoByRef, SourceWCoiByRef,
+        StackBasis, StackFr, SubfieldCountryInstByRef, SubfieldCountryInstSourceByRef,
+        SubfieldCountryInstSubfieldByRef, SubfieldRefTopicCountryInst, SubfieldWCoiByRef,
+        WorkingAuthors,
+    },
     interfacing::{Getters, NumberedEntity, NET},
     io::{
         BufSerChildren, BufSerTree, CollapsedNode, FullTreeQuery, ResCvp, TreeBasisState, TreeQ,
         TreeResponse, TreeSpec, WorkCiteT, WorkWInd, WT,
     },
+    part_iterator::PartitioningIterator,
 };
 use muwo_search::{ordered_calls, sorted_iters_to_arr, ExtendableArr, OrderedMapper};
 use rankless_rs::{
@@ -296,7 +304,7 @@ impl ReinstateFrom<WT> for WorkTree {
     }
 }
 
-//TODO - low-prio - these could be derived
+//TODO/clarity - low-prio - these could be derived
 impl InitEmpty for CollapsedNode {
     fn init_empty() -> Self {
         Self {
@@ -479,22 +487,21 @@ impl<C> FoldStackBase<C> for WorkTree {
 
 #[derive_tree_getter(Authors)]
 mod author_trees {
-    use super::*;
-    use crate::components::{CitingCoSuToByRef, PostRefIterWrap, WCoIByRef};
 
-    pub type Tree1<'a> = PostRefIterWrap<'a, Authors, CitingCoSuToByRef<'a>>;
-    pub type Tree2<'a> = PostRefIterWrap<'a, Authors, WCoIByRef<'a>>;
+    use super::*;
+
+    pub type Tree1<'a> = PostRefIterWrap<'a, Authors, SourceWCoiByRef<'a>>;
+    pub type Tree2<'a> = PostRefIterWrap<'a, Authors, CitingCoSuToByRef<'a>>;
+    pub type Tree3<'a> = PostRefIterWrap<'a, Authors, SubfieldCountryInstSubfieldByRef<'a>>;
+    pub type Tree4<'a> = PostRefIterWrap<'a, Authors, SubfieldWCoiByRef<'a>>;
+    pub type Tree5<'a> = PostRefIterWrap<'a, Authors, RefSubCiSubTByRef<'a>>;
+    pub type Tree6<'a> = PostRefIterWrap<'a, Authors, CitingCoInstSuToByRef<'a>>;
+    pub type Tree7<'a> = PostRefIterWrap<'a, Authors, SourceSubfieldCiCoByRef<'a>>;
 }
 
 #[derive_tree_getter(Institutions)]
 mod inst_trees {
     use super::*;
-
-    use crate::components::{
-        CiteSubSourceTop, CitingCoInstSuToByRef, CitingSourceCoSuByRef, InstBesties,
-        PostRefIterWrap, QedInf, RefSubCiSubTByRef, SubfieldCountryInstSourceByRef,
-        SubfieldCountryInstSubfieldByRef, WorkingAuthors,
-    };
 
     pub type Tree1<'a> = PostRefIterWrap<'a, Institutions, RefSubCiSubTByRef<'a>>;
     pub type Tree2<'a> = PostRefIterWrap<'a, Institutions, CiteSubSourceTop<'a>>;
@@ -510,8 +517,6 @@ mod inst_trees {
 #[derive_tree_getter(Countries)]
 mod country_trees {
 
-    use crate::components::{CountryBesties, CountryInstsPost, SubfieldCountryInstByRef};
-
     use super::*;
 
     pub type Tree1<'a> = CountryInstsPost<
@@ -525,18 +530,26 @@ mod country_trees {
         ),
     >;
     pub type Tree2<'a> = CountryBesties<'a>;
+    pub type Tree3<'a> = CountryInstsPost<
+        'a,
+        SourceSubfieldCiCoByRef<'a>,
+        (
+            IntX<Institutions, 0, true>,
+            IntX<Sources, 1, true>,
+            IntX<Subfields, 2, true>,
+            IntX<Countries, 3, false>,
+        ),
+    >;
 }
 
 #[derive_tree_getter(Sources)]
 mod source_trees {
-    use crate::components::{
-        FullRefCountryInstSubfieldByRef, PostRefIterWrap, SubfieldCountryInstSourceByRef,
-    };
 
     use super::*;
 
     pub type Tree1<'a> = PostRefIterWrap<'a, Sources, SubfieldCountryInstSourceByRef<'a>>;
     pub type Tree2<'a> = PostRefIterWrap<'a, Sources, FullRefCountryInstSubfieldByRef<'a>>;
+    pub type Tree3<'a> = PostRefIterWrap<'a, Sources, CitingSourceCoSuByRef<'a>>;
 }
 
 #[derive_tree_getter(Subfields)]
@@ -545,7 +558,8 @@ mod subfield_trees {
 
     use super::*;
 
-    pub type Tree1<'a> = PostRefIterWrap<'a, Subfields, FullRefSourceCountryInstByRef<'a>>;
+    pub type Tree1<'a> = SubfieldRefTopicCountryInst<'a>;
+    pub type Tree2<'a> = PostRefIterWrap<'a, Subfields, FullRefSourceCountryInstByRef<'a>>;
 }
 
 pub mod test_tools {
@@ -646,7 +660,7 @@ pub mod big_test_tree {
         }
     }
 
-    pub fn get_big_tree(n: usize) -> TreeResponse {
+    pub fn get_big_tree(_n: usize) -> TreeResponse {
         let mut fake_attu = HashMap::new();
         let gatts = |i: u32, pref: &str| {
             (0..2_u32.pow(i))
@@ -660,20 +674,21 @@ pub mod big_test_tree {
         fake_attu.insert(Institutions::NAME.to_string(), gatts(16, "I"));
         let q = TreeQ {
             year: None,
-            eid: n as u32,
             tid: None,
             connections: None,
+            big: None,
         };
 
         let tstate = TreeRunManager::<(TestEntity, TestEntity)>::fake();
         let name = TestEntity::NAME.to_string();
+        let id = "0".to_string();
 
         let ts1 = tstate.clone();
-        let (q1, n1) = (q.clone(), name.clone());
-        let t = thread::spawn(move || ts1.get_resp(q1, &n1).unwrap());
+        let (q1, n1, i1) = (q.clone(), name.clone(), id.clone());
+        let t = thread::spawn(move || ts1.get_resp(q1, &n1, &i1).unwrap());
         thread::sleep(Duration::from_millis(100));
         let ts2 = tstate.clone();
-        let t2 = thread::spawn(move || ts2.get_resp(q, &name).unwrap());
+        let t2 = thread::spawn(move || ts2.get_resp(q, &name, &id).unwrap());
 
         let r = t.join().unwrap();
         let r2 = t2.join().unwrap();
@@ -759,19 +774,20 @@ mod tests {
 
     fn q(i: u8) -> TreeQ {
         TreeQ {
-            eid: 0,
             year: None,
             tid: Some(i),
             connections: None,
+            big: None,
         }
     }
 
     #[test]
     fn to_tree1() {
         let tstate = TreeRunManager::<(TestEntity, TestEntity)>::fake();
+        let id = "0".to_string();
 
         let r = tstate
-            .get_resp(q(0), &TestEntity::NAME.to_string())
+            .get_resp(q(0), &TestEntity::NAME.to_string(), &id)
             .unwrap();
         println!("{}", to_string_pretty(&r).unwrap());
         match &r.tree.children.deref() {
@@ -809,13 +825,14 @@ mod tests {
     fn to_tree2() {
         let tstate = TreeRunManager::<(TestEntity, TestEntity)>::fake();
         let name = TestEntity::NAME.to_string();
-        let r = tstate.get_resp(q(1), &name).unwrap();
+        let id = "0".to_string();
+        let r = tstate.get_resp(q(1), &name, &id).unwrap();
         println!("{}", to_string_pretty(&r).unwrap());
         val_res2(&r);
-        let rcached = tstate.get_resp(q(1), &name).unwrap();
+        let rcached = tstate.get_resp(q(1), &name, &id).unwrap();
         val_res2(&rcached);
 
-        let r = tstate.get_resp(q(2), &name).unwrap();
+        let r = tstate.get_resp(q(2), &name, &id).unwrap();
         println!("{}", to_string_pretty(&r).unwrap());
         assert_eq!(r.tree.node.source_count, 2);
         assert_eq!(r.tree.node.link_count, 3);

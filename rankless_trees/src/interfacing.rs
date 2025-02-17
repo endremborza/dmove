@@ -1,13 +1,14 @@
-use std::{fmt::Display, sync::Arc};
+use std::{f64, fmt::Display, sync::Arc};
 
 use crate::{
+    extern_features::{CitSubfieldsConcentrationMarker, RefSubfieldsConcentrationMarker},
     ids::AttributeLabelUnion,
     io::{AttributeLabel, WT},
 };
 use rankless_rs::{
     common::{
-        init_empty_slice, BackendSelector, MainWorkMarker, QuickAttPair, QuickMap, QuickestBox,
-        QuickestVBox, Stowage,
+        init_empty_slice, BeS, InstRelMarker, MainWorkMarker, QuickAttPair, QuickMap, QuickestBox,
+        QuickestVBox, Stowage, WorkLoader, YearlyCitationsMarker, YearlyPapersMarker,
     },
     gen::{
         a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Works},
@@ -16,27 +17,30 @@ use rankless_rs::{
             WorkAuthorships, WorkSources, WorkTopics, WorkYears, WorksNames,
         },
         derive_links1::{WorkInstitutions, WorkSubfields},
-        derive_links2::{WorkCitingCounts, WorkCountries},
+        derive_links2::{WorkCitingCounts, WorkCountries, WorkTopSource},
     },
-    steps::derive_links1::{CountryInsts, WorkPeriods},
+    steps::{
+        derive_links1::{CountryInsts, WorkPeriods},
+        derive_links5::{EraRec, InstRelation, N_RELS},
+    },
     CiteCountMarker, NameExtensionMarker, NameMarker, Quickest, SemanticIdMarker, WorkCountMarker,
 };
 
 use dmove::{
-    BackendLoading, BigId, CompactEntity, Entity, EntityImmutableRefMapperBackend, Locators,
-    MappableEntity, MarkedAttribute, NamespacedEntity, UnsignedNumber, VaST, VarAttBuilder, VarBox,
-    VarSizedAttributeElement, VariableSizeAttribute, VattArrPair, ET, MAA,
+    BackendLoading, BigId, ByteFixArrayInterface, CompactEntity, Entity,
+    EntityImmutableRefMapperBackend, Locators, MappableEntity, MarkedAttribute, NamespacedEntity,
+    UnsignedNumber, VaST, VarAttBuilder, VarBox, VariableSizeAttribute, VattArrPair, ET, MAA,
 };
 use hashbrown::HashMap;
 use rand::Rng;
 use serde::{de::DeserializeOwned, Serialize};
 
-const SPEC_CORR_RATE: f64 = 0.35;
+const SPEC_CORR_RATE: f64 = 0.45;
 
 pub type NET<E> = <E as NumberedEntity>::T;
-type VB<E> = <QuickAttPair as BackendSelector<E>>::BE;
-type FB<T> = <QuickestBox as BackendSelector<T>>::BE;
-type MB<T> = <QuickMap as BackendSelector<T>>::BE;
+type VB<E> = BeS<QuickAttPair, E>;
+type FB<E> = BeS<QuickestBox, E>;
+type MB<E> = BeS<QuickMap, E>;
 
 pub struct Getters {
     ifs: Interfaces,
@@ -153,12 +157,15 @@ macro_rules! make_interfaces {
     };
 }
 
+//TODO/clarity wet pattern
 macro_rules! make_ent_interfaces {
-    ($S:ident, $T:ident, $($f_key:ident => $f_mark:ty),*; $($r_key:ident -> $r_mark:ty),*) => {
+    ($S:ident, $T:ident, $($f_key:ident => $f_mark:ty),*; $($r_key:ident -> $r_mark:ty),*; $($fix_key:ident - $fix_mark:ty | $fix_t:ty),*; $($float_key:ident : $float_mark:ty),*) => {
         pub struct $S<T> where T: $T
         {
             $(pub $f_key: VarBox<String>),*,
-            $(pub $r_key: Box<[<T as NumAtt<$r_mark>>::Num]>),*
+            $(pub $r_key: Box<[<T as NumAtt<$r_mark>>::Num]>),*,
+            $(pub $fix_key: Box<[<T as FixAtt<$fix_mark>>::FT]>),*
+            $(, pub $float_key: Box<[f64]>)*
         }
 
         impl<E> $S<E> where E: $T
@@ -167,17 +174,23 @@ macro_rules! make_ent_interfaces {
                 Self {
                     $($f_key: <E as StringAtt<$f_mark>>::load(stowage)),*,
                     $($r_key: <E as NumAtt<$r_mark>>::load(stowage)),*,
+                    $($fix_key:  <E as FixAtt<$fix_mark>>::load(stowage)),*
+                    $(, $float_key:  <E as FloatAtt<$float_mark>>::load(stowage))*
                 }
             }
         }
 
         pub trait $T: Entity
             $( + StringAtt<$f_mark>)*
-            $( + NumAtt<$r_mark>)* {}
+            $( + NumAtt<$r_mark>)*
+            $( + FixAtt<$fix_mark, FT=$fix_t>)*
+            $( + FloatAtt<$float_mark>)* {}
 
         impl <T> $T for T where T: Entity
             $( + StringAtt<$f_mark>)*
-            $( + NumAtt<$r_mark>)* {}
+            $( + NumAtt<$r_mark>)*
+            $( + FixAtt<$fix_mark, FT=$fix_t>)*
+            $( + FloatAtt<$float_mark>)* {}
 
     };
 }
@@ -190,6 +203,7 @@ make_interfaces!(
     soworks > Sources,
     sfworks > Subfields;
     year => WorkYears,
+    top_source => WorkTopSource,
     wperiod => WorkPeriods,
     tsuf => TopicSubfields,
     icountry => InstCountries,
@@ -210,14 +224,19 @@ make_ent_interfaces!(
     RootInterfaces,
     RootInterfaceable,
     names => NameMarker, name_exts => NameExtensionMarker, sem_ids => SemanticIdMarker;
-    wcounts -> WorkCountMarker, ccounts -> CiteCountMarker
+    wcounts -> WorkCountMarker, ccounts -> CiteCountMarker;
+    yearly_papers - YearlyPapersMarker | EraRec,
+    yearly_cites - YearlyCitationsMarker | EraRec,
+    inst_rels - InstRelMarker | [InstRelation; N_RELS];
+    ref_sfc : RefSubfieldsConcentrationMarker,
+    cit_sfc : CitSubfieldsConcentrationMarker
 );
 
 make_ent_interfaces!(
     NodeInterfaces,
     NodeInterfaceable,
     names => NameMarker;
-    ccounts -> CiteCountMarker
+    ccounts -> CiteCountMarker;;
 );
 
 pub trait StringAtt<Mark>: MarkedAttribute<Mark> {
@@ -229,31 +248,21 @@ pub trait NumAtt<Mark>: MarkedAttribute<Mark> {
     fn load(stowage: &Stowage) -> Box<[Self::Num]>;
 }
 
+pub trait FloatAtt<Mark>: MarkedAttribute<Mark> {
+    fn load(stowage: &Stowage) -> Box<[f64]>;
+}
+
+pub trait FixAtt<Mark>: MarkedAttribute<Mark> {
+    type FT: ByteFixArrayInterface;
+    fn load(stowage: &Stowage) -> Box<[Self::FT]>;
+}
+
 pub trait NumberedEntity: Entity {
     type T: UnsignedNumber + DeserializeOwned + Serialize + Ord + Copy + Display;
 }
 
-pub trait WorkLoader: MarkedAttribute<MainWorkMarker>
-where
-    MAA<Self, MainWorkMarker>: CompactEntity + VariableSizeAttribute + NamespacedEntity,
-    ET<MAA<Self, MainWorkMarker>>: VarSizedAttributeElement,
-{
-    fn load_work_interface(stowage: Arc<Stowage>) -> VB<MAA<Self, MainWorkMarker>> {
-        stowage.get_entity_interface::<MAA<Self, MainWorkMarker>, QuickAttPair>()
-    }
-}
-
 pub trait WorksFromMemory: MarkedAttribute<MainWorkMarker> + NumberedEntity {
     fn works_from_ram(gets: &Getters, id: NET<Self>) -> &[WT];
-}
-
-impl<E> WorkLoader for E
-where
-    E: MarkedAttribute<MainWorkMarker>,
-
-    MAA<Self, MainWorkMarker>: CompactEntity + VariableSizeAttribute + NamespacedEntity,
-    ET<MAA<Self, MainWorkMarker>>: VarSizedAttributeElement,
-{
 }
 
 impl<E> NumberedEntity for E
@@ -307,7 +316,7 @@ impl Getters {
 
     pub fn fake() -> Self {
         let id: u64 = rand::thread_rng().gen();
-        let mut stowage = Stowage::new(&format!("/tmp/tmp-stow-{id}"));
+        let mut stowage = Stowage::new(&format!("/tmp/tmp-stow/{id}"));
 
         stowage.set_namespace("a2_init_atts");
         let last = (1..200)
@@ -353,8 +362,29 @@ where
 {
     type Num = ET<MAA<Self, Mark>>;
     fn load(stowage: &Stowage) -> Box<[Self::Num]> {
-        let nums = stowage.get_marked_interface::<Self, Mark, QuickestBox>();
-        nums
+        stowage.get_marked_interface::<Self, Mark, QuickestBox>()
+    }
+}
+
+impl<T, Mark> FloatAtt<Mark> for T
+where
+    T: MarkedAttribute<Mark>,
+    MAA<T, Mark>: NamespacedEntity + CompactEntity + Entity<T = f64>,
+{
+    fn load(stowage: &Stowage) -> Box<[f64]> {
+        stowage.get_marked_interface::<Self, Mark, QuickestBox>()
+    }
+}
+
+impl<T, Mark> FixAtt<Mark> for T
+where
+    T: MarkedAttribute<Mark>,
+    MAA<T, Mark>: NamespacedEntity + CompactEntity,
+    ET<MAA<T, Mark>>: ByteFixArrayInterface,
+{
+    type FT = ET<MAA<Self, Mark>>;
+    fn load(stowage: &Stowage) -> Box<[Self::FT]> {
+        stowage.get_marked_interface::<Self, Mark, QuickestBox>()
     }
 }
 

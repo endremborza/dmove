@@ -30,7 +30,7 @@ fn prune_tree<const SIZE: usize>(
     denoms[depth] = tree.node.link_count;
     let bd_denom = f64::from(denoms[bds[depth].spec_denom_ind as usize]);
 
-    //TODO: skip all this if less children than SIZE
+    //TODO/performance: skip all this if less children than SIZE
     let entity_type = &bds[depth].attribute_type;
     for (k, child) in tree.children.as_ref().iter_items() {
         let cw = child.link_count;
@@ -43,7 +43,7 @@ fn prune_tree<const SIZE: usize>(
                 0.1
             }
         };
-        let child_spec = numerator / bd_denom / baseline; //TODO: some correction here?
+        let child_spec = numerator / bd_denom / baseline; //TODO/improvement: some correction here?
         top_specs.push_unique(Reverse((child_spec, *k)));
     }
 

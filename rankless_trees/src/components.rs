@@ -104,8 +104,7 @@ pub struct CitingCoSuToByRef<'a> {
 pub struct CitingSourceCoSuByRef<'a> {
     cit_wids: Peekable<Iter<'a, ET<Works>>>,
     cit_sfs: Option<Peekable<Iter<'a, ET<Subfields>>>>,
-    cit_insts: Option<Peekable<Iter<'a, ET<Institutions>>>>,
-    cit_sources: Option<Iter<'a, ET<Sources>>>,
+    cit_insts: Option<Iter<'a, ET<Institutions>>>,
     gets: &'a Getters,
 }
 
@@ -126,7 +125,6 @@ pub struct SubfieldCountryInstByRef<'a> {
 
 pub struct SourceSubfieldCiCoByRef<'a> {
     ref_wid: &'a WT,
-    ref_sources: Peekable<Iter<'a, ET<Sources>>>,
     ref_sfs: Peekable<Iter<'a, ET<Subfields>>>,
     cit_wids: Peekable<Iter<'a, ET<Works>>>,
     cit_cous: Option<Iter<'a, ET<Countries>>>,
@@ -135,7 +133,6 @@ pub struct SourceSubfieldCiCoByRef<'a> {
 
 pub struct FullRefSourceCountryInstByRef<'a> {
     ref_wid: &'a WT,
-    ref_sources: Peekable<Iter<'a, ET<Sources>>>,
     ref_insts: Peekable<Iter<'a, ET<Institutions>>>,
     cit_wids: Iter<'a, ET<Works>>,
     gets: &'a Getters,
@@ -152,7 +149,6 @@ pub struct FullRefCountryInstSubfieldByRef<'a> {
 pub struct SourceWCoiByRef<'a> {
     ref_wid: &'a WT,
     wcoi: Peekable<WCoIByRef<'a>>,
-    ref_sources: Iter<'a, ET<Sources>>,
     gets: &'a Getters,
 }
 
@@ -165,7 +161,6 @@ pub struct SubfieldWCoiByRef<'a> {
 
 pub struct SubfieldCountryInstSourceByRef<'a> {
     sci_top: Peekable<SubfieldCountryInstByRef<'a>>,
-    cit_sources: Option<Iter<'a, ET<Sources>>>,
     gets: &'a Getters,
 }
 
@@ -194,7 +189,6 @@ pub struct RefSubSourceTop<'a> {
     ref_wid: &'a WT,
     ref_sfs: Peekable<Iter<'a, ET<Subfields>>>,
     cit_wids: Peekable<Iter<'a, ET<Works>>>,
-    cit_sources: Option<Peekable<Iter<'a, ET<Sources>>>>,
     cit_topics: Option<Iter<'a, ET<Topics>>>,
     gets: &'a Getters,
 }
@@ -202,14 +196,12 @@ pub struct RefSubSourceTop<'a> {
 pub struct CiteSubSourceTop<'a> {
     cit_wids: Peekable<Iter<'a, ET<Works>>>,
     cit_sfs: Option<Peekable<Iter<'a, ET<Subfields>>>>,
-    cit_sources: Option<Peekable<Iter<'a, ET<Sources>>>>,
     cit_topics: Option<Iter<'a, ET<Topics>>>,
     gets: &'a Getters,
 }
 
 pub struct QedInf<'a> {
     ref_wid: &'a WT,
-    ref_sources: Peekable<Iter<'a, ET<Sources>>>,
     cit_wids: Peekable<Iter<'a, ET<Works>>>,
     cite_sfs: Option<Peekable<Iter<'a, ET<Subfields>>>>,
     cite_countries: Option<Iter<'a, ET<Countries>>>,
@@ -268,6 +260,15 @@ macro_rules! reg_next {
                 $child_it = $child_recalc.iter();
                 $parent_it.next();
                 continue;
+            }
+        }
+    };
+
+    ($child_it: expr) => {
+        match $child_it.next() {
+            Some(v) => v,
+            None => {
+                return None;
             }
         }
     };
@@ -416,7 +417,6 @@ impl<'a> RefWorkBasedIter<'a> for SourceSubfieldCiCoByRef<'a> {
         Self {
             ref_wid,
             ref_sfs,
-            ref_sources: gets.wsources(*ref_wid).iter().peekable(),
             cit_wids,
             cit_cous: None,
             gets,
@@ -433,12 +433,10 @@ impl<'a> RefWorkBasedIter<'a> for FullRefSourceCountryInstByRef<'a> {
     fn new(ref_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
         let cit_wids = gets.citing(*ref_wid).iter();
         let ref_insts = gets.winsts(*ref_wid).iter().peekable();
-        let ref_sources = gets.wsources(*ref_wid).iter().peekable();
         Self {
             ref_wid,
             cit_wids,
             gets,
-            ref_sources,
             ref_insts,
         }
     }
@@ -509,7 +507,6 @@ impl<'a> RefWorkBasedIter<'a> for CitingSourceCoSuByRef<'a> {
         let cit_wids = gets.citing(*ref_wid).iter().peekable();
         Self {
             cit_wids,
-            cit_sources: None,
             cit_sfs: None,
             cit_insts: None,
             gets,
@@ -546,7 +543,6 @@ impl<'a> RefWorkBasedIter<'a> for SourceWCoiByRef<'a> {
     fn new(ref_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
         Self {
             ref_wid,
-            ref_sources: gets.wsources(*ref_wid).iter(),
             wcoi: WCoIByRef::new(ref_wid, gets).peekable(),
             gets,
         }
@@ -579,7 +575,6 @@ impl<'a> RefWorkBasedIter<'a> for SubfieldCountryInstSourceByRef<'a> {
     );
     fn new(ref_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
         Self {
-            cit_sources: None,
             sci_top: SubfieldCountryInstByRef::new(ref_wid, gets).peekable(),
             gets,
         }
@@ -648,7 +643,6 @@ impl<'a> RefWorkBasedIter<'a> for CiteSubSourceTop<'a> {
             cit_wids: gets.citing(*ref_wid).iter().peekable(),
             cit_topics: None,
             cit_sfs: None,
-            cit_sources: None,
         }
     }
 }
@@ -666,7 +660,6 @@ impl<'a> RefWorkBasedIter<'a> for RefSubSourceTop<'a> {
             cit_wids: gets.citing(*ref_wid).iter().peekable(),
             cit_topics: None,
             ref_sfs: gets.wsubfields(*ref_wid).iter().peekable(),
-            cit_sources: None,
         }
     }
 }
@@ -682,7 +675,6 @@ impl<'a> RefWorkBasedIter<'a> for QedInf<'a> {
         Self {
             ref_wid,
             gets,
-            ref_sources: gets.wsources(*ref_wid).iter().peekable(),
             cit_wids: gets.citing(*ref_wid).iter().peekable(),
             cite_sfs: None,
             cite_countries: None,
@@ -714,11 +706,7 @@ impl<'a> Iterator for SourceSubfieldCiCoByRef<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let ref_sf = reg_peek!(self.ref_sfs);
-            let ref_source = reg_peek!(
-                self.ref_sources,
-                self.ref_sfs,
-                self.gets.wsources(*self.ref_wid)
-            );
+            let ref_source = self.gets.top_source(self.ref_wid);
             let cit_wid = reg_peek!(self.cit_wids, self.ref_sfs, self.gets.citing(*self.ref_wid));
             let cit_country =
                 opt_next!(self.cit_cous, self.cit_wids, self.gets.wcountries(*cit_wid));
@@ -737,12 +725,8 @@ impl<'a> Iterator for FullRefSourceCountryInstByRef<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let ref_source = reg_peek!(self.ref_sources);
-            let ref_inst = reg_peek!(
-                self.ref_insts,
-                self.ref_sources,
-                self.gets.winsts(*self.ref_wid)
-            );
+            let ref_inst = reg_peek!(self.ref_insts);
+            let ref_source = self.gets.top_source(self.ref_wid);
             let cit_wid = reg_next!(
                 self.cit_wids,
                 self.ref_insts,
@@ -837,16 +821,12 @@ impl<'a> Iterator for CitingSourceCoSuByRef<'a> {
         loop {
             let cit_wid = reg_peek!(self.cit_wids);
             let citing_sf = opt_peek!(self.cit_sfs, self.cit_wids, self.gets.wsubfields(*cit_wid));
-            let citing_inst = opt_peek!(
+            let citing_inst = opt_next!(
                 self.cit_insts,
                 self.cit_sfs.as_mut().unwrap(),
                 self.gets.winsts(*cit_wid)
             );
-            let citing_source = opt_next!(
-                self.cit_sources,
-                self.cit_insts.as_mut().unwrap(),
-                self.gets.wsources(*cit_wid)
-            );
+            let citing_source = self.gets.top_source(cit_wid);
             return Some((
                 *citing_source,
                 self.gets.icountry(citing_inst).lift(),
@@ -879,12 +859,8 @@ impl<'a> Iterator for SubfieldCountryInstSourceByRef<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let top_tup = reg_peek!(self.sci_top);
-            let cit_source = opt_next!(
-                self.cit_sources,
-                self.sci_top,
-                self.gets.wsources(top_tup.3)
-            );
+            let top_tup = reg_next!(self.sci_top);
+            let cit_source = self.gets.top_source(&top_tup.3);
             return Some((
                 top_tup.0.lift(),
                 top_tup.1.lift(),
@@ -901,12 +877,8 @@ impl<'a> Iterator for SourceWCoiByRef<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let wcoi_tup = reg_peek!(self.wcoi);
-            let ref_source = reg_next!(
-                self.ref_sources,
-                self.wcoi,
-                self.gets.wsources(*self.ref_wid)
-            );
+            let wcoi_tup = reg_next!(self.wcoi);
+            let ref_source = self.gets.top_source(self.ref_wid);
             return Some((
                 ref_source.lift(),
                 wcoi_tup.0.lift(),
@@ -996,16 +968,8 @@ impl<'a> Iterator for RefSubSourceTop<'a> {
         loop {
             let ref_sf = reg_peek!(self.ref_sfs);
             let cit_wid = reg_peek!(self.cit_wids, self.ref_sfs, self.gets.citing(*self.ref_wid));
-            let cit_source = opt_peek!(
-                self.cit_sources,
-                self.cit_wids,
-                self.gets.wsources(*cit_wid)
-            );
-            let cit_topic = opt_next!(
-                self.cit_topics,
-                self.cit_sources.as_mut().unwrap(),
-                self.gets.wtopics(*cit_wid)
-            );
+            let cit_source = self.gets.top_source(self.ref_wid);
+            let cit_topic = opt_next!(self.cit_topics, self.cit_wids, self.gets.wtopics(*cit_wid));
             return Some((*ref_sf, *cit_source, *cit_topic, *cit_wid));
         }
     }
@@ -1018,14 +982,10 @@ impl<'a> Iterator for CiteSubSourceTop<'a> {
         loop {
             let cit_wid = reg_peek!(self.cit_wids);
             let cit_sf = opt_peek!(self.cit_sfs, self.cit_wids, self.gets.wsubfields(*cit_wid));
-            let cit_source = opt_peek!(
-                self.cit_sources,
-                self.cit_sfs.as_mut().unwrap(),
-                self.gets.wsources(*cit_wid)
-            );
+            let cit_source = self.gets.top_source(cit_wid);
             let cit_topic = opt_next!(
                 self.cit_topics,
-                self.cit_sources.as_mut().unwrap(),
+                self.cit_sfs.as_mut().unwrap(),
                 self.gets.wtopics(*cit_wid)
             );
             return Some((*cit_sf, *cit_source, *cit_topic, *cit_wid));
@@ -1038,12 +998,8 @@ impl<'a> Iterator for QedInf<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let ref_source = reg_peek!(self.ref_sources);
-            let cit_wid = reg_peek!(
-                self.cit_wids,
-                self.ref_sources,
-                self.gets.citing(*self.ref_wid)
-            );
+            let cit_wid = reg_peek!(self.cit_wids);
+            let ref_source = self.gets.top_source(self.ref_wid);
             let ref_year = self.gets.year(self.ref_wid);
             let ref_q = self.gets.sqy(&(*ref_source, *ref_year)).lift();
             let cit_sf = opt_peek!(self.cite_sfs, self.cit_wids, self.gets.wsubfields(*cit_wid));
@@ -1298,6 +1254,7 @@ where
     type StackBasis = I::SB;
     const PARTITIONS: usize = N_PERS;
     const IS_SPEC: bool = I::IS_SPEC;
+    const DEFAULT_PARTITION: u8 = 3; //2020
     fn new(id: NET<E>, gets: &'a Getters) -> Self {
         let refs_it = E::works_from_ram(&gets, id.lift()).iter().peekable();
         Self {
