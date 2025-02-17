@@ -16,7 +16,8 @@ use dmove::{
     BigId, Data64MappedEntityBuilder, Entity, EntityImmutableMapperBackend, MappableEntity, ET,
 };
 
-pub type YBT = [u16; N_PERS];
+pub type RawYear = u16;
+pub type YBT = [RawYear; N_PERS];
 pub const N_PERS: usize = 8;
 pub const POSSIBLE_YEAR_FILTERS: YBT = [START_YEAR, 2010, 2015, 2020, 2021, 2022, 2023, 2024];
 
@@ -55,8 +56,16 @@ impl SourceArea {
 }
 
 impl YearInterface {
-    pub fn reverse(y: ET<Years>) -> <Years as MappableEntity>::KeyType {
-        y as u16 + START_YEAR
+    pub fn reverse(y: ET<Years>) -> RawYear {
+        y as RawYear + START_YEAR
+    }
+
+    pub fn parse(raw: RawYear) -> ET<Years> {
+        (raw - START_YEAR) as ET<Years>
+    }
+
+    pub fn iter() -> std::ops::Range<u8> {
+        0..((FINAL_YEAR - START_YEAR + 1) as u8)
     }
 }
 
@@ -80,15 +89,12 @@ impl Entity for Years {
 }
 
 impl MappableEntity for Years {
-    type KeyType = u16;
+    type KeyType = RawYear;
 }
 
 impl EntityImmutableMapperBackend<Years> for YearInterface {
-    fn get_via_immut(
-        &self,
-        k: &<Years as MappableEntity>::KeyType,
-    ) -> Option<<Years as Entity>::T> {
-        Some((k - START_YEAR) as u8)
+    fn get_via_immut(&self, k: &RawYear) -> Option<ET<Years>> {
+        Some(Self::parse(*k))
     }
 }
 

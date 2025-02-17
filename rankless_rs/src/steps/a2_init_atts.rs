@@ -1,6 +1,6 @@
 use crate::{
     common::{
-        field_id_parse, init_empty_slice, oa_id_parse, short_string_to_u64, BeS,
+        field_id_parse, init_empty_slice, oa_id_parse, short_string_to_u64, BeS, DoiMarker,
         NameExtensionMarker, NameMarker, ParsedId, Quickest, SemanticIdMarker, Stowage, MAIN_NAME,
     },
     csv_writers::{institutions, works},
@@ -497,6 +497,18 @@ impl AttGetter<String, NameExtensionMarker> for Institution {
     }
 }
 
+impl AttGetter<String, DoiMarker> for Work {
+    fn get_att(&self) -> Option<String> {
+        const DL: usize = 16;
+        if let Some(doi) = &self.doi {
+            if doi.len() > DL {
+                return Some(doi[DL..].to_string());
+            }
+        }
+        None
+    }
+}
+
 impl<T> AttGetter<String, NameMarker> for T
 where
     T: Named,
@@ -746,7 +758,10 @@ pub fn main(mut stowage: Stowage) -> io::Result<()> {
         &subfields_interface,
         "topic-subfields",
     )?;
+    //TODO/performance wasteful - runs through works twice
     let works_interface = stowage.get_entity_interface::<Works, Quickest>();
+    StrWriter::new(&mut stowage)
+        .write_meta::<Works, Work, DoiMarker>(&works_interface, "work-dois");
     let year_interface = YearInterface {};
     stowage.object_property::<Work, Works, _, _, _>(
         &works_interface,
