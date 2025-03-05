@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
     sync::{Arc, Condvar, Mutex},
     thread::JoinHandle,
-    u8, vec,
+    u32, u8, vec,
 };
 
 use dmove_macro::impl_subs;
@@ -43,7 +43,7 @@ type BasisCvp = Arc<(Mutex<VecDeque<BasisQuElem>>, Condvar)>;
 
 pub struct TreeBasisState {
     pub gets: Getters,
-    pub att_union: AttributeLabelUnion,
+    pub att_union: Arc<AttributeLabelUnion>,
     pub im_cache: Mutex<CacheMap>,
 }
 
@@ -73,10 +73,9 @@ pub struct FullTreeQuery {
 #[derive(Clone, Copy)]
 pub struct WorkWInd(pub WT, pub WorkCiteT);
 
-#[derive(Serialize, Clone)]
 pub struct AttributeLabel {
     pub name: String,
-    #[serde(rename = "specBaseline")]
+    pub semantic_id: String,
     pub spec_baseline: f64,
 }
 
@@ -321,13 +320,23 @@ impl BufSerTree {
 
 impl BufSerChildren {
     pub fn iter_items<'a>(&'a self) -> SCIter<'a> {
-        let key_vec: Vec<&'a u32> = match self {
-            Self::Nodes(nodes) => nodes.keys().collect(),
-            Self::Leaves(ls) => ls.keys().collect(),
-        };
         SCIter {
             children: self,
-            key_iter: key_vec.into_iter(),
+            key_iter: self.keys().into_iter(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Nodes(nodes) => nodes.len(),
+            Self::Leaves(ls) => ls.len(),
+        }
+    }
+
+    pub fn keys(&self) -> Vec<&u32> {
+        match self {
+            Self::Nodes(nodes) => nodes.keys().collect(),
+            Self::Leaves(ls) => ls.keys().collect(),
         }
     }
 }
@@ -394,15 +403,13 @@ where
 {
     pub fn new(
         gets: Arc<Getters>,
-        atts: Arc<Mutex<AttributeLabelUnion>>,
+        atts: Arc<AttributeLabelUnion>,
         maps: HashMap<String, HashMap<String, usize>>,
         n: usize,
     ) -> Arc<Self> {
         let specs = T::get_specs();
-        let att_union = Arc::into_inner(atts).unwrap().into_inner().unwrap();
         let thread_pool = Vec::new();
-        let mut state =
-            TreeBasisState::new(Arc::into_inner(gets).expect("gets for state"), att_union);
+        let mut state = TreeBasisState::new(Arc::into_inner(gets).expect("gets for state"), atts);
         state.fill_cache(&specs);
 
         Arc::new(
@@ -449,7 +456,7 @@ where
 
     pub fn fake() -> Arc<Self> {
         let gets = Getters::fake();
-        let atts = Mutex::new(HashMap::new());
+        let atts = HashMap::new();
         let tm = HashMap::from_iter(vec![("0".to_string(), 0)].into_iter());
         let maps = HashMap::from_iter(vec![("test".to_string(), tm)].into_iter());
         Self::new(Arc::new(gets), atts.into(), maps, 2)
@@ -489,7 +496,7 @@ where
 }
 
 impl TreeBasisState {
-    pub fn new(gets: Getters, att_union: AttributeLabelUnion) -> Self {
+    pub fn new(gets: Getters, att_union: Arc<AttributeLabelUnion>) -> Self {
         let im_map = HashMap::new();
         Self {
             gets,
@@ -498,25 +505,21 @@ impl TreeBasisState {
         }
     }
 
-    pub fn full_cache_file(&self, fq: &FullTreeQuery) -> PathBuf {
-        self.full_cache_file_period(fq, fq.period)
-    }
-
     pub fn full_cache_file_period(&self, fq: &FullTreeQuery, period: u8) -> PathBuf {
-        self.cache_dir(fq).join(format!("{}.gz", period))
+        self.cache_dir(fq).join(format!("full-{}.gz", period))
     }
 
     pub fn pruned_cache_file(&self, fq: &FullTreeQuery) -> PathBuf {
         self.pruned_cache_file_period(fq, fq.period)
     }
     pub fn pruned_cache_file_period(&self, fq: &FullTreeQuery, period: u8) -> PathBuf {
-        self.cache_dir(fq).join(format!("pruned-{}.gz", period))
+        self.cache_dir(fq).join(format!("{}.gz", period))
     }
     pub fn fake() -> Self {
         Self {
             im_cache: Mutex::new(HashMap::new()),
             gets: Getters::fake(),
-            att_union: HashMap::new(),
+            att_union: Arc::new(HashMap::new()),
         }
     }
 
@@ -543,27 +546,17 @@ impl TreeBasisState {
                     let eid_path = eid_entry.unwrap().path();
                     for tid_entry in std::fs::read_dir(&eid_path).unwrap() {
                         let tid_path = tid_entry.unwrap().path();
-                        let ck = CacheKey {
-                            eid: fpparse(&eid_path),
-                            tid: fpparse(&tid_path),
-                            etype,
-                        };
-                        let mut v = Vec::new();
-                        for pid_entry in std::fs::read_dir(&tid_path).unwrap() {
-                            let pid_path = pid_entry.unwrap().path();
-                            if pid_path
-                                .file_stem()
-                                .unwrap()
-                                .to_str()
-                                .unwrap()
-                                .starts_with("pru")
-                            {
-                                continue;
+                        if let (Ok(eid), Ok(tid)) = (fpparse(&eid_path), fpparse(&tid_path)) {
+                            let ck = CacheKey { eid, tid, etype };
+                            let mut v = Vec::new();
+                            for pid_entry in std::fs::read_dir(&tid_path).unwrap() {
+                                let pid_path = pid_entry.unwrap().path();
+                                if let Ok(pint) = fpparse(&pid_path) {
+                                    v.push(pint)
+                                }
                             }
-
-                            v.push(fpparse(&pid_path));
+                            cmap.insert(ck, CacheValue::Done(v));
                         }
-                        cmap.insert(ck, CacheValue::Done(v));
                     }
                 }
             }
@@ -571,11 +564,11 @@ impl TreeBasisState {
     }
 }
 
-fn fpparse<T: FromStr>(p: &PathBuf) -> T
+fn fpparse<T: FromStr>(p: &PathBuf) -> Result<T, T::Err>
 where
     <T as FromStr>::Err: Debug,
 {
-    p.file_stem().unwrap().to_str().unwrap().parse().unwrap()
+    p.file_stem().unwrap().to_str().unwrap().parse()
 }
 
 fn oaify(node: CollapsedNode, gets: &Getters) -> CollapsedNodeJson {

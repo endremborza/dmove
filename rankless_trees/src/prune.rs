@@ -25,46 +25,44 @@ fn prune_tree<const SIZE: usize>(
     denoms: &mut [u32],
     depth: usize,
 ) -> BufSerTree {
-    let mut top_weights: FixedHeap<Reverse<(u32, IndType)>, SIZE> = FixedHeap::new();
-    let mut top_specs: FixedHeap<Reverse<(f64, IndType)>, SIZE> = FixedHeap::new();
     denoms[depth] = tree.node.link_count;
-    let bd_denom = f64::from(denoms[bds[depth].spec_denom_ind as usize]);
 
-    //TODO/performance: skip all this if less children than SIZE
-    let entity_type = &bds[depth].attribute_type;
-    for (k, child) in tree.children.as_ref().iter_items() {
-        let cw = child.link_count;
-        let numerator = f64::from(cw);
-        top_weights.push_unique(Reverse((cw, *k)));
-        let baseline = match astats.get(entity_type) {
-            Some(arr) => arr[k.to_usize()].spec_baseline,
-            None => {
-                // println!("no {entity_type} in union for prune");
-                0.1
-            }
-        };
-        let child_spec = numerator / bd_denom / baseline; //TODO/improvement: some correction here?
-        top_specs.push_unique(Reverse((child_spec, *k)));
-    }
-
-    let to_keep: Vec<u32> = top_weights
-        .into_iter()
-        .map(|e| e.0 .1)
-        .chain(top_specs.into_iter().map(|e| e.0 .1))
-        .collect();
-    let node = tree.node.clone();
+    let to_keep: Vec<u32> = if tree.children.len() > SIZE {
+        let bd_denom = f64::from(denoms[bds[depth].spec_denom_ind as usize]);
+        let mut top_weights: FixedHeap<Reverse<(u32, IndType)>, SIZE> = FixedHeap::new();
+        let mut top_specs: FixedHeap<Reverse<(f64, IndType)>, SIZE> = FixedHeap::new();
+        let entity_type = &bds[depth].attribute_type;
+        for (k, child) in tree.children.iter_items().filter(|(k, _)| **k != 0) {
+            let cw = child.link_count;
+            let numerator = f64::from(cw);
+            top_weights.push_unique(Reverse((cw, *k)));
+            let baseline = match astats.get(entity_type) {
+                Some(arr) => arr[k.to_usize()].spec_baseline,
+                None => 1.0,
+            };
+            let child_spec = numerator / bd_denom / baseline;
+            top_specs.push_unique(Reverse((child_spec, *k)));
+        }
+        top_weights
+            .into_iter()
+            .map(|e| e.0 .1)
+            .chain(top_specs.into_iter().map(|e| e.0 .1))
+            .collect()
+    } else {
+        tree.children.keys().into_iter().map(|e| *e).collect()
+    };
     let children = match tree.children.as_ref() {
         BufSerChildren::Nodes(nodes) => {
-            BufSerChildren::Nodes(keep_keys(&nodes, &to_keep, |e: &BufSerTree| {
+            BufSerChildren::Nodes(keep_keys(nodes, &to_keep, |e: &BufSerTree| {
                 prune_tree::<SIZE>(e, astats, &bds, denoms, depth + 1)
             }))
         }
         BufSerChildren::Leaves(leaves) => {
-            BufSerChildren::Leaves(keep_keys(&leaves, &to_keep, |e: &CollapsedNode| e.clone()))
+            BufSerChildren::Leaves(keep_keys(leaves, &to_keep, |e: &CollapsedNode| e.clone()))
         }
     };
     BufSerTree {
-        node,
+        node: tree.node.clone(),
         children: Box::new(children),
     }
 }
