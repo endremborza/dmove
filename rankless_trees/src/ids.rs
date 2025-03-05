@@ -94,7 +94,7 @@ fn add_leaves<'a, I>(
         if at == Institutions::NAME {
             leaves.for_each(|k| {
                 let ku = k.to_usize();
-                eatts.insert(ku, oaify(&u_eatts[k.to_usize()], &state.gets, ku));
+                eatts.insert(ku, oaify_inst(&u_eatts[k.to_usize()], &state.gets, ku));
             })
         } else {
             leaves.for_each(|k| {
@@ -106,7 +106,7 @@ fn add_leaves<'a, I>(
     }
 }
 
-fn oaify(v: &AttributeLabel, gets: &Getters, id: usize) -> AttributeLabelOut {
+fn oaify_inst(v: &AttributeLabel, gets: &Getters, id: usize) -> AttributeLabelOut {
     AttributeLabelOut {
         spec_baseline: v.spec_baseline,
         name: v.name.clone(),
