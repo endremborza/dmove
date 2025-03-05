@@ -11,7 +11,7 @@ use hashbrown::hash_map::Entry;
 use rand::Rng;
 use rankless_rs::{
     agg_tree::{HeapIterator, MinHeap, SortedRecord, Updater},
-    common::{read_buf_path, write_buf_path},
+    common::{read_buf_path, write_buf_path, NumberedEntity, NET},
     steps::{
         a1_entity_mapping::{YearInterface, POSSIBLE_YEAR_FILTERS},
         derive_links1::WorkPeriods,
@@ -22,7 +22,7 @@ use tqdm::Iter;
 use crate::{
     components::{PartitionId, StackBasis, StackFr},
     instances::{Collapsing, DisJTree, IntXTree, TopTree},
-    interfacing::{Getters, NumberedEntity, NET},
+    interfacing::Getters,
     io::{
         BoolCvp, BufSerTree, CacheMap, CacheValue, FullTreeQuery, ResCvp, TreeBasisState,
         TreeResponse, TreeSpec, WT,
@@ -125,13 +125,15 @@ pub trait PartitioningIterator<'a>:
             let pid8 = pid as u8;
             Self::write_resp(&tree, &fq, state, res_cvp.clone(), pid8);
             pids.push(pid8);
+            // TODO: wrote complete once
+            // write_buf_path(&tree, get_path(pid8)).unwrap();
             pid8
         };
         create_dir_all(get_path(0).parent().unwrap()).unwrap();
 
         if fq.q.big.unwrap_or(false) {
             let piter = Self::new(et_id, &state.gets);
-            fill_big_calculate::<Self, CT, SR, _, _>(piter, &fq, state, check_w, get_path);
+            fill_big_calculate::<Self, CT, SR, _>(piter, &fq, state, check_w);
         } else {
             let heaps = Self::fill_heaps(&fq, &et_id, state);
 
@@ -153,8 +155,7 @@ pub trait PartitioningIterator<'a>:
             for (pid, part_root) in roots.into_iter().enumerate().rev() {
                 Self::fold_tree(&mut ser_tree_o, part_root);
                 let stref = &ser_tree_o.as_ref().unwrap();
-                let pid8 = check_w(pid, &stref);
-                write_buf_path(&stref, get_path(pid8)).unwrap();
+                check_w(pid, &stref);
             }
             println!(
                 "{fq}: converted, ingested and wrote trees in {}",
@@ -260,34 +261,33 @@ impl Progress {
 
 impl<T1> GetRefWork for (T1, WT, WT) {
     fn rwid(&self) -> WT {
-        self.1.lift()
+        self.1
     }
 }
 
 impl<T1, T2> GetRefWork for (T1, T2, WT, WT) {
     fn rwid(&self) -> WT {
-        self.2.lift()
+        self.2
     }
 }
 
 impl<T1, T2, T3> GetRefWork for (T1, T2, T3, WT, WT) {
     fn rwid(&self) -> WT {
-        self.3.lift()
+        self.3
     }
 }
 
 impl<T1, T2, T3, T4> GetRefWork for (T1, T2, T3, T4, WT, WT) {
     fn rwid(&self) -> WT {
-        self.4.lift()
+        self.4
     }
 }
 
-fn fill_big_calculate<'a, PI, CT, SR, F1, F2>(
+fn fill_big_calculate<'a, PI, CT, SR, F1>(
     piter: PI,
     fq: &FullTreeQuery,
     state: &'a TreeBasisState,
     mut check_w: F1,
-    get_path: F2,
 ) where
     PI: PartitioningIterator<'a>,
     PI::StackBasis: StackBasis<TopTree = CT, SortedRec = SR>,
@@ -297,7 +297,6 @@ fn fill_big_calculate<'a, PI, CT, SR, F1, F2>(
     DisJTree<PI::Root, CT>: Into<BufSerTree>,
     IntXTree<PI::Root, CT>: Updater<CT>,
     F1: FnMut(usize, &BufSerTree) -> u8,
-    F2: Fn(u8) -> PathBuf,
 {
     let et_id = NET::<PI::Root>::from_usize(fq.ck.eid as usize);
     let id: u64 = rand::thread_rng().gen();
@@ -347,8 +346,7 @@ fn fill_big_calculate<'a, PI, CT, SR, F1, F2>(
         if let Some(next_bp) = next_bp_o {
             if y16 == *next_bp {
                 let pid = WorkPeriods::from_year(y16);
-                let pid8 = check_w(pid.to_usize(), &stref);
-                write_buf_path(&stref, get_path(pid8)).unwrap();
+                check_w(pid.to_usize(), &stref);
                 next_bp_o = year_bp_iter.next();
             }
         } else {
