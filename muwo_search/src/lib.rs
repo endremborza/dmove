@@ -43,7 +43,7 @@ pub struct SearchEngine {
 #[derive(Debug, Clone, PartialEq)]
 struct WordViaCharr(u32, u16);
 
-struct StackWordSet {
+pub struct StackWordSet {
     char_array: [u8; MAX_QUERY_CHARS],
     break_array: [u8; MAX_QUERY_WORDS],
     breaks_count: usize,
@@ -346,7 +346,7 @@ impl CustomTrie {
 }
 
 impl StackWordSet {
-    fn new(words: &str) -> Self {
+    pub fn new(words: &str) -> Self {
         let mut out = Self {
             char_array: [0; MAX_QUERY_CHARS],
             break_array: [0; MAX_QUERY_WORDS],
@@ -379,6 +379,21 @@ impl StackWordSet {
             }
         }
         out.new_break(i);
+        out
+    }
+
+    pub fn to_words(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut si = 0;
+        for i in 0..self.breaks_count {
+            let ei = self.break_array[i] as usize;
+            let cv = self.char_array[si..ei]
+                .iter()
+                .map(|e| *e + ASCII_LC_MIN)
+                .collect();
+            out.push(String::from_utf8(cv).expect("reading word"));
+            si = ei;
+        }
         out
     }
 
