@@ -84,7 +84,7 @@ where
 {
     fn get_via_immut(&self, k: &E::KeyType) -> Option<E::T> {
         match self.get(k) {
-            Some(v) => Some(v.lift()),
+            Some(v) => Some(*v),
             None => None,
         }
     }
