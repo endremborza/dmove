@@ -53,6 +53,7 @@ impl Authorship {
 impl FilterBase for Authorship {
     const ENTITY_ATT: &'static str = works::atts::authorships;
     const MIN: usize = MIN_PAPERS_FOR_INST as usize;
+    const FILTER_TARGETS: bool = false;
 
     fn iter_edges(&self) -> Vec<[String; 2]> {
         self.iter_insts()
