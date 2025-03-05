@@ -4,15 +4,16 @@ use dmove::{Entity, UnsignedNumber, ET};
 use dmove_macro::impl_stack_basees;
 use rankless_rs::{
     agg_tree::{FoldingStackConsumer, ReinstateFrom, SortedRecord, Updater},
+    common::{NumberedEntity, NET},
     gen::a1_entity_mapping::{
-        Authors, Authorships, Countries, Institutions, Qs, Sources, Subfields, Topics, Works,
+        Authors, Authorships, Countries, Institutions, Sources, Subfields, Topics, Works,
     },
-    steps::a1_entity_mapping::N_PERS,
+    steps::a1_entity_mapping::{Qs, N_PERS},
 };
 
 use crate::{
     instances::{Collapsing, DisJTree, FoldStackBase, IntXTree, WorkTree},
-    interfacing::{Getters, NumberedEntity, WorksFromMemory, NET},
+    interfacing::{Getters, WorksFromMemory},
     io::{BreakdownSpec, WT},
     part_iterator::PartitioningIterator,
 };
@@ -56,6 +57,24 @@ pub struct CountryBesties<'a> {
     ref_insts: Option<Peekable<Iter<'a, ET<Institutions>>>>,
     ref_sfs: Option<Peekable<Iter<'a, ET<Subfields>>>>,
     cit_wids: Option<Iter<'a, ET<Works>>>,
+}
+
+pub struct AuthorBesties<'a> {
+    gets: &'a Getters,
+    id: ET<Authors>,
+    ref_wids: Peekable<Iter<'a, WT>>,
+    ref_ships: Option<Peekable<Iter<'a, ET<Authorships>>>>,
+    cit_insts: Option<Iter<'a, ET<Institutions>>>,
+    cit_wids: Option<Peekable<Iter<'a, ET<Works>>>>,
+}
+
+pub struct AuthorBestiePapers<'a> {
+    gets: &'a Getters,
+    id: ET<Authors>,
+    ref_wids: Peekable<Iter<'a, WT>>,
+    ref_ships: Option<Peekable<Iter<'a, ET<Authorships>>>>,
+    cit_sfs: Option<Iter<'a, ET<Subfields>>>,
+    cit_wids: Option<Peekable<Iter<'a, ET<Works>>>>,
 }
 
 pub struct InstBesties<'a> {
@@ -690,12 +709,7 @@ impl<'a> Iterator for SubfieldCountryInstByRef<'a> {
             let ref_sf = reg_peek!(self.ref_sfs);
             let cit_wid = reg_peek!(self.cit_wids, self.ref_sfs, self.gets.citing(*self.ref_wid));
             let cit_inst = opt_next!(self.cit_insts, self.cit_wids, self.gets.winsts(*cit_wid));
-            return Some((
-                ref_sf.lift(),
-                self.gets.icountry(cit_inst).lift(),
-                cit_inst.lift(),
-                cit_wid.lift(),
-            ));
+            return Some((*ref_sf, *self.gets.icountry(cit_inst), *cit_inst, *cit_wid));
         }
     }
 }
@@ -710,12 +724,7 @@ impl<'a> Iterator for SourceSubfieldCiCoByRef<'a> {
             let cit_wid = reg_peek!(self.cit_wids, self.ref_sfs, self.gets.citing(*self.ref_wid));
             let cit_country =
                 opt_next!(self.cit_cous, self.cit_wids, self.gets.wcountries(*cit_wid));
-            return Some((
-                ref_source.lift(),
-                ref_sf.lift(),
-                cit_country.lift(),
-                cit_wid.lift(),
-            ));
+            return Some((*ref_source, *ref_sf, *cit_country, *cit_wid));
         }
     }
 }
@@ -733,10 +742,10 @@ impl<'a> Iterator for FullRefSourceCountryInstByRef<'a> {
                 self.gets.citing(*self.ref_wid)
             );
             return Some((
-                ref_source.lift(),
-                self.gets.icountry(ref_inst).lift(),
-                ref_inst.lift(),
-                cit_wid.lift(),
+                *ref_source,
+                *self.gets.icountry(ref_inst),
+                *ref_inst,
+                cit_wid,
             ));
         }
     }
@@ -759,12 +768,7 @@ impl<'a> Iterator for FullRefCountryInstSubfieldByRef<'a> {
                 self.ref_insts,
                 self.gets.citing(*self.ref_wid)
             );
-            return Some((
-                self.gets.icountry(ref_inst).lift(),
-                ref_inst.lift(),
-                ref_sf.lift(),
-                cit_wid.lift(),
-            ));
+            return Some((*self.gets.icountry(ref_inst), *ref_inst, *ref_sf, cit_wid));
         }
     }
 }
@@ -782,10 +786,10 @@ impl<'a> Iterator for CitingCoSuToByRef<'a> {
                 self.gets.wcountries(*cit_wid)
             );
             return Some((
-                cit_country.lift(),
-                self.gets.tsuf(cit_topic).lift(),
-                cit_topic.lift(),
-                cit_wid.lift(),
+                *cit_country,
+                *self.gets.tsuf(cit_topic),
+                *cit_topic,
+                *cit_wid,
             ));
         }
     }
@@ -805,10 +809,10 @@ impl<'a> Iterator for CitingCoInstSuToByRef<'a> {
             );
             return Some((
                 *self.gets.icountry(cit_inst),
-                cit_inst.lift(),
-                self.gets.tsuf(cit_topic).lift(),
-                cit_topic.lift(),
-                cit_wid.lift(),
+                *cit_inst,
+                *self.gets.tsuf(cit_topic),
+                *cit_topic,
+                *cit_wid,
             ));
         }
     }
@@ -829,9 +833,9 @@ impl<'a> Iterator for CitingSourceCoSuByRef<'a> {
             let citing_source = self.gets.top_source(cit_wid);
             return Some((
                 *citing_source,
-                self.gets.icountry(citing_inst).lift(),
-                citing_sf.lift(),
-                cit_wid.lift(),
+                *self.gets.icountry(citing_inst),
+                *citing_sf,
+                *cit_wid,
             ));
         }
     }
@@ -845,10 +849,10 @@ impl<'a> Iterator for WCoIByRef<'a> {
             let cit_wid = reg_peek!(self.cit_wids);
             let citing_inst = opt_next!(self.cit_insts, self.cit_wids, self.gets.winsts(*cit_wid));
             return Some((
-                self.ref_wid.lift(),
-                self.gets.icountry(citing_inst).lift(),
-                citing_inst.lift(),
-                cit_wid.lift(),
+                *self.ref_wid,
+                *self.gets.icountry(citing_inst),
+                *citing_inst,
+                *cit_wid,
             ));
         }
     }
@@ -861,13 +865,7 @@ impl<'a> Iterator for SubfieldCountryInstSourceByRef<'a> {
         loop {
             let top_tup = reg_next!(self.sci_top);
             let cit_source = self.gets.top_source(&top_tup.3);
-            return Some((
-                top_tup.0.lift(),
-                top_tup.1.lift(),
-                top_tup.2.lift(),
-                cit_source.lift(),
-                top_tup.3.lift(),
-            ));
+            return Some((top_tup.0, top_tup.1, top_tup.2, *cit_source, top_tup.3));
         }
     }
 }
@@ -879,13 +877,7 @@ impl<'a> Iterator for SourceWCoiByRef<'a> {
         loop {
             let wcoi_tup = reg_next!(self.wcoi);
             let ref_source = self.gets.top_source(self.ref_wid);
-            return Some((
-                ref_source.lift(),
-                wcoi_tup.0.lift(),
-                wcoi_tup.1.lift(),
-                wcoi_tup.2.lift(),
-                wcoi_tup.3.lift(),
-            ));
+            return Some((*ref_source, wcoi_tup.0, wcoi_tup.1, wcoi_tup.2, wcoi_tup.3));
         }
     }
 }
@@ -897,13 +889,7 @@ impl<'a> Iterator for SubfieldWCoiByRef<'a> {
         loop {
             let wcoi_tup = reg_peek!(self.wcoi);
             let ref_sf = reg_next!(self.ref_sfs, self.wcoi, self.gets.wsubfields(*self.ref_wid));
-            return Some((
-                ref_sf.lift(),
-                wcoi_tup.0.lift(),
-                wcoi_tup.1.lift(),
-                wcoi_tup.2.lift(),
-                wcoi_tup.3.lift(),
-            ));
+            return Some((ref_sf, wcoi_tup.0, wcoi_tup.1, wcoi_tup.2, wcoi_tup.3));
         }
     }
 }
@@ -915,13 +901,7 @@ impl<'a> Iterator for SubfieldCountryInstSubfieldByRef<'a> {
         loop {
             let top_tup = reg_peek!(self.sci_top);
             let cit_sf = opt_next!(self.cit_sfs, self.sci_top, self.gets.wsubfields(top_tup.3));
-            return Some((
-                top_tup.0.lift(),
-                top_tup.1.lift(),
-                top_tup.2.lift(),
-                cit_sf.lift(),
-                top_tup.3.lift(),
-            ));
+            return Some((top_tup.0, top_tup.1, top_tup.2, *cit_sf, top_tup.3));
         }
     }
 }
@@ -937,13 +917,7 @@ impl<'a> Iterator for InstSubfieldCountryInstByRef<'a> {
                 self.sci_top,
                 self.gets.winsts(*self.ref_wid)
             );
-            return Some((
-                ref_inst.lift(),
-                top_tup.0.lift(),
-                top_tup.1.lift(),
-                top_tup.2.lift(),
-                top_tup.3.lift(),
-            ));
+            return Some((ref_inst, top_tup.0, top_tup.1, top_tup.2, top_tup.3));
         }
     }
 }
@@ -1001,7 +975,7 @@ impl<'a> Iterator for QedInf<'a> {
             let cit_wid = reg_peek!(self.cit_wids);
             let ref_source = self.gets.top_source(self.ref_wid);
             let ref_year = self.gets.year(self.ref_wid);
-            let ref_q = self.gets.sqy(&(*ref_source, *ref_year)).lift();
+            let ref_q = *self.gets.sqy(&(*ref_source, *ref_year));
             let cit_sf = opt_peek!(self.cite_sfs, self.cit_wids, self.gets.wsubfields(*cit_wid));
             let cit_country = opt_next!(
                 self.cite_countries,
@@ -1112,6 +1086,86 @@ impl<'a> Iterator for CountryBesties<'a> {
             return Some((
                 *ref_per,
                 (ref_country, *ref_inst, *ref_sf, *ref_wid, *cit_wid),
+            ));
+        }
+    }
+}
+
+impl<'a> Iterator for AuthorBestiePapers<'a> {
+    type Item = (
+        PartitionId,
+        StackFr<<Self as PartitioningIterator<'a>>::StackBasis>,
+    );
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let ref_wid = reg_peek!(self.ref_wids);
+            let ref_per = self.gets.wperiod(ref_wid);
+
+            let ref_ship = opt_peek!(self.ref_ships, self.ref_wids, self.gets.wships(*ref_wid));
+            let ref_author = self.gets.shipa(ref_ship);
+            if *ref_author == self.id {
+                self.ref_ships.as_mut().unwrap().next();
+                continue;
+            }
+
+            let cit_wid = opt_peek!(
+                self.cit_wids,
+                self.ref_ships.as_mut().unwrap(),
+                self.gets.citing(*ref_wid)
+            );
+
+            let cit_sf = opt_next!(
+                self.cit_sfs,
+                self.cit_wids.as_mut().unwrap(),
+                self.gets.wsubfields(*cit_wid)
+            );
+
+            return Some((
+                *ref_per,
+                (*ref_author, *ref_wid, *cit_sf, *ref_wid, *cit_wid),
+            ));
+        }
+    }
+}
+
+impl<'a> Iterator for AuthorBesties<'a> {
+    type Item = (
+        PartitionId,
+        StackFr<<Self as PartitioningIterator<'a>>::StackBasis>,
+    );
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let ref_wid = reg_peek!(self.ref_wids);
+            let ref_per = self.gets.wperiod(ref_wid);
+
+            let ref_ship = opt_peek!(self.ref_ships, self.ref_wids, self.gets.wships(*ref_wid));
+            let ref_author = self.gets.shipa(ref_ship);
+            if *ref_author == self.id {
+                self.ref_ships.as_mut().unwrap().next();
+                continue;
+            }
+
+            let cit_wid = opt_peek!(
+                self.cit_wids,
+                self.ref_ships.as_mut().unwrap(),
+                self.gets.citing(*ref_wid)
+            );
+
+            let cit_inst = opt_next!(
+                self.cit_insts,
+                self.cit_wids.as_mut().unwrap(),
+                self.gets.winsts(*cit_wid)
+            );
+
+            return Some((
+                *ref_per,
+                (
+                    *ref_author,
+                    *self.gets.icountry(cit_inst),
+                    *cit_inst,
+                    *ref_wid,
+                    *cit_wid,
+                ),
             ));
         }
     }
@@ -1256,7 +1310,7 @@ where
     const IS_SPEC: bool = I::IS_SPEC;
     const DEFAULT_PARTITION: u8 = 3; //2020
     fn new(id: NET<E>, gets: &'a Getters) -> Self {
-        let refs_it = E::works_from_ram(&gets, id.lift()).iter().peekable();
+        let refs_it = E::works_from_ram(&gets, id).iter().peekable();
         Self {
             gets,
             refs_it,
@@ -1279,7 +1333,7 @@ where
     type StackBasis = SB;
     const PARTITIONS: usize = N_PERS;
     fn new(id: NET<Countries>, gets: &'a Getters) -> Self {
-        let insts = gets.country_insts(id.lift()).iter().peekable();
+        let insts = gets.country_insts(id).iter().peekable();
         Self {
             gets,
             insts,
@@ -1304,6 +1358,46 @@ impl<'a> PartitioningIterator<'a> for CountryBesties<'a> {
             ref_wids: gets.cworks(id).iter().peekable(),
             ref_insts: None,
             ref_sfs: None,
+            cit_wids: None,
+        }
+    }
+}
+
+impl<'a> PartitioningIterator<'a> for AuthorBestiePapers<'a> {
+    type StackBasis = (
+        IntX<Authors, 0, true>,
+        IntX<Works, 0, true>,
+        IntX<Subfields, 2, true>,
+    );
+    type Root = Authors;
+    const PARTITIONS: usize = N_PERS;
+    fn new(id: NET<Self::Root>, gets: &'a Getters) -> Self {
+        Self {
+            gets,
+            id,
+            ref_wids: gets.aworks(id).iter().peekable(),
+            ref_ships: None,
+            cit_sfs: None,
+            cit_wids: None,
+        }
+    }
+}
+
+impl<'a> PartitioningIterator<'a> for AuthorBesties<'a> {
+    type StackBasis = (
+        IntX<Authors, 0, true>,
+        IntX<Countries, 1, false>,
+        IntX<Institutions, 1, false>,
+    );
+    type Root = Authors;
+    const PARTITIONS: usize = N_PERS;
+    fn new(id: NET<Self::Root>, gets: &'a Getters) -> Self {
+        Self {
+            gets,
+            id,
+            ref_wids: gets.aworks(id).iter().peekable(),
+            ref_ships: None,
+            cit_insts: None,
             cit_wids: None,
         }
     }

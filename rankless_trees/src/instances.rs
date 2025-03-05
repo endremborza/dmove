@@ -2,14 +2,14 @@ use std::vec::IntoIter;
 
 use crate::{
     components::{
-        CiteSubSourceTop, CitingCoInstSuToByRef, CitingCoSuToByRef, CitingSourceCoSuByRef,
-        CountryBesties, CountryInstsPost, FullRefCountryInstSubfieldByRef, InstBesties, IntX,
-        PostRefIterWrap, QedInf, RefSubCiSubTByRef, SourceSubfieldCiCoByRef, SourceWCoiByRef,
-        StackBasis, StackFr, SubfieldCountryInstByRef, SubfieldCountryInstSourceByRef,
-        SubfieldCountryInstSubfieldByRef, SubfieldRefTopicCountryInst, SubfieldWCoiByRef,
-        WorkingAuthors,
+        AuthorBestiePapers, AuthorBesties, CiteSubSourceTop, CitingCoInstSuToByRef,
+        CitingCoSuToByRef, CitingSourceCoSuByRef, CountryBesties, CountryInstsPost,
+        FullRefCountryInstSubfieldByRef, InstBesties, IntX, PostRefIterWrap, QedInf,
+        RefSubCiSubTByRef, SourceSubfieldCiCoByRef, SourceWCoiByRef, StackBasis, StackFr,
+        SubfieldCountryInstByRef, SubfieldCountryInstSourceByRef, SubfieldCountryInstSubfieldByRef,
+        SubfieldRefTopicCountryInst, SubfieldWCoiByRef, WorkingAuthors,
     },
-    interfacing::{Getters, NumberedEntity, NET},
+    interfacing::Getters,
     io::{
         BufSerChildren, BufSerTree, CollapsedNode, FullTreeQuery, ResCvp, TreeBasisState, TreeQ,
         TreeResponse, TreeSpec, WorkCiteT, WorkWInd, WT,
@@ -19,6 +19,7 @@ use crate::{
 use muwo_search::{ordered_calls, sorted_iters_to_arr, ExtendableArr, OrderedMapper};
 use rankless_rs::{
     agg_tree::{AggTreeBase, ReinstateFrom, Updater},
+    common::{NumberedEntity, NET},
     gen::a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Works},
 };
 
@@ -487,9 +488,7 @@ impl<C> FoldStackBase<C> for WorkTree {
 
 #[derive_tree_getter(Authors)]
 mod author_trees {
-
     use super::*;
-
     pub type Tree1<'a> = PostRefIterWrap<'a, Authors, SourceWCoiByRef<'a>>;
     pub type Tree2<'a> = PostRefIterWrap<'a, Authors, CitingCoSuToByRef<'a>>;
     pub type Tree3<'a> = PostRefIterWrap<'a, Authors, SubfieldCountryInstSubfieldByRef<'a>>;
@@ -497,6 +496,8 @@ mod author_trees {
     pub type Tree5<'a> = PostRefIterWrap<'a, Authors, RefSubCiSubTByRef<'a>>;
     pub type Tree6<'a> = PostRefIterWrap<'a, Authors, CitingCoInstSuToByRef<'a>>;
     pub type Tree7<'a> = PostRefIterWrap<'a, Authors, SourceSubfieldCiCoByRef<'a>>;
+    pub type Tree8<'a> = AuthorBestiePapers<'a>;
+    pub type Tree9<'a> = AuthorBesties<'a>;
 }
 
 #[derive_tree_getter(Institutions)]
@@ -613,6 +614,7 @@ pub mod big_test_tree {
 
     use super::*;
     use crate::io::{AttributeLabel, TreeRunManager};
+    use dmove::{BigId, MappableEntity, NamespacedEntity};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use test_tools::*;
 
@@ -623,15 +625,23 @@ pub mod big_test_tree {
         IntX<Countries, 0, true>,
     );
 
-    struct TestEntity;
+    pub struct BigTestEntity;
 
-    impl Entity for TestEntity {
+    impl Entity for BigTestEntity {
         const N: usize = 0;
         const NAME: &str = "test";
         type T = u8;
     }
 
-    #[derive_tree_getter(TestEntity)]
+    impl NamespacedEntity for BigTestEntity {
+        const NS: &str = "test";
+    }
+
+    impl MappableEntity for BigTestEntity {
+        type KeyType = BigId;
+    }
+
+    #[derive_tree_getter(BigTestEntity)]
     mod submod {
         use super::*;
         pub type Tree1 = Tither<BigStack>;
@@ -666,6 +676,7 @@ pub mod big_test_tree {
             (0..2_u32.pow(i))
                 .map(|e| AttributeLabel {
                     name: format!("{pref}{e}"),
+                    semantic_id: format!("{pref}{e}"),
                     spec_baseline: 0.5,
                 })
                 .collect::<Box<[AttributeLabel]>>()
@@ -679,8 +690,8 @@ pub mod big_test_tree {
             big: None,
         };
 
-        let tstate = TreeRunManager::<(TestEntity, TestEntity)>::fake();
-        let name = TestEntity::NAME.to_string();
+        let tstate = TreeRunManager::<(BigTestEntity, BigTestEntity)>::fake();
+        let name = BigTestEntity::NAME.to_string();
         let id = "0".to_string();
 
         let ts1 = tstate.clone();
@@ -703,6 +714,7 @@ pub mod big_test_tree {
 mod tests {
     use super::*;
     use crate::io::{JsSerChildren, TreeRunManager};
+    use dmove::{BigId, MappableEntity, NamespacedEntity};
     use std::{ops::Deref, sync::Arc};
     use test_tools::{TestSB, Tither};
 
@@ -717,6 +729,14 @@ mod tests {
         const N: usize = 0;
         const NAME: &str = "test";
         type T = u8;
+    }
+
+    impl NamespacedEntity for TestEntity {
+        const NS: &str = "test";
+    }
+
+    impl MappableEntity for TestEntity {
+        type KeyType = BigId;
     }
 
     #[derive_tree_getter(TestEntity)]
