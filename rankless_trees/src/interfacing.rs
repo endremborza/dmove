@@ -1,4 +1,4 @@
-use std::{f64, fmt::Display, sync::Arc};
+use std::{f64, sync::Arc};
 
 use crate::{
     extern_features::{CitSubfieldsConcentrationMarker, RefSubfieldsConcentrationMarker},
@@ -7,11 +7,13 @@ use crate::{
 };
 use rankless_rs::{
     common::{
-        init_empty_slice, BeS, InstRelMarker, MainWorkMarker, QuickAttPair, QuickMap, QuickestBox,
-        QuickestVBox, Stowage, WorkLoader, YearlyCitationsMarker, YearlyPapersMarker,
+        init_empty_slice, BeS, MainEntity, MainWorkMarker, MarkedBackendLoader, NumberedEntity,
+        QuickAttPair, QuickMap, QuickestBox, QuickestVBox, Stowage, Top3AffCountryMarker,
+        Top3AuthorMarker, Top3CitingSfMarker, Top3JournalMarker, Top3PaperSfMarker,
+        Top3PaperTopicMarker, WorkLoader, YearlyCitationsMarker, YearlyPapersMarker, NET,
     },
     gen::{
-        a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Works},
+        a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Topics, Works},
         a2_init_atts::{
             AuthorshipAuthor, AuthorshipInstitutions, InstCountries, SourceYearQs, TopicSubfields,
             WorkAuthorships, WorkSources, WorkTopics, WorkYears, WorksNames,
@@ -21,26 +23,26 @@ use rankless_rs::{
     },
     steps::{
         derive_links1::{CountryInsts, WorkPeriods},
-        derive_links5::{EraRec, InstRelation, N_RELS},
+        derive_links5::EraRec,
     },
-    CiteCountMarker, NameExtensionMarker, NameMarker, Quickest, SemanticIdMarker, WorkCountMarker,
+    CiteCountMarker, NameExtensionMarker, NameMarker, QuickestNumbered, SemanticIdMarker,
+    WorkCountMarker,
 };
 
 use dmove::{
     BackendLoading, BigId, ByteFixArrayInterface, CompactEntity, Entity,
     EntityImmutableRefMapperBackend, Locators, MappableEntity, MarkedAttribute, NamespacedEntity,
-    UnsignedNumber, VaST, VarAttBuilder, VarBox, VariableSizeAttribute, VattArrPair, ET, MAA,
+    UnsignedNumber, VaST, VarAttBuilder, VarBox, VattArrPair, ET, MAA,
 };
 use hashbrown::HashMap;
 use rand::Rng;
-use serde::{de::DeserializeOwned, Serialize};
 
 const SPEC_CORR_RATE: f64 = 0.45;
 
-pub type NET<E> = <E as NumberedEntity>::T;
 type VB<E> = BeS<QuickAttPair, E>;
 type FB<E> = BeS<QuickestBox, E>;
 type MB<E> = BeS<QuickMap, E>;
+type TopRec<E> = [(u32, ET<E>); 3];
 
 pub struct Getters {
     ifs: Interfaces,
@@ -227,9 +229,16 @@ make_ent_interfaces!(
     wcounts -> WorkCountMarker, ccounts -> CiteCountMarker;
     yearly_papers - YearlyPapersMarker | EraRec,
     yearly_cites - YearlyCitationsMarker | EraRec,
-    inst_rels - InstRelMarker | [InstRelation; N_RELS];
+    top_journals - Top3JournalMarker | TopRec<Sources>,
+    top_authors - Top3AuthorMarker | TopRec<Authors>,
+    top_aff_countries - Top3AffCountryMarker | TopRec<Countries>,
+    top_paper_topic - Top3PaperTopicMarker | TopRec<Topics>,
+    top_citing_sfc - Top3CitingSfMarker | TopRec<Subfields>,
+    top_paper_sfc - Top3PaperSfMarker | TopRec<Subfields>;
+    // inst_rels - InstRelMarker | [InstRelation; N_RELS];
     ref_sfc : RefSubfieldsConcentrationMarker,
     cit_sfc : CitSubfieldsConcentrationMarker
+
 );
 
 make_ent_interfaces!(
@@ -257,20 +266,8 @@ pub trait FixAtt<Mark>: MarkedAttribute<Mark> {
     fn load(stowage: &Stowage) -> Box<[Self::FT]>;
 }
 
-pub trait NumberedEntity: Entity {
-    type T: UnsignedNumber + DeserializeOwned + Serialize + Ord + Copy + Display;
-}
-
 pub trait WorksFromMemory: MarkedAttribute<MainWorkMarker> + NumberedEntity {
     fn works_from_ram(gets: &Getters, id: NET<Self>) -> &[WT];
-}
-
-impl<E> NumberedEntity for E
-where
-    E: Entity,
-    ET<E>: UnsignedNumber + Serialize + DeserializeOwned + Ord + Copy + Display,
-{
-    type T = ET<E>;
 }
 
 impl<E> NodeInterfaces<E>
@@ -278,7 +275,7 @@ where
     E: NodeInterfaceable,
 {
     pub fn update_stats(self, stats: &mut AttributeLabelUnion, full_cc: f64) {
-        update_stats::<E>(self.names, self.ccounts, stats, full_cc)
+        update_stats::<E>(self.names, self.ccounts, Vec::new(), stats, full_cc)
     }
 }
 
@@ -287,7 +284,13 @@ where
     E: NodeInterfaceable + RootInterfaceable,
 {
     pub fn update_stats(self, stats: &mut AttributeLabelUnion, full_cc: f64) {
-        update_stats::<E>(self.names, self.ccounts, stats, full_cc)
+        update_stats::<E>(
+            self.names,
+            self.ccounts,
+            self.sem_ids.0.to_vec(),
+            stats,
+            full_cc,
+        )
     }
 }
 
@@ -347,9 +350,10 @@ impl Getters {
 impl<T, Mark> StringAtt<Mark> for T
 where
     T: MarkedAttribute<Mark>,
-    MAA<T, Mark>: NamespacedEntity + CompactEntity + VariableSizeAttribute + Entity<T = String>,
+    MAA<T, Mark>:
+        CompactEntity + Entity<T = String> + MarkedBackendLoader<QuickestVBox, BE = VarBox<String>>,
 {
-    fn load(stowage: &Stowage) -> VarBox<ET<MAA<Self, Mark>>> {
+    fn load(stowage: &Stowage) -> VarBox<String> {
         stowage.get_marked_interface::<Self, Mark, QuickestVBox>()
     }
 }
@@ -390,10 +394,9 @@ where
 
 fn reverse_id<E>(stowage: &Stowage) -> Box<[BigId]>
 where
-    E: Entity + MappableEntity<KeyType = BigId> + NamespacedEntity,
-    E::T: UnsignedNumber,
+    E: MainEntity + NamespacedEntity,
 {
-    let interface = stowage.get_entity_interface::<E, Quickest>();
+    let interface = stowage.get_entity_interface::<E, QuickestNumbered>();
     let mut out = init_empty_slice::<E, BigId>();
     for (k, v) in interface.0 {
         out[v.to_usize()] = k;
@@ -404,23 +407,29 @@ where
 fn update_stats<E>(
     names: VarBox<String>,
     ccounts: Box<[<E as NumAtt<CiteCountMarker>>::Num]>,
+    semantic_ids: Vec<String>,
     stats: &mut AttributeLabelUnion,
     full_cc: f64,
 ) where
     E: NodeInterfaceable,
 {
-    let mut elevel = Vec::new();
+    const SPEC_RATE: f64 = 1.0 - SPEC_CORR_RATE;
     let numer_add = (full_cc / f64::from(E::N as u32)) * SPEC_CORR_RATE;
-    let full_denom = full_cc;
-    for (i, name) in names.0.to_vec().into_iter().enumerate() {
-        //TODO: u32 counts (max 4B) need to be ensured
-        let spec_baseline = (f64::from(ccounts[i].to_usize() as u32) * (1.0 - SPEC_CORR_RATE)
-            + numer_add)
-            / full_denom;
-        elevel.push(AttributeLabel {
-            name,
-            spec_baseline,
-        });
-    }
-    stats.insert(E::NAME.to_string(), elevel.into());
+    let elevel = names
+        .0
+        .to_vec()
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| {
+            //TODO: u32 counts (max 4B) need to be ensured
+            let numer = f64::from(ccounts[i].to_usize() as u32) * SPEC_RATE + numer_add;
+            let spec_baseline = numer / full_cc;
+            AttributeLabel {
+                name,
+                semantic_id: semantic_ids.get(i).unwrap_or(&"".to_string()).to_string(),
+                spec_baseline,
+            }
+        })
+        .collect();
+    stats.insert(E::NAME.to_string(), elevel);
 }
