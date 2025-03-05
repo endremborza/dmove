@@ -1,8 +1,10 @@
 use std::{
     collections::{BTreeSet, VecDeque},
-    fmt::Debug,
+    fmt::{Debug, Display},
     fs::File,
+    hash::Hash,
     io::{self, Write},
+    ops::Add,
     path::PathBuf,
     rc::Rc,
     sync::{Arc, Condvar, Mutex},
@@ -98,7 +100,7 @@ where
         size.to_usize() * Self::T::DIVISOR
     }
 
-    fn subtype_from_buf(slice: &[u8]) -> <Self::T as VarSizedAttributeElement>::SubType {
+    fn subtype_from_buf(slice: &[u8]) -> VaST<Self> {
         VaST::<Self>::from_fbytes(slice)
     }
 }
@@ -155,11 +157,27 @@ pub trait ByteArrayInterface {
     fn from_bytes(buf: &[u8]) -> Self;
 }
 
-pub trait UnsignedNumber: Ord + Clone + Copy + Sized + ByteFixArrayInterface + InitEmpty {
+pub trait UnsignedNumber:
+    Ord
+    + Hash
+    + Clone
+    + Copy
+    + Sized
+    + Send
+    + Sync
+    + ByteFixArrayInterface
+    + InitEmpty
+    + Display
+    + Debug
+    + Add<Output = Self>
+{
     fn to_usize(&self) -> usize;
     fn from_usize(n: usize) -> Self;
     fn cast_big_id(n: BigId) -> Self;
-    fn lift(&self) -> Self;
+    fn unit() -> Self;
+    fn inc(&mut self) {
+        *self = *self + Self::unit();
+    }
 }
 
 pub trait MetaIntegrator<T>: Sized {
@@ -173,7 +191,7 @@ pub trait MetaIntegrator<T>: Sized {
         self.add_elem(&e)
     }
 
-    fn add_iter<'a, I>(builder: &mut MainBuilder, elems: I, name: &str)
+    fn add_iter<'a, I>(builder: &Mutex<MainBuilder>, elems: I, name: &str)
     where
         I: Iterator<Item = &'a T>,
         T: 'a,
@@ -181,23 +199,23 @@ pub trait MetaIntegrator<T>: Sized {
         Self::add_iter_wrap(builder, elems, name, Self::add_elem);
     }
 
-    fn add_iter_owned<I>(builder: &mut MainBuilder, elems: I, name: &str)
+    fn add_iter_owned<I>(builder: &Mutex<MainBuilder>, elems: I, name: &str)
     where
         I: Iterator<Item = T>,
     {
         Self::add_iter_wrap(builder, elems, name, Self::add_elem_owned)
     }
 
-    fn add_iter_wrap<I, F, MT>(builder: &mut MainBuilder, elems: I, name: &str, c: F)
+    fn add_iter_wrap<I, F, MT>(builder: &Mutex<MainBuilder>, elems: I, name: &str, c: F)
     where
         I: Iterator<Item = MT>,
         F: Fn(&mut Self, MT) -> (),
     {
-        let mut s = Self::setup(builder, name);
+        let mut s = Self::setup(&builder.lock().unwrap(), name);
         for e in elems {
             c(&mut s, e);
         }
-        s.post(builder);
+        s.post(&mut builder.lock().unwrap());
     }
 }
 
@@ -301,21 +319,19 @@ where
     }
 }
 
-impl<T> InitEmpty for Arc<T>
-where
-    T: InitEmpty,
-{
+impl InitEmpty for Condvar {
     fn init_empty() -> Self {
-        Arc::new(T::init_empty())
+        Condvar::new()
     }
 }
 
-impl<T> InitEmpty for (Mutex<T>, Condvar)
+impl<T1, T2> InitEmpty for (T1, T2)
 where
-    T: InitEmpty,
+    T1: InitEmpty,
+    T2: InitEmpty,
 {
     fn init_empty() -> Self {
-        (Mutex::new(T::init_empty()), Condvar::new())
+        (T1::init_empty(), T2::init_empty())
     }
 }
 
@@ -387,8 +403,8 @@ macro_rules! uint_impl {
                 n as Self
             }
 
-            fn lift(&self) -> Self {
-                *self
+            fn unit() -> Self {
+                1
             }
         })*
     };
@@ -450,9 +466,24 @@ macro_rules! empty_coll {
     };
 }
 
+macro_rules! empty_wrap {
+    ($($ty:ty),*) => {
+        $(impl <T> InitEmpty for $ty
+            where T: InitEmpty
+            {
+                fn init_empty() -> Self {
+                    Self::new(T::init_empty())
+                }
+            }
+        )*
+    };
+}
+
 empty_num!(u8, u16, u32, u64, u128);
 
 empty_coll!(Vec<T>; T, BTreeSet<T>; T, HashMap<K, V>; K-V, VecDeque<T>; T);
+
+empty_wrap!(Mutex<T>, Arc<T>);
 
 use crate::{var_size_attributes::VaST, VarSizedAttributeElement};
 
