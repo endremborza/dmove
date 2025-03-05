@@ -206,7 +206,7 @@ where
 
         while let Ok(_) = counts.read_exact(size_slice) {
             let size = E::SizeType::from_fbytes(size_slice);
-            locators_size.push(size.lift());
+            locators_size.push(size);
             locators_loc.push(LT::from_usize(seek));
             seek += size.to_usize();
         }
