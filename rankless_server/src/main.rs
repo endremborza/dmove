@@ -27,24 +27,35 @@ use tower_http::{
 
 use muwo_search::SearchEngine;
 use rankless_rs::{
-    gen::a1_entity_mapping::{Authors, Countries, Institutions, Qs, Sources, Subfields, Topics},
+    common::NET,
+    gen::a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Topics},
     steps::{
-        a1_entity_mapping::{RawYear, YearInterface, Years},
+        a1_entity_mapping::{Qs, RawYear, YearInterface, Years},
         derive_links5::{EraRec, InstRelation},
     },
     Stowage,
 };
 use rankless_trees::{
-    interfacing::{Getters, NodeInterfaces, RootInterfaceable, RootInterfaces, NET},
+    interfacing::{Getters, NodeInterfaces, RootInterfaceable, RootInterfaces},
     io::{TreeQ, TreeResponse, TreeRunManager},
     AttributeLabelUnion,
 };
 
+const PORT: u16 = 3038;
 const N_THREADS: usize = 16;
 // const UPPER_LIMIT: u32 = 1_000_000;
 const UPPER_LIMIT: u32 = 100_000;
+const ETYPE_ENC: [&str; 6] = [
+    Institutions::NAME,
+    Authors::NAME,
+    Subfields::NAME,
+    Countries::NAME,
+    Sources::NAME,
+    Topics::NAME,
+];
 
 type InstTrm = TreeRunManager<(Institutions, Authors, Subfields, Countries, Sources)>;
+type Coords = [f64; 2];
 
 #[derive(Deserialize)]
 struct BasicQ {
@@ -57,8 +68,27 @@ struct ViewResult {
     sr: SearchResult,
     #[serde(flatten)]
     ext: ResultExtension,
+    #[serde(flatten)]
+    prep_ext: PostAttResultExtension,
     similars: Vec<SearchResult>,
-    comparisons: Vec<SearchResult>,
+}
+
+#[derive(Serialize, Clone)]
+struct PostAttRelatedEntity {
+    name: String,
+    #[serde(rename = "semanticId")]
+    semantic_id: String,
+    etype: String,
+    #[serde(rename = "relType")]
+    rel_type: u8,
+    score: u32,
+}
+
+struct PreAttRelatedEntity {
+    dm_id: u32,
+    etype_id: u8,
+    rel_type: u8,
+    score: u32,
 }
 
 #[derive(Serialize)]
@@ -77,9 +107,9 @@ struct NameState {
     engine: SearchEngine,
     responses: Box<[SearchResult]>,
     exts: Box<[ResultExtension]>,
-    sf_touchstones: Box<[SearchResult]>,
-    means: Box<[f64; 2]>,
-    vars: Box<[f64; 2]>,
+    prep_exts: Box<[PreAttResultExtension]>,
+    means: Box<Coords>,
+    vars: Box<Coords>,
     pub semantic_id_map: HashMap<String, SemVal>,
     query_tree: KdTree<KDItem>,
 }
@@ -89,6 +119,7 @@ struct SemVal {
     result_id: usize,
     dm_id: usize,
 }
+
 #[derive(Serialize, Clone)]
 struct InstRelOut {
     start: u16,
@@ -116,10 +147,8 @@ struct SearchResult {
 
 #[derive(Serialize, Clone)]
 struct ResultExtension {
-    #[serde(rename = "instRels")]
-    inst_rels: Box<[InstRelOut]>,
-    #[serde(rename = "sfCoords")]
-    sf_coords: (f64, f64),
+    // #[serde(rename = "instRels")]
+    // inst_rels: Box<[InstRelOut]>,
     #[serde(rename = "startYear")]
     start_year: RawYear,
     #[serde(rename = "yearlyPapers")]
@@ -128,12 +157,23 @@ struct ResultExtension {
     yearly_cites: EraRec,
 }
 
+#[derive(Serialize, Clone)]
+struct PostAttResultExtension {
+    #[serde(rename = "primeRelations")]
+    pub prime_relations: Vec<PostAttRelatedEntity>,
+}
+
+struct PreAttResultExtension {
+    pub prime_relations: Box<[PreAttRelatedEntity]>,
+}
+
 struct KDItem {
-    point: [f64; 2],
+    point: Coords,
     id: usize,
 }
 
 trait PrepFilter {
+    //TODO: move to dmove steps, so that gets is not needed
     fn filter_sr(sr: &SearchResult, _gets: &Getters) -> bool {
         (sr.full_name.trim().len() > 0)
             & (sr.semantic_id.trim().len() > 0)
@@ -153,19 +193,11 @@ i_fil!(Countries, Subfields, Institutions);
 
 impl PrepFilter for Authors {
     fn filter_sr(sr: &SearchResult, _gets: &Getters) -> bool {
-        use serde_json::to_string_pretty;
-        let out = (sr.full_name.trim().len() > 0)
+        (sr.full_name.trim().len() > 0)
             & (sr.semantic_id.trim().len() > 0)
             & (sr.papers > 1)
             & (sr.citations > 2)
-            & (sr.papers < 1000);
-        if [2261109, 2066590, 3253229].contains(&sr.dm_id) {
-            println!(
-                "\n\nFOUND ONE {out}\n{}\n\n\n",
-                to_string_pretty(sr).unwrap()
-            );
-        }
-        out
+            & (sr.papers < 1000)
     }
 }
 
@@ -174,7 +206,7 @@ impl PrepFilter for Sources {
         let id = NET::<Sources>::from_usize(sr.dm_id);
         let mut best_q = 5;
         for ty8 in YearInterface::iter() {
-            let q = gets.sqy(&(id, ty8)).lift();
+            let q = *gets.sqy(&(id, ty8));
             if q != 0 {
                 best_q = min(best_q, q);
             }
@@ -219,23 +251,13 @@ impl SearchResult {
 }
 
 impl ResultExtension {
-    fn from_resps<E>(
-        responses: &Box<[SearchResult]>,
-        entif: &RootInterfaces<E>,
-        gets: &Getters,
-    ) -> Box<[Self]>
+    fn from_resps<E>(responses: &Box<[SearchResult]>, entif: &RootInterfaces<E>) -> Box<[Self]>
     where
         E: RootInterfaceable,
     {
-        let iif = RootInterfaces::<Institutions>::new(&gets.stowage);
         let mut out = Vec::new();
         for res in responses.iter() {
             let i = res.dm_id;
-            let inst_rels = entif.inst_rels[i]
-                .iter()
-                .take_while(|e| e.papers > 0)
-                .map(|e| InstRelOut::from(e, &iif, gets))
-                .collect();
 
             let mut sy_ind = 0;
             for (yi, ycount) in entif.yearly_papers[i].iter().enumerate() {
@@ -249,8 +271,6 @@ impl ResultExtension {
             // let yearly_papers = get_rem(&entif.yearly_papers);
 
             out.push(Self {
-                inst_rels,
-                sf_coords: (entif.ref_sfc[i], entif.cit_sfc[i]),
                 start_year: YearInterface::reverse(sy_ind as ET<Years>),
                 yearly_cites: entif.yearly_cites[i].clone(),
                 yearly_papers: entif.yearly_papers[i].clone(),
@@ -261,29 +281,95 @@ impl ResultExtension {
     }
 }
 
+impl PreAttResultExtension {
+    fn from_resps<E>(responses: &Box<[SearchResult]>, entif: &RootInterfaces<E>) -> Box<[Self]>
+    where
+        E: RootInterfaceable,
+    {
+        responses
+            .iter()
+            .map(|res| {
+                let i = res.dm_id;
+                let mut prime_relations = Vec::new();
+                add_to_relations::<Subfields, _>(&entif.top_paper_sfc[i], &mut prime_relations, 0);
+                add_to_relations::<Subfields, _>(&entif.top_citing_sfc[i], &mut prime_relations, 1);
+                add_to_relations::<Topics, _>(&entif.top_paper_topic[i], &mut prime_relations, 2);
+                add_to_relations::<Countries, _>(
+                    &entif.top_aff_countries[i],
+                    &mut prime_relations,
+                    3,
+                );
+                add_to_relations::<Sources, _>(&entif.top_journals[i], &mut prime_relations, 4);
+                add_to_relations::<Authors, _>(&entif.top_authors[i], &mut prime_relations, 5);
+                Self {
+                    prime_relations: prime_relations.into(),
+                }
+            })
+            .collect()
+    }
+
+    fn to_post(&self, satts: &AttributeLabelUnion) -> PostAttResultExtension {
+        let prime_relations = self
+            .prime_relations
+            .iter()
+            .map(|sr| {
+                let etype = ETYPE_ENC[sr.etype_id as usize];
+                let att = &satts[etype][sr.dm_id.to_usize()];
+                PostAttRelatedEntity {
+                    semantic_id: att.semantic_id.clone(),
+                    name: att.name.clone(),
+                    etype: etype.to_string(),
+                    rel_type: sr.rel_type,
+                    score: sr.score,
+                }
+            })
+            .collect();
+        PostAttResultExtension { prime_relations }
+    }
+}
+
+fn add_to_relations<RE, T>(arr: &[(u32, T)], prels: &mut Vec<PreAttRelatedEntity>, rel_type: u8)
+where
+    RE: Entity,
+    T: UnsignedNumber,
+{
+    arr.iter().for_each(|e| {
+        let eu = e.1.to_usize() as u32;
+        let etype_id = ETYPE_ENC
+            .iter()
+            .enumerate()
+            .filter(|e| *e.1 == RE::NAME)
+            .next()
+            .unwrap()
+            .0 as u8;
+        if eu != 0 {
+            prels.push(PreAttRelatedEntity {
+                rel_type,
+                dm_id: eu,
+                etype_id,
+                score: e.0,
+            })
+        }
+    });
+}
+
 impl NameState {
     fn new<E>(entif: &RootInterfaces<E>, gets: &Getters) -> Self
     where
         E: RootInterfaceable + PrepFilter,
     {
         let responses = Self::get_resps(entif, gets);
-        let exts = ResultExtension::from_resps(&responses, entif, gets);
         let engine = SearchEngine::new(responses.iter().map(|e| e.full_name.clone()));
         let mut sem_map = HashMap::new();
         let mut kdt_base = Vec::new();
-        let mut sf_kdt_base = Vec::new();
         let (mut means, mut vars) = ([0.0, 0.0], [0.0, 0.0]);
         let float_n = f64::from(responses.len() as u32);
-        let n_max_comps: usize = min(max(20, responses.len() / 20), 1000);
         for (i, res) in responses.iter().enumerate() {
             let kd_rec = get_arr_base(res);
             for j in 0..kd_rec.len() {
                 means[j] += kd_rec[j] / float_n;
             }
             kdt_base.push(kd_rec);
-            if i < n_max_comps {
-                sf_kdt_base.push([exts[i].sf_coords.0, exts[i].sf_coords.1]);
-            }
             sem_map.insert(
                 res.semantic_id.clone(),
                 SemVal {
@@ -307,34 +393,16 @@ impl NameState {
         }
 
         let query_tree = tree_from_iter(kdt_base);
-        let sf_tree = tree_from_iter(sf_kdt_base);
-
-        let mut sf_touchstones = Vec::new();
-        const ENDS: [f64; 2] = [-100.0, 100.0];
-        for x in ENDS {
-            for y in ENDS {
-                let query = [x, y];
-                let mut poss_tss: Vec<usize> = sf_tree
-                    .nearests(&query, 2)
-                    .iter()
-                    .map(|e| e.item.id.clone())
-                    .collect();
-                if coord_dist(&exts[poss_tss[0]], &exts[poss_tss[1]]) < 0.2 {
-                    poss_tss.pop();
-                }
-                sf_touchstones.extend(poss_tss.iter().map(|e| responses[*e].clone()));
-            }
-        }
 
         Self {
             engine: engine.into(),
+            exts: ResultExtension::from_resps(&responses, entif),
+            prep_exts: PreAttResultExtension::from_resps(&responses, entif),
             responses,
-            exts,
             semantic_id_map: sem_map.into(),
             query_tree,
             means: means.into(),
             vars: vars.into(),
-            sf_touchstones: sf_touchstones.into(),
         }
     }
 
@@ -365,8 +433,8 @@ impl NameState {
     }
 }
 
-fn coord_dist(l: &ResultExtension, r: &ResultExtension) -> f64 {
-    (l.sf_coords.0 - r.sf_coords.0).powf(2.0) + (l.sf_coords.1 - r.sf_coords.1).powf(2.0)
+fn coord_dist(l: &Coords, r: &Coords) -> f64 {
+    (l[0] - r[0]).powf(2.0) + (l[1] - r[1]).powf(2.0)
 }
 
 impl EntityDescription {
@@ -427,31 +495,34 @@ macro_rules! multi_route {
             NodeInterfaces::<Topics>::new(&gets.stowage).update_stats(&mut static_att_union.lock().unwrap(), ccount);
             NodeInterfaces::<Qs>::new(&gets.stowage).update_stats(&mut static_att_union.lock().unwrap(), ccount);
 
+            let mut ns_map: HashMap<&str, NameState> = HashMap::from_iter(ei_ns_map.into_iter().map(|(k,t)|
+                (k, t.join().unwrap())
+            ));
+            let satts = Arc::new(Arc::into_inner(static_att_union).unwrap().into_inner().unwrap());
+
             let mut tops = Vec::new();
-            let mut v = Vec::new();
+            let mut descriptions = Vec::new();
             let mut sem_maps = HashMap::new();
             let name_state_route = Router::new()
             $(.route(&format!("/names/{}", <$T as Entity>::NAME), get(name_get))
+                //TODO - this can be done outside a macro if the hashmap is done
                 .route(&format!("/slice/{}/:from/:to", <$T as Entity>::NAME), get(slice_get))
                 .route(&format!("/views/{}/:semantic_id", <$T as Entity>::NAME), get(view_get))
                 .with_state({
-                    let nstate = ei_ns_map.remove(<$T>::NAME).unwrap().join().expect("NState thread panicked");
+                    let nstate = ns_map.remove(<$T>::NAME).expect("NState thread panicked");
                     let entities = top_slice(&nstate.responses);
                     let name = <$T as Entity>::NAME.to_string();
                     let dmid_map = HashMap::from_iter(nstate.semantic_id_map.clone().into_iter().map(|(k, v)| (k, v.dm_id)));
                     sem_maps.insert(name.clone(), dmid_map);
                     tops.push(TopResult {name,  entities });
-                    v.push(EntityDescription::new::<$T>(nstate.responses.len()));
-                    nstate.into()
+                    descriptions.push(EntityDescription::new::<$T>(nstate.responses.len()));
+                    (nstate.into(), satts.clone())
                 })
             )*;
-            for t in ei_ns_map.into_values() {
-                t.join().unwrap();
-            }
 
-
-            let tm: Arc<InstTrm> = TreeRunManager::new(gets, static_att_union, sem_maps, N_THREADS);
-            (name_state_route, tm, v, tops)
+            assert_eq!(ns_map.len(), 0);
+            let tm: Arc<InstTrm> = TreeRunManager::new(gets, satts, sem_maps, N_THREADS);
+            (name_state_route, tm, descriptions, tops)
         }
     };
 }
@@ -464,9 +535,9 @@ fn add_thread<E>(
 ) where
     E: RootInterfaceable + PrepFilter,
 {
-    let gets_clone = Arc::clone(&gets);
-    let au_clone = Arc::clone(&atts);
-    let shared_cvp = Arc::clone(&cv_pair);
+    let gets_clone = Arc::clone(gets);
+    let au_clone = Arc::clone(atts);
+    let shared_cvp = Arc::clone(cv_pair);
     let thread = std::thread::spawn(move || {
         let ent_intf = RootInterfaces::<E>::new(&gets_clone.stowage);
         let nstate = NameState::new::<E>(&ent_intf, &gets_clone);
@@ -526,9 +597,8 @@ async fn main() {
 
     let app = Router::new().nest("/v1", api);
 
-    let loc_addr = SocketAddr::from(([127, 0, 0, 1], 3038));
-    println!("loaded and set-up in {}", now.elapsed().as_secs());
-    println!("listening on local: {}", loc_addr);
+    let loc_addr = SocketAddr::from(([127, 0, 0, 1], PORT));
+    println!("{loc_addr} set-up in {}", now.elapsed().as_secs());
     axum_server::bind(loc_addr)
         .serve(app.clone().into_make_service())
         .await
@@ -537,9 +607,10 @@ async fn main() {
 
 async fn slice_get(
     Path(ends): Path<(usize, usize)>,
-    state: State<Arc<NameState>>,
+    states: State<(Arc<NameState>, Arc<AttributeLabelUnion>)>,
 ) -> Response<Body> {
     const MAX_SLICE: usize = 1000;
+    let state = states.0 .0;
     let start = min(ends.0, state.responses.len() - 1);
     let end = min(
         max(start + 1, min(start + MAX_SLICE, ends.1)),
@@ -582,8 +653,10 @@ async fn tops_get(tops_state: State<Arc<Vec<TopResult>>>) -> Json<Vec<TopResult>
 
 async fn view_get(
     Path(semantic_id): Path<String>,
-    state: State<Arc<NameState>>,
+    states: State<(Arc<NameState>, Arc<AttributeLabelUnion>)>,
 ) -> Json<Option<ViewResult>> {
+    let state = states.0 .0;
+    let satts = states.0 .1;
     let iopt = state.semantic_id_map.get(&semantic_id);
     let out = match iopt {
         None => None,
@@ -602,12 +675,11 @@ async fn view_get(
                 .map(|e| state.responses[e.item.id].clone())
                 .collect();
 
-            let comparisons = state.sf_touchstones.clone().to_vec();
             let vr = ViewResult {
                 similars,
-                comparisons,
                 ext: ext.clone(),
                 sr: srs.clone(),
+                prep_ext: state.prep_exts[i].to_post(&satts),
             };
             Some(vr)
         }
@@ -617,8 +689,9 @@ async fn view_get(
 
 async fn name_get(
     q: Query<BasicQ>,
-    state: State<Arc<NameState>>,
+    states: State<(Arc<NameState>, Arc<AttributeLabelUnion>)>,
 ) -> (HeaderMap, Json<Vec<SearchResult>>) {
+    let state = states.0 .0;
     let q_string = q.q.clone().unwrap();
     let top_n_inds = state.engine.query(&q_string);
     let resp = Json(
@@ -647,7 +720,7 @@ fn get_arr_base(res: &SearchResult) -> [f64; 2] {
     ]
 }
 
-fn get_query_arr(res: &SearchResult, state: &State<Arc<NameState>>) -> [f64; 2] {
+fn get_query_arr(res: &SearchResult, state: &NameState) -> [f64; 2] {
     let mut rec = get_arr_base(res);
     for i in 0..rec.len() {
         rec[i] -= state.means[i];
