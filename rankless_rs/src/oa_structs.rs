@@ -175,7 +175,7 @@ pub struct Institution {
     id: String,
     ror: Option<String>,
     display_name: Option<String>,
-    pub country_code: Option<String>,
+    country_code: Option<String>,
     #[serde(rename = "type")]
     inst_type: Option<String>,
     homepage_url: Option<String>,
@@ -193,7 +193,7 @@ pub struct Institution {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Geo {
     pub parent_id: Option<String>,
-    city: Option<String>,
+    pub city: Option<String>,
     geonames_city_id: Option<String>,
     region: Option<String>,
     pub country_code: Option<String>,
@@ -250,7 +250,7 @@ pub struct Work {
     id: String,
     pub doi: Option<String>,
     title: Option<String>,
-    display_name: Option<String>,
+    pub display_name: Option<String>,
     pub publication_year: Option<u16>,
     publication_date: Option<String>,
     #[serde(rename = "type")]
@@ -370,19 +370,23 @@ impl ParsedId for Geo {
 
 impl Named for NamedEntity {
     fn get_name(&self) -> String {
-        self.display_name.clone()
+        self.display_name.trim().to_string()
     }
 }
 
 impl Named for FieldLike {
     fn get_name(&self) -> String {
-        self.display_name.clone()
+        self.display_name.trim().to_string()
     }
 }
 
 impl Named for Geo {
     fn get_name(&self) -> String {
-        self.country.clone().unwrap_or("".to_string())
+        self.country
+            .clone()
+            .unwrap_or("".to_string())
+            .trim()
+            .to_string()
     }
 }
 
@@ -512,15 +516,18 @@ pub mod post {
     #[derive(Deserialize, Debug)]
     pub struct Institution {
         id: String,
+        pub display_name: String,
         pub country_code: Option<String>,
         pub display_name_acronyms: Option<String>,
+        pub display_name_alternatives: Option<String>,
     }
 
     #[derive(Deserialize, Debug)]
     pub struct Source {
         id: String,
+        pub display_name: String,
         pub alternate_titles: Option<String>,
-        // abbreviated_title: Option<String>,
+        pub abbreviated_title: Option<String>,
     }
 
     add_id_traits!(Author, Institution, Source);
@@ -533,4 +540,9 @@ pub mod post {
     }
 
     add_parent_parsed_id_traits!(Location, Authorship);
+
+    pub fn read_post_str_arr(in_str: &Option<String>) -> Vec<String> {
+        serde_json::from_str::<Vec<String>>(&in_str.as_ref().unwrap_or(&"[]".to_string()))
+            .expect("parsing json {in_str:?}")
+    }
 }
