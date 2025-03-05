@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, sync::Arc, thread};
 
 use hashbrown::HashSet;
 use serde::{de::DeserializeOwned, Deserialize};
@@ -6,14 +6,20 @@ use serde::{de::DeserializeOwned, Deserialize};
 use crate::{
     add_parsed_id_traits,
     common::{
-        field_id_parse, oa_id_parse, short_string_to_u64, ObjIter, ParsedId, Stowage, MAIN_NAME,
+        field_id_parse, oa_id_parse, short_string_to_u64, BackendSelector, MarkedBackendLoader,
+        ObjIter, ParsedId, Stowage, MAIN_NAME,
     },
     csv_writers::{authors, fields, institutions, sources, subfields, topics, works},
     env_consts::{FINAL_YEAR, START_YEAR},
-    oa_structs::{post::Authorship, post::Institution, IdStruct},
+    oa_structs::{
+        post::{Authorship, Institution},
+        IdStruct,
+    },
+    NameMarker, QuickestVBox,
 };
 use dmove::{
-    BigId, Data64MappedEntityBuilder, Entity, EntityImmutableMapperBackend, MappableEntity, ET,
+    BigId, Data64MappedEntityBuilder, Entity, EntityImmutableMapperBackend, MappableEntity,
+    MarkedAttribute, ET,
 };
 
 pub type RawYear = u16;
@@ -22,8 +28,9 @@ pub const N_PERS: usize = 8;
 pub const POSSIBLE_YEAR_FILTERS: YBT = [START_YEAR, 2010, 2015, 2020, 2021, 2022, 2023, 2024];
 
 pub struct Years {}
-
 pub struct YearInterface {}
+pub struct Qs {}
+pub struct QsNames {}
 
 #[derive(Deserialize, Debug)]
 pub struct SourceArea {
@@ -88,6 +95,39 @@ impl Entity for Years {
     const NAME: &'static str = "years";
 }
 
+impl Entity for QsNames {
+    type T = String;
+    const N: usize = 5;
+    const NAME: &str = "qs-names";
+}
+
+impl Entity for Qs {
+    type T = u8;
+    const N: usize = 5;
+    const NAME: &str = "qs";
+}
+
+impl MappableEntity for Qs {
+    type KeyType = BigId;
+}
+
+impl MappableEntity for QsNames {
+    type KeyType = usize;
+}
+
+impl MarkedAttribute<NameMarker> for Qs {
+    type AttributeEntity = QsNames;
+}
+
+impl MarkedBackendLoader<QuickestVBox> for QsNames {
+    type BE = <QuickestVBox as BackendSelector<QsNames>>::BE;
+    fn load(_stowage: &Stowage) -> Self::BE {
+        let mut q_names: Vec<String> = vec!["Uncategorized".to_owned()];
+        q_names.extend((1..5).map(|i| format!("Q{}", i)));
+        q_names.into()
+    }
+}
+
 impl MappableEntity for Years {
     type KeyType = RawYear;
 }
@@ -98,22 +138,15 @@ impl EntityImmutableMapperBackend<Years> for YearInterface {
     }
 }
 
-pub fn main(mut stowage: Stowage) -> io::Result<()> {
-    ids_from_atts::<SourceArea, _>(&mut stowage, "area-fields", sources::C, |e| e.raw_area_id());
-
-    ids_from_atts::<Institution, _>(&mut stowage, "countries", institutions::C, |e| {
-        short_string_to_u64(&e.country_code.unwrap_or("".to_string()))
-    });
-
-    //TODO: distinguish as no null value here (??)
-    let ship_n = iter_authorships(&stowage).count();
-
-    let builder = &mut stowage.builder.as_mut().unwrap();
-    builder.add_scaled_entity(works::atts::authorships, ship_n, true);
-    builder.add_scaled_entity("qs", 5, true);
+pub fn main(stowage: Stowage) -> io::Result<()> {
+    let mut threads = Vec::new();
+    let starc = Arc::new(stowage);
 
     for sw in vec![fields::C, subfields::C] {
-        ids_from_atts::<IdStruct, _>(&mut stowage, sw, sw, |e| field_id_parse(&e.id.unwrap()));
+        let sc = starc.clone();
+        threads.push(thread::spawn(move || {
+            ids_from_atts::<IdStruct, _>(&sc, sw, sw, |e| field_id_parse(&e.id.unwrap()));
+        }));
     }
 
     for en in vec![
@@ -124,10 +157,27 @@ pub fn main(mut stowage: Stowage) -> io::Result<()> {
         topics::C,
         authors::C,
     ] {
-        ids_from_atts::<IdStruct, _>(&mut stowage, en, en, |e| e.get_parsed_id());
+        let sc = starc.clone();
+        threads.push(thread::spawn(move || {
+            ids_from_atts::<IdStruct, _>(&sc, en, en, |e| e.get_parsed_id());
+        }));
     }
 
-    stowage.write_code()?;
+    ids_from_atts::<SourceArea, _>(&starc, "area-fields", sources::C, |e| e.raw_area_id());
+
+    ids_from_atts::<Institution, _>(&starc, "countries", institutions::C, |e| {
+        short_string_to_u64(&e.country_code.unwrap_or("".to_string()))
+    });
+
+    //TODO: distinguish as no null value here (??)
+    //fix inderect authorships
+    let ship_n = iter_authorships(&starc).count();
+    threads.into_iter().for_each(|h| h.join().unwrap());
+    starc
+        .mu_bu()
+        .add_scaled_entity(works::atts::authorships, ship_n, true);
+    starc.mu_bu().add_scaled_entity("qs", 5, true);
+    starc.write_code()?;
     Ok(())
 }
 
@@ -135,7 +185,7 @@ pub fn iter_authorships(stowage: &Stowage) -> ShipIterator {
     ShipIterator::new(stowage)
 }
 
-fn ids_from_atts<T, F>(stowage: &mut Stowage, out_name: &str, parent_entity: &str, closure: F)
+fn ids_from_atts<T, F>(stowage: &Stowage, out_name: &str, parent_entity: &str, closure: F)
 where
     T: DeserializeOwned,
     F: Fn(T) -> BigId,
@@ -150,21 +200,20 @@ where
     )
 }
 
-fn entities_from_iter<I>(stowage: &mut Stowage, name: &str, iter: I, filter: Option<HashSet<BigId>>)
+fn entities_from_iter<I>(stowage: &Stowage, name: &str, iter: I, filter: Option<HashSet<BigId>>)
 where
     I: Iterator<Item = BigId>,
 {
-    stowage.set_name(Some(name));
     match &filter {
         None => {
             println!("\n{:?} no filter", name);
-            stowage.add_iter_owned::<Data64MappedEntityBuilder, _, _>(iter, None);
+            stowage.add_iter_owned::<Data64MappedEntityBuilder, _, _>(iter, Some(name));
         }
         Some(fs) => {
             println!("\n{:?} filter of {:?}", name, fs.len());
             stowage.add_iter_owned::<Data64MappedEntityBuilder, _, _>(
                 iter.filter(|e| fs.contains(e)),
-                None,
+                Some(name),
             );
         }
     };

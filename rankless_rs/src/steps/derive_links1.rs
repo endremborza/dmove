@@ -99,31 +99,38 @@ impl VariableSizeAttribute for CountryInsts {
 
 pub fn invert_read_multi_link_to_work<L>(stowage: &mut Stowage, name: &str)
 where
-    L: Entity<T = Box<[<<L as Link>::Target as Entity>::T]>>
+    L: Entity<T = Box<[ET<L::Target>]>>
         + Link<Source = Works>
         + NamespacedEntity
         + CompactEntity
         + VariableSizeAttribute,
-    <<L as Link>::Source as Entity>::T: UnsignedNumber,
-    <<L as Link>::Target as Entity>::T: UnsignedNumber,
+    ET<L::Source>: UnsignedNumber,
+    ET<L::Target>: UnsignedNumber,
 {
     let interface = stowage.get_entity_interface::<L, ReadIter>();
-    invert_multi_link::<L, _>(stowage, interface, name);
+    invert_multi_link::<L, _>(stowage, interface, name, true);
     stowage.declare::<L::Target, MainWorkMarker>(name);
 }
 
-pub fn invert_multi_link<L, LIF>(stowage: &mut Stowage, interface: LIF, name: &str)
-where
-    L: Entity<T = Box<[<<L as Link>::Target as Entity>::T]>> + Link,
-    <<L as Link>::Source as Entity>::T: UnsignedNumber,
-    <<L as Link>::Target as Entity>::T: UnsignedNumber,
+pub fn invert_multi_link<L, LIF>(
+    stowage: &mut Stowage,
+    interface: LIF,
+    name: &str,
+    ignore_zero: bool,
+) where
+    L: Entity<T = Box<[ET<L::Target>]>> + Link,
+    ET<L::Source>: UnsignedNumber,
+    ET<L::Target>: UnsignedNumber,
     LIF: Iterator<Item = L::T>,
 {
     let mut inverted = init_empty_slice::<L::Target, Vec<<L::Source as Entity>::T>>();
     for (source_id, target_slice) in interface.enumerate() {
-        //TODO: if target is nullable and target id is 0, ignore
         for target_id in target_slice.iter() {
-            inverted[target_id.to_usize()].push(<L::Source as Entity>::T::from_usize(source_id))
+            let tidu = target_id.to_usize();
+            if ignore_zero & (tidu == 0) {
+                continue;
+            }
+            inverted[tidu].push(<L::Source as Entity>::T::from_usize(source_id))
         }
     }
     stowage.add_iter_owned::<VarAttBuilder, _, _>(
@@ -150,7 +157,7 @@ where
 {
     let cloj = |ends: &mut Vec<Link2::T>, fw_target: &Link2::T| {
         if !ends.contains(fw_target) {
-            ends.push(fw_target.lift());
+            ends.push(*fw_target);
         }
     };
     collapse_links_meta::<Link1, Link2, QuickestBox, _>(stowage, name, cloj)
@@ -172,7 +179,7 @@ where
     let cloj = |ends: &mut Vec<<Link2::Target as Entity>::T>, fw_targets: &Link2::T| {
         for fw_target in fw_targets {
             if !ends.contains(fw_target) {
-                ends.push(fw_target.lift());
+                ends.push(*fw_target);
             }
         }
     };

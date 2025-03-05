@@ -1,28 +1,39 @@
 use crate::{
     common::{
         field_id_parse, init_empty_slice, oa_id_parse, short_string_to_u64, BeS, DoiMarker,
-        NameExtensionMarker, NameMarker, ParsedId, Quickest, SemanticIdMarker, Stowage, MAIN_NAME,
+        MainEntity, NameExtensionMarker, NameMarker, ParsedId, QuickestNumbered, Stowage,
+        MAIN_NAME, NET,
     },
     csv_writers::{institutions, works},
     gen::a1_entity_mapping::{
-        AreaFields, Authors, Authorships, Countries, Fields, Institutions, Qs, Sources, Subfields,
+        AreaFields, Authors, Authorships, Countries, Fields, Institutions, Sources, Subfields,
         Topics, Works,
     },
     oa_structs::{
-        post::{Institution, Location, Source, SubField, Topic},
+        post::{read_post_str_arr, Authorship, Institution, Location, Source, SubField, Topic},
         FieldLike, Geo, Named, NamedEntity, ReferencedWork, Work, WorkTopic,
     },
-    steps::a1_entity_mapping::{iter_authorships, SourceArea, YearInterface, Years},
+    steps::a1_entity_mapping::{iter_authorships, Qs, SourceArea, YearInterface, Years},
 };
 use dmove::{
-    para::Worker, BigId, ByteFixArrayInterface, DiscoMapEntityBuilder, Entity,
-    EntityImmutableMapperBackend, FixAttBuilder, InitEmpty, MappableEntity, MetaIntegrator,
-    NamespacedEntity, UnsignedNumber, VarAttBuilder,
+    para::Worker, BigId, DiscoMapEntityBuilder, Entity, EntityImmutableMapperBackend,
+    FixAttBuilder, InitEmpty, LoadedIdMap, MappableEntity, MetaIntegrator, NamespacedEntity,
+    UnsignedNumber, VarAttBuilder, ET,
 };
+use levenshtein::levenshtein;
 use serde::{de::DeserializeOwned, Deserialize};
-use std::{io, marker::PhantomData, sync::Mutex, usize};
+use std::{
+    cmp::min,
+    io,
+    marker::PhantomData,
+    sync::{Arc, Mutex},
+    usize,
+};
+use tqdm::Iter;
 
 const MIN_TOPIC_SCORE: f64 = 0.7;
+const MIN_RATE: f64 = 0.8;
+const MIN_LEN: usize = 10;
 
 #[derive(Deserialize)]
 struct SourceQ {
@@ -31,20 +42,36 @@ struct SourceQ {
     best_q: u8,
 }
 
+struct ShipRelWriter {
+    ship2a: Mutex<Box<[ET<Authors>]>>,
+    ship2is: Mutex<Box<[Vec<ET<Institutions>>]>>,
+    w2ships: Mutex<Box<[Vec<ET<Authorships>>]>>,
+    winf: Arc<LoadedIdMap<ET<Works>>>,
+    ainf: Arc<LoadedIdMap<ET<Authors>>>,
+    iinf: Arc<LoadedIdMap<ET<Institutions>>>,
+}
+
+struct WorkAttWriter {
+    wyears: Mutex<Box<[ET<Years>]>>,
+    wnames: Mutex<Box<[String]>>,
+    wdois: Mutex<Box<[String]>>,
+    winf: Arc<LoadedIdMap<ET<Works>>>,
+}
+
 struct BoxRoller<T, E> {
     arr: std::vec::IntoIter<T>,
     phantom: PhantomData<fn() -> E>,
 }
 
 struct StrWriter<'a> {
-    stowage: &'a mut Stowage,
+    stowage: &'a Stowage,
     main: &'static str,
     sub: &'static str,
 }
 
 struct GenObjAttWorker<'a, Source, Target, StoredOfTarget, SourceIF, TargetIF>
 where
-    Source: MappableEntity<KeyType = BigId>,
+    Source: MainEntity,
     Target: MappableEntity,
     StoredOfTarget: Sync + Send,
     TargetIF: EntityImmutableMapperBackend<Target>,
@@ -57,7 +84,7 @@ where
 
 struct DataAttWorker<'a, Source, TargetType, SourceIF>
 where
-    Source: Entity + MappableEntity,
+    Source: MainEntity,
     TargetType: Sync + Send,
     SourceIF: EntityImmutableMapperBackend<Source>,
 {
@@ -87,15 +114,15 @@ trait ObjAttGetter<T: Entity + MappableEntity> {
 
 trait GotAttParser<RawAtt, ParsedAtt, IngestableAttType, Source, Marker, I>
 where
-    Source: Entity + MappableEntity,
+    Source: MainEntity,
     I: Iterator<Item = IngestableAttType>,
 {
     fn parse(&self, att: Option<RawAtt>) -> Option<ParsedAtt>;
-    fn ingest(&self, res: ParsedAtt, ind: Source::T);
-    fn map_ind(&self, ind: Source::KeyType) -> Option<Source::T>;
+    fn ingest(&self, res: ParsedAtt, ind: NET<Source>);
+    fn map_ind(&self, ind: Source::KeyType) -> Option<NET<Source>>;
     fn ingest_result<F>(self, f: F)
     where
-        F: FnMut(I);
+        F: Fn(I);
 }
 
 trait StorableMarker<T>
@@ -133,61 +160,23 @@ impl Stowage {
         >, _, _>(source_q_kv_iter, Some("source-year-qs"));
     }
 
-    fn add_ship_relations<WIF, AIF, IIF>(
-        &mut self,
-        works_interface: &WIF,
-        authors_interface: &AIF,
-        institutions_interface: &IIF,
-    ) where
-        WIF: EntityImmutableMapperBackend<Works>,
-        AIF: EntityImmutableMapperBackend<Authors>,
-        IIF: EntityImmutableMapperBackend<Institutions>,
-    {
-        type AuthorshipId = <Authorships as Entity>::T;
-        let mut ship2a: Vec<<Authors as Entity>::T> = vec![0; Authorships::N];
-        let mut ship2is: Vec<Vec<<Institutions as Entity>::T>> = Vec::new();
-        let mut w2ships = init_empty_slice::<Works, Vec<AuthorshipId>>();
-        iter_authorships(&self).enumerate().for_each(|(i, ship)| {
-            let w_ind = match works_interface.get_via_immut(&ship.get_parsed_id()) {
-                Some(i) => i.to_usize(),
-                None => return,
-            };
-            w2ships[w_ind].push(AuthorshipId::from_usize(i));
+    fn add_work_atts(&self, winf: Arc<LoadedIdMap<ET<Works>>>) -> LoadedIdMap<ET<Works>> {
+        WorkAttWriter::new(winf.clone())
+            .para(self.read_csv_objs(Works::NAME, MAIN_NAME))
+            .post(self);
+        Arc::into_inner(winf).unwrap()
+    }
 
-            let aid_o = authors_interface.get_via_immut(&oa_id_parse(&ship.author_id.unwrap()));
-            if let Some(aid) = aid_o {
-                ship2a[i] = aid;
-            }
-            let mut inst_v = Vec::new();
-            for iid in ship
-                .institutions
-                .unwrap_or("".to_string())
-                .trim()
-                .split(";")
-                .filter(|e| e.len() > 1)
-            {
-                let iid_o = institutions_interface.get_via_immut(&oa_id_parse(iid));
-                if let Some(piid) = iid_o {
-                    inst_v.push(piid);
-                }
-            }
-            ship2is.push(inst_v);
-        });
-        let aa_name = "authorship-author";
-        let ai_name = "authorship-institutions";
-        let w2s_name = "work-authorships";
-        self.add_iter_owned::<FixAttBuilder, _, _>(ship2a.into_iter(), Some(aa_name));
-        self.add_iter_owned::<VarAttBuilder, _, _>(
-            ship2is.into_iter().map(|v| v.into_boxed_slice()),
-            Some(ai_name),
-        );
-        self.add_iter_owned::<VarAttBuilder, _, _>(
-            w2ships.into_vec().into_iter().map(|v| v.into_boxed_slice()),
-            Some(w2s_name),
-        );
-        self.declare_link::<Authorships, Authors>(aa_name);
-        self.declare_link::<Authorships, Institutions>(ai_name); //TODO: OneToMany
-        self.declare_link::<Works, Authorships>(w2s_name); //TODO: OneToMany
+    fn add_ship_relations(&self) -> LoadedIdMap<ET<Works>> {
+        let winf: Arc<LoadedIdMap<ET<Works>>> = self
+            .get_entity_interface::<Works, QuickestNumbered>()
+            .into();
+        {
+            ShipRelWriter::new(winf.clone(), self)
+                .para(iter_authorships(self).enumerate())
+                .post(self);
+        }
+        Arc::into_inner(winf).unwrap()
     }
 
     fn property_writer<
@@ -201,7 +190,7 @@ impl Stowage {
         AGMarker,
         I,
     >(
-        &mut self,
+        &self,
         w: GenWorker<
             AttWorker,
             PreParseTargetType,
@@ -224,10 +213,9 @@ impl Stowage {
                 AGMarker,
                 I,
             > + Sync,
-        Source: Entity + MappableEntity<KeyType = BigId>,
+        Source: MainEntity,
         PostParseTargetType: Sync,
         Builder: MetaIntegrator<IngestableAtt>,
-        <Source as Entity>::T: UnsignedNumber,
         I: Iterator<Item = IngestableAtt>,
     {
         w.para(self.read_csv_objs::<CsvObj>(main, sub))
@@ -245,14 +233,13 @@ impl Stowage {
     ) -> io::Result<usize>
     where
         CsvObj: ObjAttGetter<Target> + ParsedId + DeserializeOwned + Send,
-        Source: MappableEntity<KeyType = BigId>,
-        Target: MappableEntity,
-        <Target as Entity>::T: ByteFixArrayInterface + InitEmpty + Sync + Send,
-        <Source as Entity>::T: UnsignedNumber,
+        Source: MainEntity,
+        Target: Entity + MappableEntity,
+        ET<Target>: UnsignedNumber,
         SIF: EntityImmutableMapperBackend<Source> + Sync,
         TIF: EntityImmutableMapperBackend<Target> + Sync,
     {
-        let obj_worker = GenObjAttWorker::<'_, Source, Target, Target::T, SIF, TIF>::new(
+        let obj_worker = GenObjAttWorker::<'_, Source, Target, ET<Target>, SIF, TIF>::new(
             source_interface,
             target_interface,
         );
@@ -276,14 +263,12 @@ impl Stowage {
     ) -> io::Result<usize>
     where
         CsvObj: ObjAttGetter<Target> + ParsedId + DeserializeOwned + Send,
-        Source: Entity + MappableEntity<KeyType = BigId>,
-        Target: Entity + MappableEntity,
-        <Source as Entity>::T: UnsignedNumber,
-        <Target as Entity>::T: Sync + Send + ByteFixArrayInterface,
+        Source: MainEntity,
+        Target: MainEntity,
         SIF: EntityImmutableMapperBackend<Source> + Sync,
         TIF: EntityImmutableMapperBackend<Target> + Sync,
     {
-        let obj_worker = GenObjAttWorker::<'_, Source, Target, Vec<Target::T>, SIF, TIF>::new(
+        let obj_worker = GenObjAttWorker::<'_, Source, Target, Vec<NET<Target>>, SIF, TIF>::new(
             source_interface,
             target_interface,
         );
@@ -303,42 +288,127 @@ impl Stowage {
         self.add_empty_something::<T, NameExtensionMarker>(&name);
     }
 
-    fn add_empty_something<T: Entity, Marker>(&mut self, name: &str) {
+    fn add_empty_something<E: Entity, Marker>(&mut self, name: &str) {
         //TODO: this takes memory (and some space) for no fucking reason
-        self.add_iter_owned::<VarAttBuilder, _, _>((0..T::N).map(|_| "".to_string()), Some(&name));
-        self.declare::<T, Marker>(&name);
+        let iter = (0..E::N).map(|_| "".to_string());
+        self.declare_iter::<VarAttBuilder, _, _, E, Marker>(iter, name)
+    }
+}
+
+impl WorkAttWriter {
+    fn new(winf: Arc<LoadedIdMap<ET<Works>>>) -> Self {
+        Self {
+            wdois: init_empty_slice::<Works, _>().into(),
+            wyears: init_empty_slice::<Works, _>().into(),
+            wnames: init_empty_slice::<Works, _>().into(),
+            winf,
+        }
     }
 
-    fn write_q_names(&mut self) -> io::Result<usize> {
-        //TODO: this could/should be a compiled _get_ like with years
-        let mut q_names: Vec<String> = vec!["Uncategorized".to_owned()];
-        q_names.extend((1..5).map(|i| format!("Q{}", i)));
-        let q_name = get_name_name::<Qs>();
-        self.add_iter_owned::<VarAttBuilder, _, _>(q_names.into_iter(), Some(&q_name));
-        self.declare::<Qs, NameMarker>(&q_name);
-        Ok(0)
+    fn post(self, stowage: &Stowage) {
+        let wyname = "work-years";
+        stowage.add_iter_owned::<FixAttBuilder, _, _>(iter_mboxa(self.wyears), Some(wyname));
+        stowage.declare_link::<Works, Years>(wyname);
+        stowage.declare_iter::<VarAttBuilder, _, _, Works, NameMarker>(
+            iter_mboxa(self.wnames),
+            &get_name_name::<Works>(),
+        );
+        stowage.declare_iter::<VarAttBuilder, _, _, Works, DoiMarker>(
+            iter_mboxa(self.wdois),
+            "work-dois",
+        );
+    }
+}
+
+impl ShipRelWriter {
+    fn new(winf: Arc<LoadedIdMap<ET<Works>>>, stowage: &Stowage) -> Self {
+        Self {
+            ship2a: init_empty_slice::<Authorships, _>().into(),
+            ship2is: init_empty_slice::<Authorships, _>().into(),
+            w2ships: init_empty_slice::<Works, _>().into(),
+            winf,
+            ainf: stowage
+                .get_entity_interface::<Authors, QuickestNumbered>()
+                .into(),
+            iinf: stowage
+                .get_entity_interface::<Institutions, QuickestNumbered>()
+                .into(),
+        }
     }
 
-    fn write_semantic_id<E>(&mut self)
-    where
-        E: NamespacedEntity + MappableEntity<KeyType = BigId>,
-        <E as Entity>::T: UnsignedNumber,
-    {
-        let mut ids = init_empty_slice::<E, String>();
-        let interface = self.get_entity_interface::<E, Quickest>();
-        for sem in self.read_sem_ids::<E>() {
-            if let Some(eid) = interface.0.get(&sem.id) {
-                ids[eid.to_usize()] = sem.semantic_id;
+    fn post(self, stowage: &Stowage) {
+        let aa_name = "authorship-author";
+        let ai_name = "authorship-institutions";
+        let w2s_name = "work-authorships";
+        stowage
+            .add_iter_owned::<FixAttBuilder, _, _>(iter_mboxa(self.ship2a).tqdm(), Some(aa_name));
+        stowage.add_iter_owned::<VarAttBuilder, _, _>(
+            iter_mboxa(self.ship2is)
+                .map(|v| v.into_boxed_slice())
+                .tqdm(),
+            Some(ai_name),
+        );
+        stowage.add_iter_owned::<VarAttBuilder, _, _>(
+            iter_mboxa(self.w2ships)
+                .map(|v| v.into_boxed_slice())
+                .tqdm(),
+            Some(w2s_name),
+        );
+        stowage.declare_link::<Authorships, Authors>(aa_name);
+        stowage.declare_link::<Authorships, Institutions>(ai_name); //TODO: OneToMany
+        stowage.declare_link::<Works, Authorships>(w2s_name); //TODO: OneToMany
+    }
+}
+
+impl Worker<Work> for WorkAttWriter {
+    fn proc(&self, input: Work) {
+        let w_ind = match self.winf.0.get(&input.get_parsed_id()) {
+            Some(wi) => wi.to_usize(),
+            None => return,
+        };
+        if let Some(doi) = input.doi {
+            self.wdois.lock().unwrap()[w_ind] = doi;
+        }
+
+        if let Some(name) = input.display_name {
+            self.wnames.lock().unwrap()[w_ind] = name;
+        }
+
+        if let Some(year) = input.publication_year {
+            self.wyears.lock().unwrap()[w_ind] = YearInterface::parse(year);
+        }
+    }
+}
+
+impl Worker<(usize, Authorship)> for ShipRelWriter {
+    fn proc(&self, input: (usize, Authorship)) {
+        let (i, ship) = input;
+        let w_ind = match self.winf.0.get(&ship.get_parsed_id()) {
+            Some(wi) => wi.to_usize(),
+            None => return,
+        };
+        self.w2ships.lock().unwrap()[w_ind].push(ET::<Authorships>::from_usize(i));
+
+        let aid_o = self.ainf.0.get(&oa_id_parse(&ship.author_id.unwrap()));
+        if let Some(aid) = aid_o {
+            self.ship2a.lock().unwrap()[i] = *aid;
+        }
+        for iid in ship
+            .institutions
+            .unwrap_or("".to_string())
+            .trim()
+            .split(";")
+            .filter(|e| e.len() > 1)
+        {
+            if let Some(piid) = self.iinf.0.get(&oa_id_parse(iid)) {
+                self.ship2is.lock().unwrap()[i].push(*piid);
             }
         }
-        let name = format!("{}-semantic-ids", E::NAME);
-        self.add_iter_owned::<VarAttBuilder, _, _>(ids.iter().map(|e| e.to_owned()), Some(&name));
-        self.declare::<E, SemanticIdMarker>(&name);
     }
 }
 
 impl<'a> StrWriter<'a> {
-    fn new(stowage: &'a mut Stowage) -> Self {
+    fn new(stowage: &'a Stowage) -> Self {
         Self {
             stowage,
             main: "",
@@ -352,33 +422,35 @@ impl<'a> StrWriter<'a> {
         self
     }
 
-    fn write_name<CsvObj, Source>(&mut self) -> BeS<Quickest, Source>
+    fn write_name<CsvObj, Source>(&mut self) -> BeS<QuickestNumbered, Source>
     where
         CsvObj: DeserializeOwned + ParsedId + AttGetter<String, NameMarker> + Send,
-        Source: MappableEntity<KeyType = BigId> + NamespacedEntity,
-        <Source as Entity>::T: UnsignedNumber + Sync,
+        Source: MainEntity + NamespacedEntity,
     {
-        let interface = self.stowage.get_entity_interface::<Source, Quickest>();
+        let interface = self
+            .stowage
+            .get_entity_interface::<Source, QuickestNumbered>();
         let prop_name = &get_name_name::<Source>();
         self.write_meta::<Source, CsvObj, NameMarker>(&interface, prop_name);
         interface
     }
 
-    fn write_name_ext<CsvObj, E>(&mut self, interface: &BeS<Quickest, E>)
+    fn write_name_ext<CsvObj, E>(&mut self, interface: &BeS<QuickestNumbered, E>)
     where
         CsvObj: DeserializeOwned + ParsedId + AttGetter<String, NameExtensionMarker> + Send,
-        E: Entity + MappableEntity<KeyType = BigId> + NamespacedEntity,
-        <E as Entity>::T: UnsignedNumber + Sync,
+        E: MainEntity + NamespacedEntity,
     {
         let prop_name = &get_name_ext_name::<E>();
         self.write_meta::<E, CsvObj, NameExtensionMarker>(interface, prop_name);
     }
 
-    fn write_meta<E, CsvObj, Marker>(&mut self, interface: &BeS<Quickest, E>, prop_name: &str)
-    where
+    fn write_meta<E, CsvObj, Marker>(
+        &mut self,
+        interface: &BeS<QuickestNumbered, E>,
+        prop_name: &str,
+    ) where
         CsvObj: DeserializeOwned + ParsedId + AttGetter<String, Marker> + Send,
-        E: Entity + MappableEntity<KeyType = BigId> + NamespacedEntity,
-        <E as Entity>::T: UnsignedNumber + Sync,
+        E: MainEntity + NamespacedEntity,
     {
         if self.main == "" {
             self.set_path(E::NAME, MAIN_NAME);
@@ -395,7 +467,7 @@ impl<'a> StrWriter<'a> {
 
 impl<'a, S, T, SIF> DataAttWorker<'a, S, T, SIF>
 where
-    S: Entity + MappableEntity,
+    S: MainEntity,
     T: InitEmpty + Sync + Send,
     SIF: EntityImmutableMapperBackend<S>,
 {
@@ -411,7 +483,7 @@ where
 
 impl<'a, S, T, TT, SIF, TIF> GenObjAttWorker<'a, S, T, TT, SIF, TIF>
 where
-    S: MappableEntity<KeyType = BigId>,
+    S: MainEntity,
     T: MappableEntity,
     TT: InitEmpty + Sync + Send,
     SIF: EntityImmutableMapperBackend<S>,
@@ -518,6 +590,24 @@ where
     }
 }
 
+impl Named for Source {
+    fn get_name(&self) -> String {
+        let dn = self.display_name.clone();
+        let parts: Vec<&str> = dn.split("/").collect();
+        if parts.len() == 2 {
+            let lmin = min(parts[0].len(), parts[1].len());
+            if lmin >= MIN_LEN {
+                let edist = levenshtein(parts[0], parts[1]);
+                let rate = 1.0 - f64::from(edist as u32) / f64::from(lmin as u32);
+                if rate >= MIN_RATE {
+                    return parts[0].to_string();
+                }
+            }
+        }
+        dn
+    }
+}
+
 impl ObjAttGetter<Fields> for SubField {
     fn get_obj_att(&self) -> Option<<Fields as MappableEntity>::KeyType> {
         Some(field_id_parse(&self.field))
@@ -536,12 +626,6 @@ impl ObjAttGetter<Topics> for WorkTopic {
             return Some(oa_id_parse(self.topic_id.as_ref().unwrap()));
         }
         None
-    }
-}
-
-impl ObjAttGetter<Years> for Work {
-    fn get_obj_att(&self) -> Option<<Years as MappableEntity>::KeyType> {
-        self.publication_year
     }
 }
 
@@ -595,8 +679,7 @@ impl<'a, Source, TargetType, Marker, SIF>
     GotAttParser<TargetType, TargetType, TargetType, Source, Marker, std::vec::IntoIter<TargetType>>
     for DataAttWorker<'a, Source, TargetType, SIF>
 where
-    Source: Entity + MappableEntity,
-    <Source as Entity>::T: UnsignedNumber,
+    Source: MainEntity,
     TargetType: Sync + Send,
     SIF: EntityImmutableMapperBackend<Source>,
 {
@@ -604,16 +687,16 @@ where
         att
     }
 
-    fn ingest(&self, res: TargetType, ind: Source::T) {
+    fn ingest(&self, res: TargetType, ind: NET<Source>) {
         self.attribute_arr.lock().unwrap()[ind.to_usize()] = res;
     }
 
-    fn map_ind(&self, ind: Source::KeyType) -> Option<Source::T> {
+    fn map_ind(&self, ind: Source::KeyType) -> Option<NET<Source>> {
         self.self_interface.get_via_immut(&ind)
     }
-    fn ingest_result<F>(self, mut f: F)
+    fn ingest_result<F>(self, f: F)
     where
-        F: FnMut(std::vec::IntoIter<TargetType>),
+        F: Fn(std::vec::IntoIter<TargetType>),
     {
         f(self
             .attribute_arr
@@ -634,7 +717,7 @@ impl<Source, Target, Marker, StoredOfTarget, SIF, TIF>
         BoxRoller<StoredOfTarget, Target::T>,
     > for GenObjAttWorker<'_, Source, Target, StoredOfTarget, SIF, TIF>
 where
-    Source: Entity + MappableEntity<KeyType = BigId>,
+    Source: MainEntity,
     Target: Entity + MappableEntity,
     <Source as Entity>::T: UnsignedNumber,
     TIF: EntityImmutableMapperBackend<Target>,
@@ -649,20 +732,20 @@ where
         }
     }
 
-    fn ingest(&self, res: Target::T, ind: Source::T) {
+    fn ingest(&self, res: Target::T, ind: NET<Source>) {
         StoredOfTarget::update(
             &mut self.data_worker.attribute_arr.lock().unwrap()[ind.to_usize()],
             res,
         )
     }
 
-    fn map_ind(&self, ind: Source::KeyType) -> Option<Source::T> {
+    fn map_ind(&self, ind: Source::KeyType) -> Option<NET<Source>> {
         self.data_worker.self_interface.get_via_immut(&ind)
     }
 
-    fn ingest_result<F>(self, mut f: F)
+    fn ingest_result<F>(self, f: F)
     where
-        F: FnMut(BoxRoller<StoredOfTarget, Target::T>),
+        F: Fn(BoxRoller<StoredOfTarget, Target::T>),
     {
         let arr = self.data_worker.attribute_arr.into_inner().unwrap();
         f(BoxRoller::new(arr))
@@ -698,9 +781,8 @@ where
             I,
         > + Sync,
     CsvObj: ParsedId + Send + AttGetter<PreParseTargetType, AGMarker>,
-    Source: Entity + MappableEntity<KeyType = BigId>,
+    Source: MainEntity,
     PostParseTargetType: Sync,
-    <Source as Entity>::T: UnsignedNumber,
     I: Iterator<Item = IngestableAttType>,
 {
     fn proc(&self, input: CsvObj) {
@@ -715,20 +797,21 @@ where
 }
 
 pub fn main(mut stowage: Stowage) -> io::Result<()> {
-    stowage.write_q_names()?;
-    let mut str_writer = StrWriter::new(&mut stowage);
+    let works_interface = {
+        let winf = stowage.add_ship_relations();
+        stowage.add_work_atts(winf.into())
+    };
 
+    let mut str_writer = StrWriter::new(&stowage);
     let fields_interface = str_writer.write_name::<FieldLike, Fields>();
     let countries_interface = str_writer
         .set_path(Institutions::NAME, institutions::atts::geo)
         .write_name::<Geo, Countries>();
     let subfields_interface = str_writer.write_name::<FieldLike, Subfields>();
-    let insts_interface = str_writer.write_name::<NamedEntity, Institutions>();
-    let sources_interface = str_writer.write_name::<NamedEntity, Sources>();
-    let authors_interface = str_writer.write_name::<NamedEntity, Authors>();
+    let insts_interface = write_inst_names(&stowage);
+    let sources_interface = str_writer.write_name::<Source, Sources>();
+    str_writer.write_name::<NamedEntity, Authors>();
     let topics_interface = str_writer.write_name::<NamedEntity, Topics>();
-    str_writer.write_name::<NamedEntity, Works>();
-
     str_writer.write_name_ext::<Institution, Institutions>(&insts_interface);
     str_writer.write_name_ext::<Source, Sources>(&sources_interface);
 
@@ -736,12 +819,7 @@ pub fn main(mut stowage: Stowage) -> io::Result<()> {
     stowage.add_empty_name_ext::<Countries>();
     stowage.add_empty_name_ext::<Subfields>();
 
-    stowage.write_semantic_id::<Institutions>();
-    stowage.write_semantic_id::<Sources>();
-    stowage.write_semantic_id::<Authors>();
-    stowage.write_semantic_id::<Countries>();
-    stowage.write_semantic_id::<Subfields>();
-
+    stowage.add_source_qs(&sources_interface, &YearInterface {});
     stowage.object_property::<Institution, Institutions, _, _, _>(
         &insts_interface,
         &countries_interface,
@@ -752,23 +830,12 @@ pub fn main(mut stowage: Stowage) -> io::Result<()> {
         &fields_interface,
         "subfield-ancestors",
     )?;
-    // let topics_interface = stowage.get_entity_interface::<Topics, Quickest>();
     stowage.object_property::<Topic, Topics, _, _, _>(
         &topics_interface,
         &subfields_interface,
         "topic-subfields",
     )?;
-    //TODO/performance wasteful - runs through works twice
-    let works_interface = stowage.get_entity_interface::<Works, Quickest>();
-    StrWriter::new(&mut stowage)
-        .write_meta::<Works, Work, DoiMarker>(&works_interface, "work-dois");
-    let year_interface = YearInterface {};
-    stowage.object_property::<Work, Works, _, _, _>(
-        &works_interface,
-        &year_interface,
-        "work-years",
-    )?;
-    let area_fields_interface = stowage.get_entity_interface::<AreaFields, Quickest>();
+    let area_fields_interface = stowage.get_entity_interface::<AreaFields, QuickestNumbered>();
     stowage.multi_object_property::<SourceArea, Sources, _, _, _>(
         &sources_interface,
         &area_fields_interface,
@@ -794,10 +861,63 @@ pub fn main(mut stowage: Stowage) -> io::Result<()> {
         works::atts::topics,
     )?;
 
-    stowage.add_ship_relations(&works_interface, &authors_interface, &insts_interface);
-    stowage.add_source_qs(&sources_interface, &year_interface);
     stowage.write_code()?;
     Ok(())
+}
+
+fn write_inst_names(stowage: &Stowage) -> LoadedIdMap<NET<Institutions>> {
+    type E = Institutions;
+    let interface = stowage.get_entity_interface::<E, QuickestNumbered>();
+    let mut cities = init_empty_slice::<E, String>();
+    let mut ccs = init_empty_slice::<E, String>();
+    stowage
+        .read_csv_objs::<Geo>(E::NAME, institutions::atts::geo)
+        .for_each(|e| {
+            let iu = interface.0.get(&e.get_parsed_id()).unwrap_or(&0).to_usize();
+            if let Some(city) = e.city {
+                cities[iu] = city.clone();
+            }
+            if let Some(cc) = e.country_code {
+                ccs[iu] = cc.clone();
+            }
+        });
+
+    let winit: GenWorker<_, _, _, _, _, NameMarker, _> =
+        GenWorker::new(DataAttWorker::<E, String, _>::new(&interface));
+    let raw_names = winit
+        .para(stowage.read_csv_objs::<NamedEntity>(E::NAME, MAIN_NAME))
+        .worker
+        .attribute_arr
+        .into_inner()
+        .unwrap();
+    let countried_names: Vec<String> = raw_names
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            for (j, rn) in raw_names.iter().enumerate() {
+                if (i != j) & (rn == e) & (ccs[i].len() > 0) {
+                    return format!("{e} ({})", ccs[i]);
+                }
+            }
+            e.clone()
+        })
+        .collect();
+    let citied_names: Vec<String> = countried_names
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            for (j, cn) in countried_names.iter().enumerate() {
+                if (i != j) & (cn == e) & (cities[i].len() > 0) {
+                    return format!("{} ({})", raw_names[i], cities[i]);
+                }
+            }
+            e.clone()
+        })
+        .collect();
+    let prop_name = &get_name_name::<E>();
+    stowage.declare_iter::<VarAttBuilder, _, _, E, NameMarker>(citied_names.into_iter(), prop_name);
+
+    interface
 }
 
 fn get_name_name<E: Entity>() -> String {
@@ -808,10 +928,10 @@ fn get_name_ext_name<E: Entity>() -> String {
     format!("{}-name-exts", E::NAME)
 }
 
+fn iter_mboxa<T>(ba: Mutex<Box<[T]>>) -> std::vec::IntoIter<T> {
+    ba.into_inner().unwrap().into_vec().into_iter()
+}
+
 fn post_ext_name(in_str: &Option<String>) -> Option<String> {
-    Some(
-        serde_json::from_str::<Vec<String>>(&in_str.clone().unwrap_or("[]".to_string()))
-            .unwrap()
-            .join(" "),
-    )
+    Some(read_post_str_arr(in_str).join(" "))
 }
