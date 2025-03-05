@@ -9,10 +9,11 @@ pub mod env_consts;
 mod filter;
 pub mod gen;
 mod oa_structs;
+mod semantic_ids;
 pub mod steps;
 
 pub use common::{
-    CiteCountMarker, NameExtensionMarker, NameMarker, Quickest, QuickestBox, QuickestVBox,
+    CiteCountMarker, NameExtensionMarker, NameMarker, QuickestBox, QuickestNumbered, QuickestVBox,
     ReadFixIter, ReadIter, SemanticIdMarker, Stowage, WorkCountMarker,
 };
 

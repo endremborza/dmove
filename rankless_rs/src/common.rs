@@ -1,8 +1,7 @@
-use std::env;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::io::{prelude::*, BufWriter};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::{
     fs::{create_dir_all, read_dir, File},
     io::{self, BufReader, Write},
@@ -19,12 +18,13 @@ use tqdm::{Iter, Tqdm};
 use dmove::{
     BackendLoading, BigId, CompactEntity, Entity, FixAttIterator, FixWriteSizeEntity, InitEmpty,
     LoadedIdMap, MainBuilder, MappableEntity, MarkedAttribute, MetaIntegrator, NamespacedEntity,
-    VarAttIterator, VarBox, VarSizedAttributeElement, VariableSizeAttribute, VattArrPair,
-    VattReadingMap, ET, MAA,
+    UnsignedNumber, VarAttIterator, VarBox, VarSizedAttributeElement, VariableSizeAttribute,
+    VattArrPair, VattReadingMap, ET, MAA,
 };
 
 pub type StowReader = Reader<BufReader<GzDecoder<File>>>;
 pub type BeS<M, E> = <M as BackendSelector<E>>::BE;
+pub type NET<E> = <E as NumberedEntity>::T;
 
 type InIterator<T> = Tqdm<DeserializeRecordsIntoIter<BufReader<flate2::read::GzDecoder<File>>, T>>;
 
@@ -48,6 +48,13 @@ pub struct CitSubfieldsArrayMarker;
 pub struct YearlyPapersMarker;
 pub struct YearlyCitationsMarker;
 pub struct InstRelMarker;
+pub struct Top3PaperSfMarker;
+pub struct Top3CitingSfMarker;
+pub struct Top3PaperTopicMarker;
+pub struct Top3AuthorMarker;
+pub struct Top3CitingTopicMarker;
+pub struct Top3JournalMarker;
+pub struct Top3AffCountryMarker;
 
 #[macro_export]
 macro_rules! add_parsed_id_traits {
@@ -86,6 +93,7 @@ macro_rules! add_parent_parsed_id_traits {
     }
 }
 
+//TODO: wet with interfacing
 #[macro_export]
 macro_rules! make_interface_struct {
     ($IT:ident, $($e_key:ident > $e_t:ty),*;$($f_key:ident => $f_t:ty),*; $($v_key:ident -> $v_t:ty),*; $($m_key:ident >> $m_t:ty),*) => {
@@ -168,9 +176,8 @@ macro_rules! pathfields_fn {
 
 pub struct Stowage {
     pub paths: PathCollection,
-    current_name: String,
     current_ns: String,
-    pub builder: Option<MainBuilder>,
+    builder: Option<Mutex<MainBuilder>>,
 }
 
 pub struct ObjIter<T>
@@ -181,7 +188,7 @@ where
 }
 
 //TODO/clarity: this is sort of a mess - could be just generic types
-pub struct Quickest {}
+pub struct QuickestNumbered {}
 pub struct QuickMap {}
 pub struct QuickestBox {}
 pub struct QuickAttPair {}
@@ -220,13 +227,13 @@ where
     }
 }
 
-pathfields_fn!(
-    PathCollection,
-    entity_csvs,
-    filter_steps,
-    cache,
-    pruned_cache
-);
+pub trait NumberedEntity: MappableEntity<KeyType = BigId> {
+    type T: UnsignedNumber + DeserializeOwned + Serialize + Ord + Copy + Display;
+}
+
+pub trait MainEntity: NumberedEntity + Entity<T = NET<Self>> {}
+
+pathfields_fn!(PathCollection, entity_csvs, filter_steps, cache);
 
 pub trait ParsedId {
     fn get_parsed_id(&self) -> BigId;
@@ -236,7 +243,6 @@ impl Stowage {
     pub fn new(root_path: &str) -> Self {
         Self {
             paths: PathCollection::new(root_path),
-            current_name: "".to_string(),
             current_ns: "".to_string(),
             builder: None,
         }
@@ -246,12 +252,12 @@ impl Stowage {
         self.current_ns = ns.to_string();
         let path = self.path_from_ns(&self.current_ns);
         create_dir_all(&path).unwrap();
-        self.builder = Some(MainBuilder::new(&path));
+        self.builder = Some(Mutex::new(MainBuilder::new(&path)));
     }
 
-    pub fn write_code(self) -> io::Result<usize> {
+    pub fn write_code(&self) -> io::Result<usize> {
         let suffix = self.current_ns.replace("-", "_");
-        self.builder.unwrap().write_code(&code_path(&suffix))
+        self.mu_bu().write_code(&code_path(&suffix))
     }
 
     pub fn get_out_csv_path(&self) -> &str {
@@ -310,25 +316,31 @@ impl Stowage {
         Ok(())
     }
 
-    pub fn add_iter_owned<B, I, E>(&mut self, iter: I, name_o: Option<&str>)
+    pub fn add_iter_owned<B, I, T>(&self, iter: I, name_o: Option<&str>)
+    where
+        B: MetaIntegrator<T>,
+        I: Iterator<Item = T>,
+    {
+        let name = name_o.unwrap(); //TODO - temp
+        B::add_iter_owned(&self.builder.as_ref().unwrap(), iter, &name);
+        self.mu_bu().declare_ns(&name, &self.current_ns);
+    }
+
+    pub fn declare_link<S: Entity, T: Entity>(&self, name: &str) {
+        self.mu_bu().declare_link::<S, T>(name);
+    }
+
+    pub fn declare<E, Marker>(&self, name: &str) {
+        self.mu_bu().declare_marked_attribute::<E, Marker>(&name);
+    }
+
+    pub fn declare_iter<B, I, E, S, M>(&self, iter: I, name: &str)
     where
         B: MetaIntegrator<E>,
         I: Iterator<Item = E>,
     {
-        self.set_name(name_o);
-        B::add_iter_owned(
-            &mut self.builder.as_mut().unwrap(),
-            iter,
-            &self.current_name,
-        );
-        self.builder
-            .as_mut()
-            .unwrap()
-            .declare_ns(&self.current_name, &self.current_ns);
-    }
-
-    pub fn declare_link<S: Entity, T: Entity>(&mut self, name: &str) {
-        self.builder.as_mut().unwrap().declare_link::<S, T>(name);
+        self.add_iter_owned::<B, I, E>(iter, Some(name));
+        self.declare::<S, M>(name)
     }
 
     pub fn read_csv_objs<T: DeserializeOwned>(
@@ -337,11 +349,6 @@ impl Stowage {
         sub_path: &str,
     ) -> ObjIter<T> {
         read_deser_obj::<T>(&self.paths.entity_csvs, main_path, sub_path)
-    }
-
-    pub fn read_sem_ids<E: Entity>(&self) -> ObjIter<SemanticElem> {
-        let path = PathBuf::from(env::var_os("OA_PERSISTENT").unwrap());
-        read_deser_obj::<SemanticElem>(&path, SEM_DIR, E::NAME)
     }
 
     pub fn get_entity_interface<E, Marker>(&self) -> Marker::BE
@@ -355,30 +362,30 @@ impl Stowage {
     pub fn get_marked_interface<E, AttMarker, BeMarker>(&self) -> BeMarker::BE
     where
         E: Entity + MarkedAttribute<AttMarker>,
-        E::AttributeEntity: NamespacedEntity,
         BeMarker: BackendSelector<E::AttributeEntity>,
-        BeMarker::BE: BackendLoading<E::AttributeEntity>,
+        MAA<E, AttMarker>: MarkedBackendLoader<BeMarker, BE = BeMarker::BE>,
     {
-        self.get_entity_interface::<<E as MarkedAttribute<AttMarker>>::AttributeEntity, BeMarker>()
-    }
-
-    pub fn set_name(&mut self, name_o: Option<&str>) {
-        if let Some(name) = name_o {
-            self.current_name = name.to_string();
-        }
-    }
-
-    pub fn declare<E, Marker>(&mut self, name: &str) {
-        self.builder
-            .as_mut()
-            .unwrap()
-            .declare_marked_attribute::<E, Marker>(&name);
+        self.get_entity_interface::<MAA<E, AttMarker>, BeMarker>()
     }
 
     pub fn path_from_ns(&self, ns: &str) -> PathBuf {
         self.paths.entity_csvs.parent().unwrap().join(ns)
     }
+
+    pub fn mu_bu(&self) -> MutexGuard<MainBuilder> {
+        self.builder.as_ref().unwrap().lock().unwrap()
+    }
 }
+
+impl<E> NumberedEntity for E
+where
+    E: MappableEntity<KeyType = BigId>,
+    ET<E>: UnsignedNumber + Serialize + DeserializeOwned,
+{
+    type T = ET<E>;
+}
+
+impl<E> MainEntity for E where E: Entity<T = NET<E>> + NumberedEntity {}
 
 impl<T> ObjIter<T>
 where
@@ -393,20 +400,19 @@ where
     }
 }
 
-impl<E, Marker> MarkedBackendLoader<Marker> for E
+impl<E, BeMarker> MarkedBackendLoader<BeMarker> for E
 where
     E: NamespacedEntity,
-    Marker: BackendSelector<E>,
-    Marker::BE: BackendLoading<E>,
+    BeMarker: BackendSelector<E>,
+    BeMarker::BE: BackendLoading<E>,
 {
-    type BE = Marker::BE;
+    type BE = BeMarker::BE;
     fn load(stowage: &Stowage) -> Self::BE {
         let path = stowage.path_from_ns(E::NS);
-        println!("loading {} from {:?}", E::NAME, path);
         let now = std::time::Instant::now();
-        let out = Marker::BE::load_backend(&path);
+        let out = BeMarker::BE::load_backend(&path);
         println!(
-            "loaded {} from {path:?} in {}",
+            "loaded {} from {path:?} in {}s",
             E::NAME,
             now.elapsed().as_secs()
         );
@@ -414,11 +420,11 @@ where
     }
 }
 
-impl<E> BackendSelector<E> for Quickest
+impl<E> BackendSelector<E> for QuickestNumbered
 where
-    E: Entity + MappableEntity<KeyType = BigId>,
+    E: MainEntity,
 {
-    type BE = LoadedIdMap<E::T>;
+    type BE = LoadedIdMap<NET<E>>;
 }
 
 impl<E> BackendSelector<E> for QuickMap
