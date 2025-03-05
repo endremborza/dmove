@@ -1,81 +1,88 @@
 include .env
 export
 
-QV := quercus-basis-v`date +%Y-%m-%d`
-S3_LOC := s3://tmp-borza-public-cyx/$(QV)
-TEST_DIR := /tmp/dmove-test
-ACT_OA_ROOT := $(OA_ROOT)
-ACT_OA_SNAPSHOT := $(OA_SNAPSHOT)
-RANKLESS_ENV = full
-
-export
-
 hello:
 	echo "no fuckup here!"
 
+include rankless_rs/Makefile
+
 download-snapshot:
 	aws s3 sync "s3://openalex" $(OA_SNAPSHOT) --no-sign-request
-	# aws s3 sync "s3://openalex" /volume2/alpha-share-solid/oa-snapshot-2024-09 --no-sign-request
+
+build-prep:
+	cargo build --release -p dmove-macro
+	./target/release/dmove-macro -p rankless_rs make-setup
 
 to-csv: 
-	cargo run --release -p rankless-rs -- $@ $(ACT_OA_ROOT) $(ACT_OA_SNAPSHOT)/data
+	cargo run --release -p rankless-rs -- $@ $(OA_ROOT) $(OA_SNAPSHOT)/data
 
+filter: clean-filters clean-keys clean-cache
+	cargo run --release -p rankless-rs -- $@ $(OA_ROOT)
 
-filter entity_mapping init_atts derive_links1 derive_links2:
-	export RANKLESS_ENV
-	cargo run --release -p rankless-rs -- $@ $(ACT_OA_ROOT) 
+tree-test:
+	cargo run --release -p rankless-rs -- $@ $(OA_ROOT)
 
 run-server:
-	export RANKLESS_ENV
-	cargo run --release -p rankless-server -- $@ $(ACT_OA_ROOT) 
+	cargo run --release -p rankless-server -- $(OA_ROOT) 
 
-serve extend_csvs post_agg common:
-	export ACT_OA_ROOT=$(ACT_OA_ROOT)
-	export ACT_SNAPSHOT=$(ACT_OA_SNAPSHOT)
+extend_csvs bm:
 	python3 -m pyscripts.$@
 
-deploy-data-to-s3:
-	aws s3 rm $(S3_LOC) --recursive
-	aws s3 sync $(OA_ROOT)/pruned-cache $(S3_LOC)  --acl public-read --content-encoding gzip
-	echo $(S3_LOC)
+set-full:
+	cp bak-gen-full/* rankless_rs/src/gen/
+	./set-env full
 
-mini-%: ACT_OA_ROOT = $(OA_TEST_ROOT)/mini-root
-mini-%: ACT_OA_SNAPSHOT = $(OA_TEST_ROOT)/mini-snapshot
+set-mini:
+	./set-env mini
 
-micro-%: ACT_OA_ROOT = $(OA_TEST_ROOT)/micro-root
-micro-%: ACT_OA_SNAPSHOT = $(OA_TEST_ROOT)/micro-snapshot
+set-micro:
+	./set-env micro
 
-nano-%: ACT_OA_ROOT = $(OA_TEST_ROOT)/nano-root
-nano-%: ACT_OA_SNAPSHOT = $(OA_TEST_ROOT)/nano-snapshot
-nano-%: RANKLESS_ENV = nano
+set-nano:
+	rm rankless_rs/src/gen/*
+	./set-env nano
 
-complete: common to-csv filter extend_csvs entity_mapping init_atts derive_links1 derive_links2 #post_agg
+complete: to-csv filter extend_csvs rankless_rs/src/gen/derive_links5.rs
 	@echo Complete
 
-mini-test: nuke complete
-micro-test: nuke complete
-nano-test: nuke complete
-
-nano-server: run-server
-
+big-test:
+	cargo test --release -p rankless-trees --tests instances::tests::big_tree -- --nocapture
 
 profile:
-	# echo "-1"  > perf_event_paranoid
-	sudo nvim perf_event_paranoid /proc/sys/kernel/
-	flamegraph -o make_fg.svg -- target/release/dmove fix-atts $(ACT_OA_ROOT)
-	sudo nvim perf_event_paranoid /proc/sys/kernel/
-	# echo "4"  > perf_event_paranoid
-	# sudo mv perf_event_paranoid /proc/sys/kernel/
+	cargo build --release
+	echo "-1"  | sudo tee /proc/sys/kernel/perf_event_paranoid
+	echo "0" | sudo tee /proc/sys/kernel/kptr_restrict
+	# flamegraph -o make_fg.svg -- target/release/dmove fix-atts $(OA_ROOT)
+	# flamegraph -o make_fg.svg -- target/release/rankless-server $(OA_ROOT)
+	# flamegraph -o make_fg.svg -- cargo test --release -p rankless-trees --tests instances::tests::big_tree  -- --nocapture
+	flamegraph -o make_fg.svg -- target/release/rankless-trees
+	echo "4"  | sudo tee /proc/sys/kernel/perf_event_paranoid
+	echo "1" | sudo tee /proc/sys/kernel/kptr_restrict
 	# install linux-tools-generic
 
+test-server:
+	time curl localhost:3038/v1/names/authors?q=ces
+
+backup-gens:
+	mkdir -p rankless_rs/src/gen/$(RANKLESS_ENV)/
+	cp rankless_rs/src/gen_* rankless_rs/src/gen/$(RANKLESS_ENV)/
+
 nuke:
-	rm -rf $(ACT_OA_ROOT)
+	rm -rf $(OA_ROOT)
 
 clean-filters:
 	rm -rf $(OA_ROOT)/filter-steps
 
+clean-keys:
+	rm -rf $(OA_ROOT)/entity_mapping
+
 clean-cache:
 	rm -rf $(OA_ROOT)/cache
+	rm -rf /tmp/dmove-parts
+
+clean-profile:
+	rm perf.data*
+	rm make_fg.svg
 
 quiet-build:
 	RUSTFLAGS="$RUSTFLAGS -A dead_code -A non_snake_case -A unused_variables" cargo build
