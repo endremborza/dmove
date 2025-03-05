@@ -51,7 +51,7 @@ where
         for _ in 0..(n_threads) {
             sender.send(None).unwrap();
         }
-        for t in threads_v {
+        for t in threads_v.into_iter() {
             t.join().expect("thread failed");
         }
     });
