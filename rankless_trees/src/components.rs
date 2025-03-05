@@ -1367,7 +1367,7 @@ impl<'a> PartitioningIterator<'a> for AuthorBestiePapers<'a> {
     type StackBasis = (
         IntX<Authors, 0, true>,
         IntX<Works, 0, true>,
-        IntX<Subfields, 2, true>,
+        IntX<Subfields, 2, false>,
     );
     type Root = Authors;
     const PARTITIONS: usize = N_PERS;
