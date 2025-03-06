@@ -43,8 +43,8 @@ use rankless_trees::{
 
 const PORT: u16 = 3038;
 const N_THREADS: usize = 16;
-// const UPPER_LIMIT: u32 = 1_000_000;
-const UPPER_LIMIT: u32 = 100_000;
+const UPPER_LIMIT: u32 = u32::MAX;
+// const UPPER_LIMIT: u32 = 100_000;
 const ETYPE_ENC: [&str; 6] = [
     Institutions::NAME,
     Authors::NAME,
