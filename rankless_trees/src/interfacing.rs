@@ -1,7 +1,6 @@
 use std::{f64, sync::Arc};
 
 use crate::{
-    extern_features::{CitSubfieldsConcentrationMarker, RefSubfieldsConcentrationMarker},
     ids::AttributeLabelUnion,
     io::{AttributeLabel, WT},
 };
@@ -236,8 +235,8 @@ make_ent_interfaces!(
     top_citing_sfc - Top3CitingSfMarker | TopRec<Subfields>,
     top_paper_sfc - Top3PaperSfMarker | TopRec<Subfields>;
     // inst_rels - InstRelMarker | [InstRelation; N_RELS];
-    ref_sfc : RefSubfieldsConcentrationMarker,
-    cit_sfc : CitSubfieldsConcentrationMarker
+    // ref_sfc : RefSubfieldsConcentrationMarker,
+    // cit_sfc : CitSubfieldsConcentrationMarker
 
 );
 
