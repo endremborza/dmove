@@ -1332,6 +1332,7 @@ where
     type Root = Countries;
     type StackBasis = SB;
     const PARTITIONS: usize = N_PERS;
+    const IS_SPEC: bool = false;
     fn new(id: NET<Countries>, gets: &'a Getters) -> Self {
         let insts = gets.country_insts(id).iter().peekable();
         Self {
