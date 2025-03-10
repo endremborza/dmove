@@ -20,6 +20,7 @@ use dmove::BigId;
 
 const MAX_AUTHORS: usize = 20;
 const MIN_CITATIONS: usize = 1;
+const WORK_KINDS: [&str; 3] = ["article", "book", "review"];
 
 const FIX_AUTHORS: [BigId; 6] = [
     5064297795, 5005839111, 5078032253, 5045634725, 5082456380, 5017880363,
@@ -113,8 +114,8 @@ pub fn main(stowage: Stowage) -> io::Result<()> {
 fn single_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
     filter_write::<Work, _>(stowage, step_id, works::C, |o| {
         !o.is_retracted.unwrap_or(false)
-            & (o.work_type.as_deref().unwrap_or("") == "article")
-            & (o.publication_year.unwrap_or(0) > START_YEAR)
+            & WORK_KINDS.contains(&o.work_type.as_deref().unwrap_or(""))
+            & (o.publication_year.unwrap_or(0) > START_YEAR) // > because 0 is "unknown"
             & (o.publication_year.unwrap_or(0) <= FINAL_YEAR)
     })
 }
