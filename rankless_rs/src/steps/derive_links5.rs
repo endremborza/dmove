@@ -23,7 +23,7 @@ use crate::{
         init_empty_slice, BeS, CitSubfieldsArrayMarker, InstRelMarker, MainWorkMarker,
         QuickAttPair, QuickMap, RefSubfieldsArrayMarker, Top3AffCountryMarker, Top3AuthorMarker,
         Top3CitingSfMarker, Top3JournalMarker, Top3PaperSfMarker, Top3PaperTopicMarker, WorkLoader,
-        YearlyCitationsMarker, YearlyPapersMarker,
+        YearlyCitationsMarker, YearlyPapersMarker, NET,
     },
     env_consts::{FINAL_YEAR, START_YEAR},
     gen::{
@@ -55,6 +55,8 @@ pub const MIN_YEAR: usize = MAX_YEAR - ERA_SIZE + 1;
 type YT = ET<Years>;
 type IT = ET<Institutions>;
 type SfDistRec<E> = [ET<MAA<E, WorkCountMarker>>; Subfields::N];
+type Top3RelExtender<E, SE> = TopNRelExtender<3, E, SE, HashMap<ET<E>, u32>>;
+type Top5HRelExtender<E, SE> = TopNRelExtender<5, E, SE, HashMap<ET<E>, Vec<u32>>>;
 pub type EraRec = [u32; ERA_SIZE];
 
 #[derive(Debug, ByteFixArrayInterface)]
@@ -79,7 +81,7 @@ where
     top3_citing_sfs: Top3RelExtender<Subfields, E>,
     top3_aff_countries: Top3RelExtender<Countries, E>,
     top3_journals: Top3RelExtender<Sources, E>,
-    top3_authors: Top3RelExtender<Authors, E>,
+    top5_authors: Top5HRelExtender<Authors, E>,
     rels: Vec<[InstRelation; N_RELS]>,
     rel_map_rec: HashMap<ET<Institutions>, InstRelation>,
 }
@@ -100,14 +102,15 @@ struct SelfExtender<T> {
     rec: T,
 }
 
-struct Top3RelExtender<E, SE>
+struct TopNRelExtender<const N: usize, E, SE, Prep>
 where
     SE: Entity,
     E: Entity,
     ET<E>: UnsignedNumber,
+    Prep: TopPrepper<E>,
 {
-    vec: Vec<[(u32, E::T); 3]>,
-    prep: HashMap<E::T, u32>,
+    vec: Vec<[(u32, E::T); N]>,
+    prep: Prep,
     seid: SE::T,
 }
 
@@ -139,6 +142,12 @@ trait IRelAdder: Entity {
         }
         o
     }
+}
+
+trait TopPrepper<E> {
+    type K;
+    fn add(&mut self, k: Self::K);
+    fn to_v(self) -> Vec<(usize, u32)>;
 }
 
 impl Stowage {
@@ -205,28 +214,29 @@ where
     }
 }
 
-impl<E, SE> Top3RelExtender<E, SE>
+impl<const N: usize, E, SE, Prep> TopNRelExtender<N, E, SE, Prep>
 where
     E: Entity,
     SE: Entity,
     ET<E>: UnsignedNumber,
     ET<SE>: UnsignedNumber,
+    Prep: TopPrepper<E> + InitEmpty,
 {
     fn new() -> Self {
         Self {
             vec: Vec::new(),
-            prep: HashMap::new(),
+            prep: Prep::init_empty(),
             seid: SE::T::init_empty(),
         }
     }
 
-    fn add(&mut self, e: &ET<E>) {
-        self.prep.entry(*e).or_insert(0).inc();
+    fn add(&mut self, e: Prep::K) {
+        self.prep.add(e)
     }
 
     fn push(&mut self, seid: SE::T, sort_o: TopSorter) {
-        let map_base = replace(&mut self.prep, HashMap::new());
-        let cv: Vec<(usize, u32)> = map_base.iter().map(|e| (e.0.to_usize(), *e.1)).collect();
+        let map_base = replace(&mut self.prep, Prep::init_empty());
+        let cv: Vec<(usize, u32)> = map_base.to_v();
         self.push_from_it(cv.into_iter(), seid, sort_o)
     }
 
@@ -250,7 +260,7 @@ where
         self.seid = seid;
         let mut v: Vec<(usize, u32)> = it.filter(|e| self.filter(e)).collect();
         v.sort_by(|l, r| sort_o.cmp(l, r));
-        push_cut::<3, _>(
+        push_cut::<N, _>(
             v.into_iter()
                 .map(|t| (t.1.to_usize() as u32, E::T::from_usize(t.0)))
                 .collect(),
@@ -286,7 +296,7 @@ where
             top3_citing_sfs: Top3RelExtender::new(),
             top3_aff_countries: Top3RelExtender::new(),
             top3_journals: Top3RelExtender::new(),
-            top3_authors: Top3RelExtender::new(),
+            top5_authors: Top5HRelExtender::new(),
             rels: Vec::new(),
             rel_map_rec: HashMap::new(),
         }
@@ -308,16 +318,17 @@ where
             self.paper_subfields.rec[*sf_id as usize].inc();
         }
         for topic_id in bends.wtopics.get(&wu).unwrap() {
-            self.top3_paper_topics.add(topic_id);
+            self.top3_paper_topics.add(*topic_id);
         }
         for cid in bends.wcountries.get(&wu).unwrap() {
-            self.top3_aff_countries.add(cid);
+            self.top3_aff_countries.add(*cid);
         }
-        for ship_id in bends.wships.get(&wu).unwrap() {
-            self.top3_authors.add(&bends.shipa[ship_id.to_usize()]);
-        }
-        self.top3_journals.add(bends.wtopsource.get(wu).unwrap());
         let wcs = bends.wciting.get(&wu).unwrap();
+        for ship_id in bends.wships.get(&wu).unwrap() {
+            self.top5_authors
+                .add((bends.shipa[ship_id.to_usize()], wcs.len()));
+        }
+        self.top3_journals.add(*bends.wtopsource.get(wu).unwrap());
         for c_wid in wcs {
             for sf_id in bends.wsubfields.get(&c_wid.to_usize()).unwrap() {
                 self.citing_subfields.rec[*sf_id as usize].inc();
@@ -344,7 +355,7 @@ where
         self.top3_citing_sfs
             .push_from_arr(&self.citing_subfields.rec, parent_id);
         self.top3_paper_topics.push(parent_id, TopSorter::Default);
-        self.top3_authors.push(parent_id, TopSorter::Default);
+        self.top5_authors.push(parent_id, TopSorter::Default);
         self.top3_aff_countries.push(parent_id, TopSorter::Default);
         self.top3_journals
             .push(parent_id, TopSorter::TopJournal(cd.journal_vals.clone()));
@@ -362,7 +373,7 @@ where
         stowage.ditf::<Top3PaperSfMarker, E, _>(self.top3_paper_sfs.vec, "top-paper-subfields");
         stowage.ditf::<Top3CitingSfMarker, E, _>(self.top3_citing_sfs.vec, "top-citing-subfields");
         stowage.ditf::<Top3PaperTopicMarker, E, _>(self.top3_paper_topics.vec, "top-paper-topics");
-        stowage.ditf::<Top3AuthorMarker, E, _>(self.top3_authors.vec, "top-paper-authors");
+        stowage.ditf::<Top3AuthorMarker, E, _>(self.top5_authors.vec, "top-paper-authors");
         stowage.ditf::<Top3JournalMarker, E, _>(self.top3_journals.vec, "top-journals");
         stowage
             .ditf::<Top3AffCountryMarker, E, _>(self.top3_aff_countries.vec, "top-aff-countries");
@@ -500,14 +511,7 @@ impl CiteDeriver {
                 })
                 .collect();
             sf_ext.push(sid, self);
-            counts.sort();
-            let mut h = 0;
-            for (i, cc) in counts.iter().rev().enumerate() {
-                if i > *cc {
-                    h = i as u32;
-                    break;
-                }
-            }
+            let h = get_h_index_and_sort(&mut counts);
             let median = *counts.get(counts.len() / 2).unwrap_or(&0) as u32;
             source_stats[i] = ([h, median], best_q);
             counts.into_iter().sum()
@@ -567,6 +571,38 @@ impl TopSorter {
             Self::Default => r.1.cmp(&l.1),
             Self::TopJournal(b) => b[r.0].cmp(&b[l.0]),
         }
+    }
+}
+
+impl<E> TopPrepper<E> for HashMap<E::T, u32>
+where
+    E: Entity,
+    ET<E>: UnsignedNumber,
+{
+    type K = ET<E>;
+    fn add(&mut self, k: Self::K) {
+        self.entry(k).or_insert(0).inc();
+    }
+
+    fn to_v(self) -> Vec<(usize, u32)> {
+        self.iter().map(|e| (e.0.to_usize(), *e.1)).collect()
+    }
+}
+
+impl<E> TopPrepper<E> for HashMap<E::T, Vec<u32>>
+where
+    E: Entity,
+    ET<E>: UnsignedNumber,
+{
+    type K = (ET<E>, usize);
+    fn add(&mut self, k: Self::K) {
+        self.entry(k.0).or_insert(Vec::new()).push(k.1 as u32);
+    }
+
+    fn to_v(mut self) -> Vec<(usize, u32)> {
+        self.iter_mut()
+            .map(|mut e| (e.0.to_usize(), get_h_index_and_sort(&mut e.1)))
+            .collect()
     }
 }
 
@@ -683,4 +719,19 @@ where
             }
         }
     }
+}
+
+fn get_h_index_and_sort<T>(counts: &mut Vec<T>) -> u32
+where
+    T: UnsignedNumber,
+{
+    counts.sort();
+    let mut h = 0;
+    for (i, cc) in counts.iter().rev().enumerate() {
+        if i > cc.to_usize() {
+            h = i as u32;
+            break;
+        }
+    }
+    h
 }
