@@ -479,7 +479,7 @@ macro_rules! empty_wrap {
     };
 }
 
-empty_num!(u8, u16, u32, u64, u128);
+empty_num!(u8, u16, u32, u64, u128, usize);
 
 empty_coll!(Vec<T>; T, BTreeSet<T>; T, HashMap<K, V>; K-V, VecDeque<T>; T);
 
@@ -487,8 +487,8 @@ empty_wrap!(Mutex<T>, Arc<T>);
 
 use crate::{var_size_attributes::VaST, VarSizedAttributeElement};
 
-uint_impl!(u8, u16, u32, u64, u128);
-num_impl!(u8, u16, u32, u64, u128, f32, f64);
+uint_impl!(u8, u16, u32, u64, u128, usize);
+num_impl!(u8, u16, u32, u64, u128, f32, f64, usize);
 iter_ba_impl!(Box<[T]>, Vec<T>, Rc<[T]>, Arc<[T]>);
 
 pub fn camel_case(s: &str) -> String {
