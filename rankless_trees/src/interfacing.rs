@@ -42,6 +42,7 @@ type VB<E> = BeS<QuickAttPair, E>;
 type FB<E> = BeS<QuickestBox, E>;
 type MB<E> = BeS<QuickMap, E>;
 type TopRec<E> = [(u32, ET<E>); 3];
+type TopRec5<E> = [(u32, ET<E>); 5];
 
 pub struct Getters {
     ifs: Interfaces,
@@ -229,7 +230,7 @@ make_ent_interfaces!(
     yearly_papers - YearlyPapersMarker | EraRec,
     yearly_cites - YearlyCitationsMarker | EraRec,
     top_journals - Top3JournalMarker | TopRec<Sources>,
-    top_authors - Top3AuthorMarker | TopRec<Authors>,
+    top_authors - Top3AuthorMarker | TopRec5<Authors>,
     top_aff_countries - Top3AffCountryMarker | TopRec<Countries>,
     top_paper_topic - Top3PaperTopicMarker | TopRec<Topics>,
     top_citing_sfc - Top3CitingSfMarker | TopRec<Subfields>,
