@@ -206,11 +206,11 @@ where
 {
     match &filter {
         None => {
-            println!("\n{:?} no filter", name);
+            println!("\n{name} no filter");
             stowage.add_iter_owned::<Data64MappedEntityBuilder, _, _>(iter, Some(name));
         }
         Some(fs) => {
-            println!("\n{:?} filter of {:?}", name, fs.len());
+            println!("\n{name} filter of {:?}", fs.len());
             stowage.add_iter_owned::<Data64MappedEntityBuilder, _, _>(
                 iter.filter(|e| fs.contains(e)),
                 Some(name),

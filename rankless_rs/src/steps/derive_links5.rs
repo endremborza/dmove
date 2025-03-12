@@ -323,12 +323,13 @@ where
         for cid in bends.wcountries.get(&wu).unwrap() {
             self.top3_aff_countries.add(*cid);
         }
+        self.top3_journals.add(*bends.wtopsource.get(wu).unwrap());
         let wcs = bends.wciting.get(&wu).unwrap();
+        let wlen = wcs.len();
         for ship_id in bends.wships.get(&wu).unwrap() {
             self.top5_authors
-                .add((bends.shipa[ship_id.to_usize()], wcs.len()));
+                .add((bends.shipa[ship_id.to_usize()], wlen));
         }
-        self.top3_journals.add(*bends.wtopsource.get(wu).unwrap());
         for c_wid in wcs {
             for sf_id in bends.wsubfields.get(&c_wid.to_usize()).unwrap() {
                 self.citing_subfields.rec[*sf_id as usize].inc();
@@ -340,7 +341,7 @@ where
             self.rel_map_rec
                 .entry(iid)
                 .or_insert_with(|| InstRelation::new(iid))
-                .update(wcs.len() as u32, year);
+                .update(wlen as u32, year);
         }
         wcs.len()
     }
@@ -599,8 +600,8 @@ where
         self.entry(k.0).or_insert(Vec::new()).push(k.1 as u32);
     }
 
-    fn to_v(mut self) -> Vec<(usize, u32)> {
-        self.iter_mut()
+    fn to_v(self) -> Vec<(usize, u32)> {
+        self.into_iter()
             .map(|mut e| (e.0.to_usize(), get_h_index_and_sort(&mut e.1)))
             .collect()
     }
