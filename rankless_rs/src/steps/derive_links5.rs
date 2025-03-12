@@ -23,7 +23,7 @@ use crate::{
         init_empty_slice, BeS, CitSubfieldsArrayMarker, InstRelMarker, MainWorkMarker,
         QuickAttPair, QuickMap, RefSubfieldsArrayMarker, Top3AffCountryMarker, Top3AuthorMarker,
         Top3CitingSfMarker, Top3JournalMarker, Top3PaperSfMarker, Top3PaperTopicMarker, WorkLoader,
-        YearlyCitationsMarker, YearlyPapersMarker, NET,
+        YearlyCitationsMarker, YearlyPapersMarker,
     },
     env_consts::{FINAL_YEAR, START_YEAR},
     gen::{
@@ -235,8 +235,7 @@ where
     }
 
     fn push(&mut self, seid: SE::T, sort_o: TopSorter) {
-        let map_base = replace(&mut self.prep, Prep::init_empty());
-        let cv: Vec<(usize, u32)> = map_base.to_v();
+        let cv = replace(&mut self.prep, Prep::init_empty()).to_v();
         self.push_from_it(cv.into_iter(), seid, sort_o)
     }
 
@@ -727,12 +726,10 @@ where
     T: UnsignedNumber,
 {
     counts.sort();
-    let mut h = 0;
     for (i, cc) in counts.iter().rev().enumerate() {
         if i > cc.to_usize() {
-            h = i as u32;
-            break;
+            return i as u32;
         }
     }
-    h
+    counts.len() as u32
 }
