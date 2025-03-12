@@ -11,7 +11,7 @@ use crate::{
         MIN_PAPERS_FOR_SOURCE, START_YEAR,
     },
     oa_structs::{
-        post::{Author, Authorship, Location},
+        post::{Author, Authorship, Institution, Location},
         ReferencedWork, Work,
     },
 };
@@ -25,6 +25,8 @@ const WORK_KINDS: [&str; 3] = ["article", "book", "review"];
 const FIX_AUTHORS: [BigId; 6] = [
     5064297795, 5005839111, 5078032253, 5045634725, 5082456380, 5017880363,
 ];
+
+const FORCE_DROP_INSTS: [BigId; 2] = [4210095297, 4210109586];
 
 #[derive(Deserialize)]
 struct PersonAuthorship {
@@ -108,7 +110,8 @@ pub fn main(stowage: Stowage) -> io::Result<()> {
     filter_step::<Location>(&stowage, [sources::C, works::C], 12)?;
     filter_step::<Authorship>(&stowage, [institutions::C, works::C], 13)?;
     filter_step::<PersonAuthorship>(&stowage, [works::C, authors::C], 14)?;
-    author_filter(&stowage, 20)
+    author_filter(&stowage, 20)?;
+    inst_filter(&stowage, 21)
 }
 
 fn single_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
@@ -128,8 +131,15 @@ fn author_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
             | (pre_filter.contains(&aid)
                 & (o.cited_by_count.unwrap_or(0) >= MIN_AUTHOR_CITE_COUNT.into())
                 & (o.works_count.unwrap_or(0) >= MIN_AUTHOR_WORK_COUNT.into()))
-    })?;
-    Ok(())
+    })
+}
+
+fn inst_filter(stowage: &Stowage, step_id: u8) -> io::Result<()> {
+    let pre_filter = stowage.get_last_filter(institutions::C).unwrap();
+    filter_write::<Institution, _>(stowage, step_id, institutions::C, |o| {
+        let iid = o.get_parsed_id();
+        !FORCE_DROP_INSTS.contains(&iid) && pre_filter.contains(&iid)
+    })
 }
 
 fn filter_write<T, F>(
