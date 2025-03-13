@@ -352,7 +352,7 @@ where
 }
 
 fn tmp_part_cache_root(fq: &FullTreeQuery) -> PathBuf {
-    let pstr = format!("/tmp/dmove-parts/{}/{}", fq.name, fq.ck.eid);
+    let pstr = format!("/tmp/dmove-parts/{}/{}/{}", fq.name, fq.ck.tid, fq.ck.eid);
     let cache_root = PathBuf::from_str(&pstr).expect("tmp path");
     create_dir_all(&cache_root).expect("making tmp dir");
     cache_root
