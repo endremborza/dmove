@@ -6,7 +6,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use dmove::{Entity, UnsignedNumber, ET};
+use dmove::{para::set_and_notify, Entity, UnsignedNumber, ET};
 use hashbrown::HashMap;
 use kd_tree::{KdPoint, KdTree};
 use rand::{seq::SliceRandom, Rng};
@@ -486,12 +486,7 @@ macro_rules! multi_route {
             )*
 
             let ccount = gets.total_cite_count();
-            {
-                let (lock, cvar) = &*cv_pair;
-                let mut data = lock.lock().unwrap();
-                *data = Some(ccount);
-                cvar.notify_all();
-            }
+            set_and_notify(cv_pair, Some(ccount));
             NodeInterfaces::<Topics>::new(&gets.stowage).update_stats(&mut static_att_union.lock().unwrap(), ccount);
             NodeInterfaces::<Qs>::new(&gets.stowage).update_stats(&mut static_att_union.lock().unwrap(), ccount);
 

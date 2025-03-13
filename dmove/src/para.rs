@@ -1,3 +1,5 @@
+use std::sync::{Arc, Condvar, Mutex};
+
 use crossbeam_channel::{bounded, Receiver};
 
 pub trait Worker<T>
@@ -27,6 +29,13 @@ where
         para_run::<Self, T, _>(in_v, &self, n);
         self.post()
     }
+}
+
+pub fn set_and_notify<T>(cvp: Arc<(Mutex<T>, Condvar)>, val: T) {
+    let (lock, cvar) = &*cvp;
+    let mut data = lock.lock().unwrap();
+    *data = val;
+    cvar.notify_all();
 }
 
 fn para_run<W, T, I>(in_v: I, setup: &W, n_threads: usize)
