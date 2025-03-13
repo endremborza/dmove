@@ -60,8 +60,7 @@ struct WVecMerger<'a> {
 }
 
 pub trait TreeGetter: NumberedEntity {
-    #[allow(unused_variables)]
-    fn set_tree(state: &TreeBasisState, fq: FullTreeQuery, res_cvp: ResCvp) {}
+    fn set_tree(state: &TreeBasisState, fq: FullTreeQuery, res_cvp: ResCvp);
 
     fn get_specs() -> Vec<TreeSpec>;
 }
@@ -564,6 +563,8 @@ mod subfield_trees {
 }
 
 pub mod test_tools {
+    use rankless_rs::steps::a1_entity_mapping::N_PERS;
+
     use crate::components::PartitionId;
 
     use super::*;
@@ -571,6 +572,9 @@ pub mod test_tools {
     pub trait TestSB {
         type SB: StackBasis;
         fn get_vec() -> Vec<StackFr<Self::SB>>;
+        fn get_pid(_v: &StackFr<Self::SB>) -> PartitionId {
+            0
+        }
     }
 
     pub struct Tither<TSB>
@@ -587,7 +591,7 @@ pub mod test_tools {
     {
         type Root = Institutions;
         type StackBasis = TSB::SB;
-        const PARTITIONS: usize = 2;
+        const PARTITIONS: usize = N_PERS;
         fn new(_id: ET<Institutions>, _gets: &Getters) -> Self {
             let viter = TSB::get_vec().into_iter();
             Self { viter }
@@ -602,7 +606,7 @@ pub mod test_tools {
 
         fn next(&mut self) -> Option<Self::Item> {
             match self.viter.next() {
-                Some(v) => Some((0, v)),
+                Some(v) => Some((TSB::get_pid(&v), v)),
                 None => None,
             }
         }
@@ -687,7 +691,8 @@ pub mod big_test_tree {
             year: None,
             tid: None,
             connections: None,
-            big: None,
+            big_prep: None,
+            big_read: None,
         };
 
         let tstate = TreeRunManager::<(BigTestEntity, BigTestEntity)>::fake();
@@ -715,6 +720,11 @@ mod tests {
     use super::*;
     use crate::io::{JsSerChildren, TreeRunManager};
     use dmove::{BigId, MappableEntity, NamespacedEntity};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rankless_rs::steps::{
+        a1_entity_mapping::{RawYear, YearInterface, Years, POSSIBLE_YEAR_FILTERS},
+        derive_links1::WorkPeriods,
+    };
     use std::{ops::Deref, sync::Arc};
     use test_tools::{TestSB, Tither};
 
@@ -722,6 +732,12 @@ mod tests {
 
     type SimpleStack = IntX<Works, 0, true>;
     type L2Stack = (IntX<Countries, 0, true>, IntX<Subfields, 0, true>);
+    type PartedStackFR = (
+        IntX<Countries, 0, true>,
+        IntX<Countries, 0, true>,
+        IntX<Works, 0, true>,
+    );
+    struct PartedStack;
 
     struct TestEntity;
 
@@ -743,10 +759,9 @@ mod tests {
     mod submod {
         use super::*;
         pub type Tree1 = Tither<SimpleStackBasisL2>;
-
         pub type Tree2 = Tither<SimpleStackBasis>;
-
         pub type Tree3 = Tither<SimpleStackBasis3>;
+        pub type Tree4 = Tither<PartedStack>;
     }
 
     struct SimpleStackBasis;
@@ -792,12 +807,37 @@ mod tests {
         }
     }
 
+    impl TestSB for PartedStack {
+        type SB = PartedStackFR;
+        fn get_vec() -> Vec<StackFr<Self::SB>> {
+            let mut vec = Vec::new();
+            let mut rng = StdRng::seed_from_u64(742);
+            for _ in 0..2_u32.pow(16) {
+                let rec = (
+                    rng.gen(),
+                    rng.gen(),
+                    rng.gen(),
+                    rng.gen::<u32>() % (Years::N as u32), //TODO: year test hack quickfix
+                    rng.gen(),
+                );
+                vec.push(rec);
+            }
+            vec
+        }
+        fn get_pid(v: &StackFr<Self::SB>) -> crate::components::PartitionId {
+            let y8 = (v.3 as usize % Years::N) as u8;
+            let y16 = YearInterface::reverse(y8);
+            WorkPeriods::from_year(y16)
+        }
+    }
+
     fn q(i: u8) -> TreeQ {
         TreeQ {
             year: None,
             tid: Some(i),
             connections: None,
-            big: None,
+            big_prep: None,
+            big_read: None,
         }
     }
 
@@ -878,12 +918,52 @@ mod tests {
         assert_eq!(r.tree.node.link_count, 1048576); //20 - full
         assert_eq!(r.tree.node.source_count, 1048434); //20 - full
         assert_eq!(r.tree.node.top_source, Some(16735219)); //20 - full
-
-        // assert_eq!(r.tree.node.link_count, 1048448); //20 - nano
-        // assert_eq!(r.tree.node.source_count, 65536); //20 - nano
-        // assert_eq!(r.tree.node.top_source, 28260); //20 - nano
-        //
-        // assert_eq!(r.tree.node.link_count, 2097152); //21
-        // assert_eq!(r.tree.node.link_count, 524288); //19
     }
+
+    #[test]
+    pub fn big_parted_tree() {
+        let tstate = TreeRunManager::<(TestEntity, TestEntity)>::fake();
+        let name = TestEntity::NAME.to_string();
+        let q = TreeQ {
+            year: None,
+            tid: Some(3),
+            connections: None,
+            big_prep: Some(true),
+            big_read: None,
+        };
+        let id = "0".to_string();
+        let resp = tstate.get_resp(q, &name, &id).unwrap();
+        assert_eq!(resp.tree.node.top_cite_count, 0);
+        let mut years: Vec<Option<RawYear>> =
+            POSSIBLE_YEAR_FILTERS.iter().map(|e| Some(*e)).collect();
+        years.insert(0, None);
+        for year in years.into_iter() {
+            let q_read = TreeQ {
+                year,
+                tid: Some(3),
+                connections: None,
+                big_prep: None,
+                big_read: Some(true),
+            };
+            let resp2 = tstate.get_resp(q_read, &name, &id).unwrap();
+            assert_eq!(resp.tree.node.top_cite_count, 0);
+            let q_recalc = TreeQ {
+                year,
+                tid: Some(3),
+                connections: None,
+                big_prep: None,
+                big_read: None,
+            };
+            let id2 = "1".to_string();
+            let resp3 = tstate.get_resp(q_recalc, &name, &id2).unwrap();
+            assert_eq!(resp2.tree.node, resp3.tree.node);
+        }
+    }
+
+    // assert_eq!(r.tree.node.link_count, 1048448); //20 - nano
+    // assert_eq!(r.tree.node.source_count, 65536); //20 - nano
+    // assert_eq!(r.tree.node.top_source, 28260); //20 - nano
+    //
+    // assert_eq!(r.tree.node.link_count, 2097152); //21
+    // assert_eq!(r.tree.node.link_count, 524288); //19
 }

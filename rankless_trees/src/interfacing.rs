@@ -21,6 +21,7 @@ use rankless_rs::{
         derive_links2::{WorkCitingCounts, WorkCountries, WorkTopSource},
     },
     steps::{
+        a1_entity_mapping::YearInterface,
         derive_links1::{CountryInsts, WorkPeriods},
         derive_links5::EraRec,
     },
@@ -307,7 +308,7 @@ impl Getters {
         let wn_locators =
             <Locators<WorksNames, _> as BackendLoading<WorksNames>>::load_backend(&path);
         let ifs = Interfaces::new(stowage.clone());
-        println!("loaded all ifs");
+        println!("loaded full Getters");
         Self {
             ifs,
             wn_locators,
@@ -336,11 +337,14 @@ impl Getters {
         let path = stowage.path_from_ns(WorksNames::NS);
         let wn_locators =
             <Locators<WorksNames, _> as BackendLoading<WorksNames>>::load_backend(&path);
+        let mut ifs = Interfaces::fake();
+        //TODO a hack for testing
+        ifs.year = YearInterface::iter().collect();
 
         Self {
             stowage: Arc::new(stowage),
             wn_locators,
-            ifs: Interfaces::fake(),
+            ifs,
             inst_oa: Vec::new().into(),
             work_oa: (0..20000000).collect::<Vec<BigId>>().into(),
         }

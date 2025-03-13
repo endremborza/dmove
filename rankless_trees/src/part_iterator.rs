@@ -6,19 +6,6 @@ use std::{
     sync::Mutex,
 };
 
-use dmove::{ByteFixArrayInterface, Entity, InitEmpty, UnsignedNumber};
-use hashbrown::hash_map::Entry;
-use rand::Rng;
-use rankless_rs::{
-    agg_tree::{HeapIterator, MinHeap, SortedRecord, Updater},
-    common::{read_buf_path, write_buf_path, NumberedEntity, NET},
-    steps::{
-        a1_entity_mapping::{YearInterface, POSSIBLE_YEAR_FILTERS},
-        derive_links1::WorkPeriods,
-    },
-};
-use tqdm::Iter;
-
 use crate::{
     components::{PartitionId, StackBasis, StackFr},
     instances::{Collapsing, DisJTree, IntXTree, TopTree},
@@ -28,6 +15,16 @@ use crate::{
         TreeResponse, TreeSpec, WT,
     },
     prune::prune,
+};
+use dmove::{para::set_and_notify, ByteFixArrayInterface, Entity, InitEmpty, UnsignedNumber};
+use hashbrown::hash_map::Entry;
+use rankless_rs::{
+    agg_tree::{HeapIterator, MinHeap, SortedRecord, Updater},
+    common::{read_buf_path, write_buf_path, NumberedEntity, NET},
+    steps::{
+        a1_entity_mapping::{YearInterface, POSSIBLE_YEAR_FILTERS},
+        derive_links1::WorkPeriods,
+    },
 };
 
 const MAX_PARTITIONS: usize = 16;
@@ -74,6 +71,13 @@ pub trait PartitioningIterator<'a>:
         IntXTree<Self::Root, CT>: Updater<CT>,
     {
         println!("requested entity: {fq}");
+        if fq.q.big_prep.unwrap_or(false) {
+            Self::write_tmp_parts(state, &fq);
+            println!("setting");
+            set_and_notify(res_cvp, Some(TreeResponse::empty()));
+            println!("wrote tmp {fq}");
+            return;
+        }
         let pruned_path = state.pruned_cache_file(&fq);
         let prog = Progress::from_e(&state.im_cache, &fq);
         //getting one of e(tid) might trigger all others
@@ -96,12 +100,7 @@ pub trait PartitioningIterator<'a>:
             read_buf_path(&pruned_path).expect(&format!("failed reading {pruned_path:?}"));
         let bds = Self::get_spec().breakdowns;
         let resp = TreeResponse::from_pruned(pruned_tree, &fq, &bds, state);
-        {
-            let (lock, cvar) = &*res_cvp;
-            let mut data = lock.lock().unwrap();
-            *data = Some(resp);
-            cvar.notify_all();
-        }
+        set_and_notify(res_cvp, Some(resp));
         println!(
             "{fq}: loaded and sent cache in {}",
             now.elapsed().as_millis()
@@ -118,7 +117,7 @@ pub trait PartitioningIterator<'a>:
         IntXTree<Self::Root, CT>: Updater<CT>,
     {
         let mut pids = Vec::new();
-        let et_id = NET::<Self::Root>::from_usize(fq.ck.eid as usize);
+        let et_id = NET::<Self::Root>::from_usize(fq.ck.eid);
 
         let get_path = |pid: u8| state.full_cache_file_period(&fq, pid);
         let mut check_w = |pid: usize, tree: &BufSerTree| {
@@ -131,9 +130,8 @@ pub trait PartitioningIterator<'a>:
         };
         create_dir_all(get_path(0).parent().unwrap()).unwrap();
 
-        if fq.q.big.unwrap_or(false) {
-            let piter = Self::new(et_id, &state.gets);
-            fill_big_calculate::<Self, CT, SR, _>(piter, &fq, state, check_w);
+        if fq.q.big_read.unwrap_or(false) {
+            read_big_calculate::<Self, CT, SR, _>(&fq, check_w);
         } else {
             let heaps = Self::fill_heaps(&fq, &et_id, state);
 
@@ -171,10 +169,7 @@ pub trait PartitioningIterator<'a>:
                 return;
             }
         };
-        let (lock, cvar) = &*bcvp;
-        let mut data = lock.lock().unwrap();
-        *data = true;
-        cvar.notify_all();
+        set_and_notify(bcvp, true)
     }
 
     fn fold_tree<R>(ser_tree_o: &mut Option<BufSerTree>, part_root: R)
@@ -220,14 +215,39 @@ pub trait PartitioningIterator<'a>:
         //cache pruned response, use it if no connections are requested
         let full_resp = TreeResponse::from_pruned(pruned_tree.clone(), fq, &bds, state);
         if pid == fq.period {
-            let (lock, cvar) = &*res_cvp;
-            let mut data = lock.lock().unwrap();
-            *data = Some(full_resp);
-            cvar.notify_all();
+            set_and_notify(res_cvp, Some(full_resp));
         }
         let resp_path = state.pruned_cache_file_period(fq, pid);
         write_buf_path(pruned_tree, &resp_path).unwrap();
         println!("{fq}: wrote to {:?}", resp_path);
+    }
+
+    fn write_tmp_parts<CT, SR>(state: &'a TreeBasisState, fq: &FullTreeQuery)
+    where
+        Self::StackBasis: StackBasis<TopTree = CT, SortedRec = SR>,
+        SR: SortedRecord,
+        StackFr<Self::StackBasis>: Ord + Clone + ByteFixArrayInterface + GetRefWork,
+        CT: Collapsing + TopTree,
+        DisJTree<Self::Root, CT>: Into<BufSerTree>,
+        IntXTree<Self::Root, CT>: Updater<CT>,
+    {
+        let cache_root = tmp_part_cache_root(fq);
+        let piter = Self::new(NET::<Self::Root>::from_usize(fq.ck.eid), &state.gets);
+        let mut writers: Vec<BufWriter<File>> = YearInterface::iter()
+            .map(|yp| {
+                BufWriter::new(
+                    File::create(cache_root.join(yp.to_string())).expect("create year cache file"),
+                )
+            })
+            .collect();
+        for e in piter {
+            let frec = e.1;
+            let rwid = frec.rwid();
+            let y = state.gets.year(&rwid);
+            writers[*y as usize]
+                .write(&frec.to_fbytes())
+                .expect("writing to cache");
+        }
     }
 }
 
@@ -283,12 +303,8 @@ impl<T1, T2, T3, T4> GetRefWork for (T1, T2, T3, T4, WT, WT) {
     }
 }
 
-fn fill_big_calculate<'a, PI, CT, SR, F1>(
-    piter: PI,
-    fq: &FullTreeQuery,
-    state: &'a TreeBasisState,
-    mut check_w: F1,
-) where
+fn read_big_calculate<'a, PI, CT, SR, F1>(fq: &FullTreeQuery, mut check_w: F1)
+where
     PI: PartitioningIterator<'a>,
     PI::StackBasis: StackBasis<TopTree = CT, SortedRec = SR>,
     SR: SortedRecord,
@@ -298,35 +314,14 @@ fn fill_big_calculate<'a, PI, CT, SR, F1>(
     IntXTree<PI::Root, CT>: Updater<CT>,
     F1: FnMut(usize, &BufSerTree) -> u8,
 {
-    let et_id = NET::<PI::Root>::from_usize(fq.ck.eid as usize);
-    let id: u64 = rand::thread_rng().gen();
-    let cache_root = PathBuf::from_str(&format!("/tmp/dmove-parts/{id}")).expect("making tmp path");
-    create_dir_all(&cache_root).expect("making tmp dir");
-    let mut writers = Vec::new();
-    for yp in YearInterface::iter() {
-        writers.push(BufWriter::new(
-            File::create(cache_root.join(yp.to_string())).expect("create year cache file"),
-        ));
-    }
-    for e in piter.tqdm().desc(Some(format!("part-iter {fq}"))) {
-        let frec = e.1;
-        let rwid = frec.rwid();
-        let y = state.gets.year(&rwid);
-        writers[*y as usize]
-            .write(&frec.to_fbytes())
-            .expect("writing to cache");
-    }
-
+    let et_id = NET::<PI::Root>::from_usize(fq.ck.eid);
+    let cache_root = tmp_part_cache_root(fq);
     let mut buf: [u8; MAX_BUFSIZE] = [0; MAX_BUFSIZE];
     let mut ser_tree_o = None;
     let mut year_bp_iter = POSSIBLE_YEAR_FILTERS.iter().rev();
     let mut next_bp_o = year_bp_iter.next();
     let bufr = &mut buf[..StackFr::<PI::StackBasis>::S];
-    for y in YearInterface::iter()
-        .rev()
-        .tqdm()
-        .desc(Some("reading years"))
-    {
+    for y in YearInterface::iter().rev() {
         let mut reader =
             BufReader::new(File::open(cache_root.join(y.to_string())).expect("reading year cache"));
         let mut year_heap = MinHeap::new();
@@ -354,4 +349,11 @@ fn fill_big_calculate<'a, PI, CT, SR, F1>(
         }
     }
     remove_dir_all(cache_root).expect("removing cache");
+}
+
+fn tmp_part_cache_root(fq: &FullTreeQuery) -> PathBuf {
+    let pstr = format!("/tmp/dmove-parts/{}/{}", fq.name, fq.ck.eid);
+    let cache_root = PathBuf::from_str(&pstr).expect("tmp path");
+    create_dir_all(&cache_root).expect("making tmp dir");
+    cache_root
 }

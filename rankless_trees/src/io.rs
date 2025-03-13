@@ -93,10 +93,11 @@ pub struct TreeQ {
     pub year: Option<u16>,
     pub tid: Option<u8>,
     pub connections: Option<String>,
-    pub big: Option<bool>,
+    pub big_prep: Option<bool>,
+    pub big_read: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CollapsedNodeGen<T> {
     #[serde(rename = "linkCount")]
     pub link_count: u32,
@@ -238,6 +239,22 @@ impl TreeResponse {
         let tree = JsSerTree::from_buf(pruned_tree, &state.gets);
         println!("{fq}: converted in {}", now.elapsed().as_millis());
         Self { tree, atts }
+    }
+
+    pub fn empty() -> Self {
+        //TODO quite hacky
+        Self {
+            tree: JsSerTree {
+                node: CollapsedNodeGen {
+                    link_count: 0,
+                    source_count: 0,
+                    top_source: None,
+                    top_cite_count: 0,
+                },
+                children: JsSerChildren::Leaves(HashMap::new()).into(),
+            },
+            atts: HashMap::new(),
+        }
     }
 }
 
@@ -457,7 +474,7 @@ where
     pub fn fake() -> Arc<Self> {
         let gets = Getters::fake();
         let atts = HashMap::new();
-        let tm = HashMap::from_iter(vec![("0".to_string(), 0)].into_iter());
+        let tm = HashMap::from_iter(vec![("0".to_string(), 0), ("1".to_string(), 1)].into_iter());
         let maps = HashMap::from_iter(vec![("test".to_string(), tm)].into_iter());
         Self::new(Arc::new(gets), atts.into(), maps, 2)
     }
