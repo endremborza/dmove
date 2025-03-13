@@ -120,9 +120,9 @@ pub trait PartitioningIterator<'a>:
         let et_id = NET::<Self::Root>::from_usize(fq.ck.eid);
 
         let get_path = |pid: u8| state.full_cache_file_period(&fq, pid);
-        let mut check_w = |pid: usize, tree: &BufSerTree| {
+        let mut check_w = |pid: usize, tree: &BufSerTree, cvp: Option<ResCvp>| {
             let pid8 = pid as u8;
-            Self::write_resp(&tree, &fq, state, res_cvp.clone(), pid8);
+            Self::write_resp(&tree, &fq, state, cvp, pid8);
             pids.push(pid8);
             // TODO: wrote complete once
             // write_buf_path(&tree, get_path(pid8)).unwrap();
@@ -132,6 +132,7 @@ pub trait PartitioningIterator<'a>:
 
         if fq.q.big_read.unwrap_or(false) {
             read_big_calculate::<Self, CT, SR, _>(&fq, check_w);
+            set_and_notify(res_cvp, Some(TreeResponse::empty()))
         } else {
             let heaps = Self::fill_heaps(&fq, &et_id, state);
 
@@ -153,15 +154,15 @@ pub trait PartitioningIterator<'a>:
             for (pid, part_root) in roots.into_iter().enumerate().rev() {
                 Self::fold_tree(&mut ser_tree_o, part_root);
                 let stref = &ser_tree_o.as_ref().unwrap();
-                check_w(pid, &stref);
+                check_w(pid, &stref, Some(res_cvp.clone()));
             }
             println!(
                 "{fq}: converted, ingested and wrote trees in {}",
                 now.elapsed().as_millis()
             );
         }
-        let mut cache_map = state.im_cache.lock().unwrap();
         let cv = CacheValue::Done(pids);
+        let mut cache_map = state.im_cache.lock().unwrap();
         let bcvp = match cache_map.insert(fq.ck, cv).unwrap() {
             CacheValue::InProgress(cvp) => cvp,
             _ => {
@@ -205,7 +206,7 @@ pub trait PartitioningIterator<'a>:
         full_tree: &BufSerTree,
         fq: &FullTreeQuery,
         state: &'a TreeBasisState,
-        res_cvp: ResCvp,
+        res_cvp_o: Option<ResCvp>,
         pid: u8,
     ) {
         let now = std::time::Instant::now();
@@ -213,9 +214,11 @@ pub trait PartitioningIterator<'a>:
         let pruned_tree = prune(full_tree, &state.att_union, &bds);
         println!("{fq}: pruned in {}", now.elapsed().as_millis());
         //cache pruned response, use it if no connections are requested
-        let full_resp = TreeResponse::from_pruned(pruned_tree.clone(), fq, &bds, state);
-        if pid == fq.period {
-            set_and_notify(res_cvp, Some(full_resp));
+        if let Some(res_cvp) = res_cvp_o {
+            if pid == fq.period {
+                let full_resp = TreeResponse::from_pruned(pruned_tree.clone(), fq, &bds, state);
+                set_and_notify(res_cvp, Some(full_resp));
+            }
         }
         let resp_path = state.pruned_cache_file_period(fq, pid);
         write_buf_path(pruned_tree, &resp_path).unwrap();
@@ -247,6 +250,9 @@ pub trait PartitioningIterator<'a>:
             writers[*y as usize]
                 .write(&frec.to_fbytes())
                 .expect("writing to cache");
+        }
+        for w in writers.iter_mut() {
+            w.flush().expect("writing in full")
         }
     }
 }
@@ -312,7 +318,7 @@ where
     CT: Collapsing + TopTree,
     DisJTree<PI::Root, CT>: Into<BufSerTree>,
     IntXTree<PI::Root, CT>: Updater<CT>,
-    F1: FnMut(usize, &BufSerTree) -> u8,
+    F1: FnMut(usize, &BufSerTree, Option<ResCvp>) -> u8,
 {
     let et_id = NET::<PI::Root>::from_usize(fq.ck.eid);
     let cache_root = tmp_part_cache_root(fq);
@@ -336,12 +342,11 @@ where
             None => println!("nothing in a partition"),
         }
         PI::fold_tree(&mut ser_tree_o, part_root.collapse());
-        let stref = &ser_tree_o.as_ref().unwrap();
         let y16 = YearInterface::reverse(y);
         if let Some(next_bp) = next_bp_o {
             if y16 == *next_bp {
                 let pid = WorkPeriods::from_year(y16);
-                check_w(pid.to_usize(), &stref);
+                check_w(pid.to_usize(), &ser_tree_o.as_ref().unwrap(), None);
                 next_bp_o = year_bp_iter.next();
             }
         } else {
