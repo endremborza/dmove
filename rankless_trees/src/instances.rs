@@ -817,7 +817,7 @@ mod tests {
                     rng.gen(),
                     rng.gen(),
                     rng.gen(),
-                    rng.gen::<u32>() % (Years::N as u32), //TODO: year test hack quickfix
+                    rng.gen::<WhyT>() % (Years::N as WhyT), //TODO: year test hack quickfix
                     rng.gen(),
                 );
                 vec.push(rec);
@@ -934,6 +934,17 @@ mod tests {
         let id = "0".to_string();
         let resp = tstate.get_resp(q, &name, &id).unwrap();
         assert_eq!(resp.tree.node.top_cite_count, 0);
+
+        let q_cache = TreeQ {
+            year: None,
+            tid: Some(3),
+            connections: None,
+            big_prep: None,
+            big_read: Some(true),
+        };
+        let resp = tstate.get_resp(q_cache, &name, &id).unwrap();
+        assert_eq!(resp.tree.node.top_cite_count, 0);
+
         let mut years: Vec<Option<RawYear>> =
             POSSIBLE_YEAR_FILTERS.iter().map(|e| Some(*e)).collect();
         years.insert(0, None);
@@ -943,7 +954,7 @@ mod tests {
                 tid: Some(3),
                 connections: None,
                 big_prep: None,
-                big_read: Some(true),
+                big_read: None,
             };
             let resp2 = tstate.get_resp(q_read, &name, &id).unwrap();
             assert_eq!(resp.tree.node.top_cite_count, 0);
