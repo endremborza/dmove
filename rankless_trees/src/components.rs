@@ -312,7 +312,7 @@ where
     StackFr<Self::SB>: ExtendedWithRefWid,
 {
     type SB: StackBasis;
-    const IS_SPEC: bool = true;
+    const RWB_IS_SPEC: bool = true;
     fn new(ref_wid: &'a WT, gets: &'a Getters) -> Self;
 }
 
@@ -430,7 +430,7 @@ impl<'a> RefWorkBasedIter<'a> for SourceSubfieldCiCoByRef<'a> {
         IntX<Subfields, 1, true>,
         IntX<Countries, 2, false>,
     );
-    const IS_SPEC: bool = false;
+    const RWB_IS_SPEC: bool = false;
     fn new(ref_wid: &'a WT, gets: &'a Getters) -> Self {
         let ref_sfs = gets.wsubfields(*ref_wid).iter().peekable();
         let cit_wids = gets.citing(*ref_wid).iter().peekable();
@@ -559,7 +559,7 @@ impl<'a> RefWorkBasedIter<'a> for SourceWCoiByRef<'a> {
         IntX<Countries, 2, false>,
         IntX<Institutions, 2, false>,
     );
-    const IS_SPEC: bool = false;
+    const RWB_IS_SPEC: bool = false;
     fn new(ref_wid: &'a ET<Works>, gets: &'a Getters) -> Self {
         Self {
             ref_wid,
@@ -1308,7 +1308,7 @@ where
     type Root = E;
     type StackBasis = I::SB;
     const PARTITIONS: usize = N_PERS;
-    const IS_SPEC: bool = I::IS_SPEC;
+    const IS_SPEC: bool = I::RWB_IS_SPEC;
     const DEFAULT_PARTITION: u8 = 3; //2020
     fn new(id: NET<E>, gets: &'a Getters) -> Self {
         let refs_it = E::works_from_ram(&gets, id).iter().peekable();
