@@ -430,6 +430,7 @@ impl<'a> RefWorkBasedIter<'a> for SourceSubfieldCiCoByRef<'a> {
         IntX<Subfields, 1, true>,
         IntX<Countries, 2, false>,
     );
+    const IS_SPEC: bool = false;
     fn new(ref_wid: &'a WT, gets: &'a Getters) -> Self {
         let ref_sfs = gets.wsubfields(*ref_wid).iter().peekable();
         let cit_wids = gets.citing(*ref_wid).iter().peekable();
