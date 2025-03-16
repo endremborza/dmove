@@ -1373,6 +1373,7 @@ impl<'a> PartitioningIterator<'a> for AuthorBestiePapers<'a> {
     );
     type Root = Authors;
     const PARTITIONS: usize = N_PERS;
+    const IS_SPEC: bool = false;
     fn new(id: NET<Self::Root>, gets: &'a Getters) -> Self {
         Self {
             gets,
@@ -1393,6 +1394,7 @@ impl<'a> PartitioningIterator<'a> for AuthorBesties<'a> {
     );
     type Root = Authors;
     const PARTITIONS: usize = N_PERS;
+    const IS_SPEC: bool = false;
     fn new(id: NET<Self::Root>, gets: &'a Getters) -> Self {
         Self {
             gets,
