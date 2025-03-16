@@ -1,3 +1,5 @@
+mod consts;
+
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -9,7 +11,7 @@ use axum::{
 use dmove::{para::set_and_notify, Entity, UnsignedNumber, ET};
 use hashbrown::HashMap;
 use kd_tree::{KdPoint, KdTree};
-use rand::{seq::SliceRandom, Rng};
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::{max, min},
@@ -44,7 +46,6 @@ use rankless_trees::{
 const PORT: u16 = 3038;
 const N_THREADS: usize = 16;
 const UPPER_LIMIT: u32 = u32::MAX;
-// const UPPER_LIMIT: u32 = 100_000;
 const ETYPE_ENC: [&str; 6] = [
     Institutions::NAME,
     Authors::NAME,
@@ -181,6 +182,10 @@ trait PrepFilter {
             & (sr.citations > 2)
             & (sr.citations <= UPPER_LIMIT)
     }
+
+    fn is_top(_sr: &SearchResult) -> bool {
+        true
+    }
 }
 
 macro_rules! i_fil {
@@ -189,7 +194,7 @@ macro_rules! i_fil {
     };
 }
 
-i_fil!(Countries, Subfields, Institutions);
+i_fil!(Countries, Subfields);
 
 impl PrepFilter for Authors {
     fn filter_sr(sr: &SearchResult, _gets: &Getters) -> bool {
@@ -198,6 +203,18 @@ impl PrepFilter for Authors {
             & (sr.papers > 1)
             & (sr.citations > 2)
             & (sr.papers < 1000)
+    }
+
+    fn is_top(sr: &SearchResult) -> bool {
+        consts::FIN_AUTHORS.contains(&sr.semantic_id.as_str())
+    }
+}
+
+impl PrepFilter for Institutions {
+    fn is_top(sr: &SearchResult) -> bool {
+        const FIN_UNIS: [&str; 2] = ["budapesti-corvinus-egyetem", "tse"];
+        let min_citations: u32 = 8_000_000;
+        FIN_UNIS.contains(&sr.semantic_id.as_str()) || sr.citations > min_citations
     }
 }
 
@@ -217,6 +234,10 @@ impl PrepFilter for Sources {
             & (sr.citations > 20)
             & (sr.citations <= UPPER_LIMIT)
             & (best_q <= 2)
+    }
+
+    fn is_top(sr: &SearchResult) -> bool {
+        consts::FIN_SOURCES.contains(&sr.semantic_id.as_str())
     }
 }
 
@@ -505,11 +526,11 @@ macro_rules! multi_route {
                 .route(&format!("/views/{}/:semantic_id", <$T as Entity>::NAME), get(view_get))
                 .with_state({
                     let nstate = ns_map.remove(<$T>::NAME).expect("NState thread panicked");
-                    let entities = top_slice(&nstate.responses);
+                    let entities = nstate.responses.iter().filter(|e| <$T as PrepFilter>::is_top(e)).map(|e| e.clone()).collect();
                     let name = <$T as Entity>::NAME.to_string();
                     let dmid_map = HashMap::from_iter(nstate.semantic_id_map.clone().into_iter().map(|(k, v)| (k, v.dm_id)));
                     sem_maps.insert(name.clone(), dmid_map);
-                    tops.push(TopResult {name,  entities });
+                    tops.push(TopResult {name, entities });
                     descriptions.push(EntityDescription::new::<$T>(nstate.responses.len()));
                     (nstate.into(), satts.clone())
                 })
@@ -632,15 +653,13 @@ async fn tops_get(tops_state: State<Arc<Vec<TopResult>>>) -> Json<Vec<TopResult>
     const TOP_N: usize = 5;
     let out = tops_state
         .iter()
-        .map(|e| {
-            let mut entities = Vec::new();
-            for _ in 0..TOP_N {
-                entities.push(e.entities[rng.gen_range(0..e.entities.len())].clone())
-            }
-            TopResult {
-                name: e.name.clone(),
-                entities,
-            }
+        .map(|e| TopResult {
+            name: e.name.clone(),
+            entities: e
+                .entities
+                .choose_multiple(&mut rng, TOP_N)
+                .map(Clone::clone)
+                .collect(),
         })
         .collect();
     Json(out)

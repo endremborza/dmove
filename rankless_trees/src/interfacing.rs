@@ -19,6 +19,7 @@ use rankless_rs::{
         },
         derive_links1::{WorkInstitutions, WorkSubfields},
         derive_links2::{WorkCitingCounts, WorkCountries, WorkTopSource},
+        derive_links5::SourceStats,
     },
     steps::{
         a1_entity_mapping::YearInterface,
@@ -208,6 +209,7 @@ make_interfaces!(
     year => WorkYears,
     top_source => WorkTopSource,
     wperiod => WorkPeriods,
+    source_stats => SourceStats,
     tsuf => TopicSubfields,
     icountry => InstCountries,
     shipa => AuthorshipAuthor,

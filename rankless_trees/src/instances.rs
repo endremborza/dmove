@@ -693,6 +693,7 @@ pub mod big_test_tree {
             connections: None,
             big_prep: None,
             big_read: None,
+            shallow: None,
         };
 
         let tstate = TreeRunManager::<(BigTestEntity, BigTestEntity)>::fake();
@@ -838,6 +839,7 @@ mod tests {
             connections: None,
             big_prep: None,
             big_read: None,
+            shallow: None,
         }
     }
 
@@ -924,49 +926,31 @@ mod tests {
     pub fn big_parted_tree() {
         let tstate = TreeRunManager::<(TestEntity, TestEntity)>::fake();
         let name = TestEntity::NAME.to_string();
-        let q = TreeQ {
+        let gq = |big_prep: Option<bool>, big_read: Option<bool>| TreeQ {
             year: None,
             tid: Some(3),
             connections: None,
-            big_prep: Some(true),
-            big_read: None,
+            big_prep,
+            big_read,
+            shallow: None,
         };
         let id = "0".to_string();
-        let resp = tstate.get_resp(q, &name, &id).unwrap();
+        let resp = tstate.get_resp(gq(Some(true), None), &name, &id).unwrap();
         assert_eq!(resp.tree.node.top_cite_count, 0);
 
-        let q_cache = TreeQ {
-            year: None,
-            tid: Some(3),
-            connections: None,
-            big_prep: None,
-            big_read: Some(true),
-        };
-        let resp = tstate.get_resp(q_cache, &name, &id).unwrap();
+        let resp = tstate.get_resp(gq(None, Some(true)), &name, &id).unwrap();
         assert_eq!(resp.tree.node.top_cite_count, 0);
 
         let mut years: Vec<Option<RawYear>> =
             POSSIBLE_YEAR_FILTERS.iter().map(|e| Some(*e)).collect();
         years.insert(0, None);
         for year in years.into_iter() {
-            let q_read = TreeQ {
-                year,
-                tid: Some(3),
-                connections: None,
-                big_prep: None,
-                big_read: None,
-            };
-            let resp2 = tstate.get_resp(q_read, &name, &id).unwrap();
+            let mut qy = gq(None, None);
+            qy.year = year;
+            let resp2 = tstate.get_resp(qy.clone(), &name, &id).unwrap();
             assert_eq!(resp.tree.node.top_cite_count, 0);
-            let q_recalc = TreeQ {
-                year,
-                tid: Some(3),
-                connections: None,
-                big_prep: None,
-                big_read: None,
-            };
             let id2 = "1".to_string();
-            let resp3 = tstate.get_resp(q_recalc, &name, &id2).unwrap();
+            let resp3 = tstate.get_resp(qy, &name, &id2).unwrap();
             assert_eq!(resp2.tree.node, resp3.tree.node);
         }
     }

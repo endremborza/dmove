@@ -513,13 +513,13 @@ pub fn field_id_parse(id: &str) -> u64 {
     id.split("/").last().unwrap().parse::<u64>().expect(id)
 }
 
-pub fn get_gz_buf<P>(file_name: P) -> BufReader<GzDecoder<File>>
+pub fn get_gz_buf<P>(file_name: P) -> io::Result<BufReader<GzDecoder<File>>>
 where
     P: AsRef<Path>,
 {
-    let file = File::open(file_name).unwrap();
+    let file = File::open(file_name)?;
     let gz_decoder = GzDecoder::new(file);
-    BufReader::new(gz_decoder)
+    Ok(BufReader::new(gz_decoder))
 }
 
 pub fn get_gz_bufw<P>(file_name: P) -> BufWriter<GzEncoder<File>>
@@ -537,7 +537,8 @@ where
     T: DeserializeOwned,
     P: AsRef<Path>,
 {
-    bincode::deserialize_from(&mut get_gz_buf(fp))
+    let mut buf = get_gz_buf(fp)?;
+    bincode::deserialize_from(&mut buf)
 }
 
 pub fn write_buf_path<T, P>(obj: T, fp: P) -> Result<(), Box<bincode::ErrorKind>>
@@ -548,12 +549,16 @@ where
     bincode::serialize_into(get_gz_bufw(fp), &obj)
 }
 
-pub fn read_json_path<T, P>(fp: P) -> Result<T, serde_json::Error>
+pub fn read_json_path<T, P>(fp: P) -> Result<T, io::Error>
 where
     T: DeserializeOwned,
     P: AsRef<Path>,
 {
-    serde_json::from_reader(&mut get_gz_buf(fp))
+    let mut buf = get_gz_buf(fp)?;
+    match serde_json::from_reader(&mut buf) {
+        Ok(br) => Ok(br),
+        Err(_e) => Err(io::Error::from_raw_os_error(22)),
+    }
 }
 
 pub fn write_json_path<T, P>(obj: T, fp: P) -> Result<(), serde_json::Error>
@@ -590,7 +595,8 @@ fn read_deser_obj<T: DeserializeOwned>(root: &Path, main_path: &str, sub_path: &
             .with_extension("csv.gz")
             .to_str()
             .unwrap(),
-    );
+    )
+    .unwrap();
     let reader = ReaderBuilder::new().from_reader(gz_buf);
     ObjIter::new(reader, main_path, sub_path)
 }

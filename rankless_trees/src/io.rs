@@ -95,6 +95,7 @@ pub struct TreeQ {
     pub connections: Option<String>,
     pub big_prep: Option<bool>,
     pub big_read: Option<bool>,
+    pub shallow: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -126,6 +127,7 @@ pub struct JsSerTree {
 pub struct TreeResponse {
     pub tree: JsSerTree,
     pub atts: AttributeLabels,
+    shallowed: bool,
 }
 
 #[derive(Serialize)]
@@ -230,6 +232,7 @@ impl TreeResponse {
         fq: &FullTreeQuery,
         bds: &Vec<BreakdownSpec>,
         state: &TreeBasisState,
+        shallowed: bool,
     ) -> Self {
         let now = std::time::Instant::now();
         let atts = get_atts(&pruned_tree, &bds, state, fq);
@@ -238,7 +241,11 @@ impl TreeResponse {
         let now = std::time::Instant::now();
         let tree = JsSerTree::from_buf(pruned_tree, &state.gets);
         println!("{fq}: converted in {}", now.elapsed().as_millis());
-        Self { tree, atts }
+        Self {
+            tree,
+            atts,
+            shallowed,
+        }
     }
 
     pub fn empty() -> Self {
@@ -254,6 +261,7 @@ impl TreeResponse {
                 children: JsSerChildren::Leaves(HashMap::new()).into(),
             },
             atts: HashMap::new(),
+            shallowed: false,
         }
     }
 }

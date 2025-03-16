@@ -1,6 +1,7 @@
 use std::{
     fs::{create_dir_all, remove_dir_all, File},
     io::{BufReader, BufWriter, Read, Write},
+    os::linux::fs::MetadataExt,
     path::PathBuf,
     str::FromStr,
     sync::Mutex,
@@ -14,7 +15,7 @@ use crate::{
         BoolCvp, BufSerTree, CacheMap, CacheValue, FullTreeQuery, ResCvp, TreeBasisState,
         TreeResponse, TreeSpec, WT,
     },
-    prune::prune,
+    prune::{cut_tree, prune},
 };
 use dmove::{para::set_and_notify, ByteFixArrayInterface, Entity, InitEmpty, UnsignedNumber};
 use hashbrown::hash_map::Entry;
@@ -29,6 +30,7 @@ use rankless_rs::{
 
 const MAX_PARTITIONS: usize = 16;
 const MAX_BUFSIZE: usize = 512;
+const SHALLOW_LIMIT: u64 = 100_000;
 
 type SrHeap<'a, S> = MinHeap<StackFr<<S as PartitioningIterator<'a>>::StackBasis>>;
 
@@ -96,10 +98,27 @@ pub trait PartitioningIterator<'a>:
         }
 
         let now = std::time::Instant::now();
-        let pruned_tree: BufSerTree =
-            read_buf_path(&pruned_path).expect(&format!("failed reading {pruned_path:?}"));
+        let mut pruned_tree: BufSerTree = match read_buf_path(&pruned_path) {
+            Ok(pt) => pt,
+            Err(_) => {
+                println!("{fq}: failed load");
+                return Self::fill_calculate(fq, state, res_cvp);
+            }
+        };
         let bds = Self::get_spec().breakdowns;
-        let resp = TreeResponse::from_pruned(pruned_tree, &fq, &bds, state);
+        let mut shallowed = false;
+        if let Some(sh_depth) = fq.q.shallow {
+            shallowed = true;
+            if let Ok(md) = std::fs::metadata(pruned_path) {
+                if md.st_size() < SHALLOW_LIMIT {
+                    shallowed = false;
+                }
+            };
+            if shallowed {
+                pruned_tree = cut_tree(&pruned_tree, sh_depth);
+            }
+        }
+        let resp = TreeResponse::from_pruned(pruned_tree, &fq, &bds, state, shallowed);
         set_and_notify(res_cvp, Some(resp));
         println!(
             "{fq}: loaded and sent cache in {}",
@@ -216,7 +235,12 @@ pub trait PartitioningIterator<'a>:
         //cache pruned response, use it if no connections are requested
         if let Some(res_cvp) = res_cvp_o {
             if pid == fq.period {
-                let full_resp = TreeResponse::from_pruned(pruned_tree.clone(), fq, &bds, state);
+                let (resp_base_tree, sh) = if let Some(depth) = fq.q.shallow {
+                    (cut_tree(&pruned_tree, depth), true)
+                } else {
+                    (pruned_tree.clone(), false)
+                };
+                let full_resp = TreeResponse::from_pruned(resp_base_tree, fq, &bds, state, sh);
                 set_and_notify(res_cvp, Some(full_resp));
             }
         }

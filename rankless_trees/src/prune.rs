@@ -18,6 +18,27 @@ pub fn prune(tree: &BufSerTree, astats: &AttributeLabelUnion, bds: &[BreakdownSp
     prune_tree::<MAX_SIBLINGS>(tree, astats, bds, &mut denoms, 0)
 }
 
+pub fn cut_tree(tree: &BufSerTree, depth: u8) -> BufSerTree {
+    let children = if depth == 0 {
+        let leaves = HashMap::from_iter(tree.children.iter_items().map(|(k, v)| (*k, v.clone())));
+        BufSerChildren::Leaves(leaves)
+    } else {
+        match tree.children.as_ref() {
+            BufSerChildren::Nodes(cnodes) => {
+                let nodes = HashMap::<u32, BufSerTree>::from_iter(
+                    cnodes.iter().map(|(k, v)| (*k, cut_tree(v, depth - 1))),
+                );
+                BufSerChildren::Nodes(nodes)
+            }
+            BufSerChildren::Leaves(leaves) => BufSerChildren::Leaves(leaves.clone()),
+        }
+    };
+    BufSerTree {
+        node: tree.node.clone(),
+        children: children.into(),
+    }
+}
+
 fn prune_tree<const SIZE: usize>(
     tree: &BufSerTree,
     astats: &AttributeLabelUnion,
