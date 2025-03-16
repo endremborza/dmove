@@ -125,7 +125,7 @@ impl AddSemId for Institution {
             out.push(base_name[PREF.len()..].to_string())
         }
         if base_name.ends_with(SUFF) {
-            out.push(base_name[base_name.len() - SUFF.len()..].to_string())
+            out.push(base_name[..base_name.len() - SUFF.len()].to_string())
         }
         out.push(
             format!(
