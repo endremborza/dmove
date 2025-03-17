@@ -569,9 +569,13 @@ impl TreeBasisState {
             if rt_cdir.exists() {
                 for eid_entry in std::fs::read_dir(rt_cdir).unwrap() {
                     let eid_path = eid_entry.unwrap().path();
+                    let eid: usize = match fpparse(&eid_path) {
+                        Ok(id) => id,
+                        _ => continue,
+                    };
                     for tid_entry in std::fs::read_dir(&eid_path).unwrap() {
                         let tid_path = tid_entry.unwrap().path();
-                        if let (Ok(eid), Ok(tid)) = (fpparse(&eid_path), fpparse(&tid_path)) {
+                        if let Ok(tid) = fpparse(&tid_path) {
                             let ck = CacheKey { eid, tid, etype };
                             let mut v = Vec::new();
                             for pid_entry in std::fs::read_dir(&tid_path).unwrap() {
