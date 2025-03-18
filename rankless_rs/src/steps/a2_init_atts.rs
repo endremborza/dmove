@@ -873,7 +873,11 @@ fn write_inst_names(stowage: &Stowage) -> LoadedIdMap<NET<Institutions>> {
     stowage
         .read_csv_objs::<Geo>(E::NAME, institutions::atts::geo)
         .for_each(|e| {
-            let iu = interface.0.get(&e.get_parsed_id()).unwrap_or(&0).to_usize();
+            let iu = interface
+                .0
+                .get(&oa_id_parse(&e.parent_id.unwrap()))
+                .unwrap_or(&0)
+                .to_usize();
             if let Some(city) = e.city {
                 cities[iu] = city.clone();
             }
