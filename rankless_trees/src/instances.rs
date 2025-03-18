@@ -818,7 +818,7 @@ mod tests {
                     rng.gen(),
                     rng.gen(),
                     rng.gen(),
-                    rng.gen::<WhyT>() % (Years::N as WhyT), //TODO: year test hack quickfix
+                    rng.gen::<WT>() % (Years::N as WT), //TODO: year test hack quickfix
                     rng.gen(),
                 );
                 vec.push(rec);
