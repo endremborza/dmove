@@ -11,10 +11,10 @@ use merging::{logfound, merge_box_into_sorted_vec, merge_into_sorted_vec};
 use std::cmp::min;
 use std::convert::TryInto;
 use std::fmt::Debug;
-use std::{ops::AddAssign, sync::Arc, usize};
+use std::{ops::AddAssign, usize};
 use tqdm::Iter;
 
-pub type IndType = u32;
+type IndType = u32;
 
 const MAX_HEAP_SIZE: usize = 16;
 
@@ -37,11 +37,19 @@ type PrepTrieL1 = IndOutTrie<Vec<PrepLeaf>>;
 type PrepTrieRoot = IndOutTrie<PrepTrieL1>;
 
 pub struct SearchEngine {
-    tree: Arc<CustomTrie>,
+    tree: CustomTrie,
+}
+
+struct QueryResult {
+    perfect: Vec<IndType>,
+    partial: Vec<IndType>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct WordViaCharr(u32, u16);
+struct WordViaCharr {
+    start_idx: u32,
+    len: u16,
+}
 
 pub struct StackWordSet {
     char_array: [u8; MAX_QUERY_CHARS],
@@ -85,13 +93,51 @@ trait Construct {
 }
 
 trait QueriableLevel {
-    fn query(&self, word: &[u8], char_arr: &[u8]) -> Vec<IndType>;
-    fn query_prefiltered(
+    fn query(&self, word: &[u8], char_arr: &[u8]) -> QueryResult;
+    fn query_prefiltered(&self, word: &[u8], char_arr: &[u8], include: &QueryResult)
+        -> QueryResult;
+    fn query_inners(&self, word: &[u8], char_arr: &[u8]) -> Vec<IndType>;
+    fn query_inners_prefiltered(
         &self,
         word: &[u8],
         char_arr: &[u8],
-        include: &Vec<IndType>,
+        include: &QueryResult,
     ) -> Vec<IndType>;
+}
+
+impl<T> IndOutTrie<T> {
+    fn rel_inds(&self) -> Vec<IndType> {
+        self.out
+            .arr
+            .into_iter()
+            .take_while(|e| *e < IndType::MAX)
+            .collect()
+    }
+
+    fn rel_filt_inds(&self, include: &QueryResult) -> Vec<IndType> {
+        return self
+            .out
+            .arr
+            .into_iter()
+            .filter(|e| logfound(&include.partial, *e) || logfound(&include.perfect, *e))
+            .take_while(|e| *e < IndType::MAX)
+            .collect();
+    }
+}
+
+impl TrieLeaves {
+    fn sides(&self, char_arr: &[u8], word: &[u8]) -> (usize, usize) {
+        let l = log_search(&self.0, |e| e.suffix.under(char_arr, word));
+        let r = log_search(&self.0[l..], |e| e.suffix.not_over(char_arr, word)) + l;
+        (l, r)
+    }
+}
+
+impl Into<Vec<IndType>> for QueryResult {
+    fn into(mut self) -> Vec<IndType> {
+        extend_sorted(&mut self.perfect, self.partial);
+        self.perfect
+    }
 }
 
 impl<T> Construct for Vec<T> {
@@ -117,42 +163,76 @@ impl<T: Construct> Construct for IndOutTrie<T> {
 }
 
 impl<T: QueriableLevel> QueriableLevel for IndOutTrie<T> {
-    fn query(&self, word: &[u8], char_arr: &[u8]) -> Vec<IndType> {
+    fn query(&self, word: &[u8], char_arr: &[u8]) -> QueryResult {
         if word.len() == 0 {
-            return self
-                .out
-                .arr
-                .into_iter()
-                .take_while(|e| *e < IndType::MAX)
-                .collect();
+            let perfect = self.rel_inds();
+            return QueryResult {
+                perfect,
+                partial: Vec::new(),
+            };
         }
         self.children[word[0] as usize].query(&word[1..], char_arr)
+    }
+
+    fn query_inners(&self, word: &[u8], char_arr: &[u8]) -> Vec<IndType> {
+        if word.len() == 0 {
+            return self.rel_inds();
+        }
+        self.children[word[0] as usize].query_inners(&word[1..], char_arr)
     }
 
     fn query_prefiltered(
         &self,
         word: &[u8],
         char_arr: &[u8],
-        include: &Vec<IndType>,
-    ) -> Vec<IndType> {
+        include: &QueryResult,
+    ) -> QueryResult {
         if word.len() == 0 {
-            return self
-                .out
-                .arr
-                .into_iter()
-                .filter(|e| logfound(include, *e))
-                .take_while(|e| *e < IndType::MAX)
-                .collect();
+            return QueryResult {
+                perfect: self.rel_filt_inds(include),
+                partial: Vec::new(),
+            };
         }
         self.children[word[0] as usize].query_prefiltered(&word[1..], char_arr, include)
+    }
+
+    fn query_inners_prefiltered(
+        &self,
+        word: &[u8],
+        char_arr: &[u8],
+        include: &QueryResult,
+    ) -> Vec<IndType> {
+        if word.len() == 0 {
+            return self.rel_filt_inds(include);
+        }
+        self.children[word[0] as usize].query_inners_prefiltered(&word[1..], char_arr, include)
     }
 }
 
 impl QueriableLevel for TrieLeaves {
-    fn query(&self, word: &[u8], char_arr: &[u8]) -> Vec<IndType> {
+    fn query(&self, word: &[u8], char_arr: &[u8]) -> QueryResult {
+        let (l, r) = self.sides(char_arr, word);
+        let unlen = word.len() as u16;
+        let mut perfect = Vec::new();
+        // let mut shorters = Vec::new();
+        let mut partial = Vec::new();
+        for leaf in self.0[l..r].iter() {
+            if unlen == leaf.suffix.len {
+                perfect = leaf.ids.to_vec();
+            } else if unlen > leaf.suffix.len {
+                //TODO: puzzle - how the hell can we end up here?
+                // merge_box_into_sorted_vec(&mut shorters, &leaf.ids);
+            } else {
+                merge_box_into_sorted_vec(&mut partial, &leaf.ids);
+            }
+        }
+        // extend_sorted(&mut shorters, longers);
+        QueryResult { perfect, partial }
+    }
+
+    fn query_inners(&self, word: &[u8], char_arr: &[u8]) -> Vec<IndType> {
+        let (l, r) = self.sides(char_arr, word);
         let mut out = Vec::new();
-        let l = log_search(&self.0, |e| e.suffix.under(char_arr, word));
-        let r = log_search(&self.0[l..], |e| e.suffix.not_over(char_arr, word)) + l;
         for leaf in self.0[l..r].iter() {
             merge_box_into_sorted_vec(&mut out, &leaf.ids);
         }
@@ -163,18 +243,37 @@ impl QueriableLevel for TrieLeaves {
         &self,
         word: &[u8],
         char_arr: &[u8],
-        include: &Vec<IndType>,
-    ) -> Vec<IndType> {
-        let mut out = Vec::new();
-        let l = log_search(&self.0, |e| e.suffix.under(char_arr, word));
-        let r = log_search(&self.0[l..], |e| e.suffix.not_over(char_arr, word)) + l;
+        include: &QueryResult,
+    ) -> QueryResult {
+        let (l, r) = self.sides(char_arr, word);
+        let fifu =
+            |e: &&IndType| logfound(&include.partial, **e) || logfound(&include.perfect, **e);
+        let unlen = word.len() as u16;
+        let mut perfect = Vec::new();
+        let mut partial = Vec::new();
         for leaf in self.0[l..r].iter() {
-            let lids: Vec<IndType> = leaf
-                .ids
-                .iter()
-                .filter(|e| logfound(include, **e))
-                .map(|e| *e)
-                .collect();
+            let lids: Vec<IndType> = leaf.ids.iter().filter(fifu).map(|e| *e).collect();
+            if unlen == leaf.suffix.len {
+                perfect = lids;
+            } else {
+                merge_into_sorted_vec(&mut partial, lids);
+            }
+        }
+        QueryResult { perfect, partial }
+    }
+
+    fn query_inners_prefiltered(
+        &self,
+        word: &[u8],
+        char_arr: &[u8],
+        include: &QueryResult,
+    ) -> Vec<IndType> {
+        let (l, r) = self.sides(char_arr, word);
+        let fifu =
+            |e: &&IndType| logfound(&include.partial, **e) || logfound(&include.perfect, **e);
+        let mut out = Vec::new();
+        for leaf in self.0[l..r].iter() {
+            let lids: Vec<IndType> = leaf.ids.iter().filter(fifu).map(|e| *e).collect();
             merge_into_sorted_vec(&mut out, lids);
         }
         out
@@ -211,7 +310,10 @@ impl PrepTrieRoot {
         let overlap = get_overlap(suffix, last_suff);
         char_array.extend(suffix[overlap..].iter());
         let ln = suffix.len();
-        let suff_by_idx = WordViaCharr((char_array.len() - ln) as u32, ln as u16);
+        let suff_by_idx = WordViaCharr {
+            start_idx: (char_array.len() - ln) as u32,
+            len: ln as u16,
+        };
         let l2_idx = get_i(l2, suff_by_idx);
         let oind = idxed_word.outer_idx as IndType;
         //maybe just check last one?
@@ -244,7 +346,8 @@ impl PrepTrieL1 {
 
 impl WordViaCharr {
     fn cut<'a>(&self, char_arr: &'a [u8]) -> &'a [u8] {
-        &char_arr[self.0 as usize..(self.0 as usize + self.1 as usize)]
+        let su = self.start_idx as usize;
+        &char_arr[su..(su + self.len as usize)]
     }
 
     fn under(&self, char_arr: &[u8], comp: &[u8]) -> bool {
@@ -257,7 +360,7 @@ impl WordViaCharr {
     }
 
     fn cmp_meta(&self, char_arr: &[u8], comp: &[u8], breaker: bool) -> bool {
-        let my_size = self.1 as usize;
+        let my_size = self.len as usize;
         let my_arr = self.cut(char_arr);
         for i in 0..comp.len() {
             if i >= my_size {
@@ -313,35 +416,35 @@ impl CustomTrie {
             let be = sword.break_array[0] as usize;
             let word = &sword.char_array[0..be];
             let mut matches = self.prefix_tree.query(word, &self.char_array);
-            if matches.len() < limit {
-                extend_sorted(&mut matches, self.inner_tree.query(word, &self.char_array));
+            if (matches.perfect.len() + matches.partial.len()) < limit {
+                self.extend_matches(&mut matches, word);
             }
-            matches
+            matches.into()
         } else {
-            let mut out = Vec::new();
-            let mut bs = 0;
-            for i in 0..(min(sword.breaks_count, 3)) {
+            let be = sword.break_array[0] as usize;
+            let word = &sword.char_array[0..be];
+            let mut matches = self.prefix_tree.query(word, &self.char_array);
+            self.extend_matches(&mut matches, word);
+            let mut bs = be;
+            for i in 1..(min(sword.breaks_count, 3)) {
                 let be = sword.break_array[i] as usize;
                 let word = &sword.char_array[bs..be];
-                if i == 0 {
-                    out = self.prefix_tree.query(word, &self.char_array);
-                    let ins = self.inner_tree.query(word, &self.char_array);
-                    merge_into_sorted_vec(&mut out, ins);
-                } else {
-                    let mut prefs =
-                        self.prefix_tree
-                            .query_prefiltered(word, &self.char_array, &out);
-                    let ins = self
-                        .inner_tree
-                        .query_prefiltered(word, &self.char_array, &out);
-                    merge_into_sorted_vec(&mut prefs, ins);
-                    out = prefs;
-                }
-                // println!("w: {:?}", out);
+                let mut prefs =
+                    self.prefix_tree
+                        .query_prefiltered(word, &self.char_array, &matches);
+                let ins =
+                    self.inner_tree
+                        .query_inners_prefiltered(word, &self.char_array, &matches);
+                merge_into_sorted_vec(&mut prefs.partial, ins);
+                matches = prefs;
                 bs = be;
             }
-            out
+            matches.into()
         }
+    }
+    fn extend_matches(&self, matches: &mut QueryResult, word: &[u8]) {
+        let ins = self.inner_tree.query_inners(word, &self.char_array);
+        merge_into_sorted_vec(&mut matches.partial, ins);
     }
 }
 
@@ -633,5 +736,32 @@ mod tests {
         let haystacks = vec!["China", "Chile", "Chad"];
         let engine = SearchEngine::new(haystacks.iter().map(|s| s.to_string()));
         assert_eq!(engine.query("ch")[0], 0);
+    }
+
+    #[test]
+    fn perfect_match() {
+        let mut haystacks: Vec<String> = (0..30).map(|_| "Wes".to_string()).collect();
+        haystacks.push("West".to_string());
+        let engine = SearchEngine::new(haystacks.into_iter());
+        assert_eq!(engine.query("west")[0], 30);
+    }
+
+    #[test]
+    fn lincoln() {
+        //because it assumes to that results for words are all sorted
+        let haystacks = vec![
+            "MIT",
+            "MITb",
+            "MITc",
+            "MIT Lincoln Laboratory",
+            "GlaxoSmithKline",
+            "MITc",
+            "MITc",
+            "MITc",
+            "MITc",
+        ];
+        let engine = SearchEngine::new(haystacks.iter().map(|s| s.to_string()));
+        println!("{:?}", engine.query("mit linc"));
+        assert_eq!(engine.query("mit linc")[0], 3);
     }
 }

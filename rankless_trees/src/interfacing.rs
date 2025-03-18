@@ -163,23 +163,33 @@ macro_rules! make_interfaces {
 
 //TODO/clarity wet pattern
 macro_rules! make_ent_interfaces {
-    ($S:ident, $T:ident, $($f_key:ident => $f_mark:ty),*; $($r_key:ident -> $r_mark:ty),*; $($fix_key:ident - $fix_mark:ty | $fix_t:ty),*; $($float_key:ident : $float_mark:ty),*) => {
+    ($S:ident, $T:ident,
+        $($f_key:ident => $f_mark:ty),*;
+        $($r_key:ident -> $r_mark:ty),*;
+        $($fix_key:ident - $fix_mark:ty | $fix_t:ty),*;
+        $($float_key:ident : $float_mark:ty),*;
+        $($oa_key:ident),*;
+        $($p_trait:ident),*
+
+    ) => {
         pub struct $S<T> where T: $T
         {
             $(pub $f_key: VarBox<String>),*,
             $(pub $r_key: Box<[<T as NumAtt<$r_mark>>::Num]>),*,
             $(pub $fix_key: Box<[<T as FixAtt<$fix_mark>>::FT]>),*
-            $(, pub $float_key: Box<[f64]>)*
+            $(pub $float_key: Box<[f64]>),*
+            $(, pub $oa_key: Box<[u64]>)*
         }
 
-        impl<E> $S<E> where E: $T
+        impl<E> $S<E> where E: $T $(+ $p_trait)*
         {
             pub fn new(stowage: &Stowage) -> Self {
                 Self {
                     $($f_key: <E as StringAtt<$f_mark>>::load(stowage)),*,
                     $($r_key: <E as NumAtt<$r_mark>>::load(stowage)),*,
                     $($fix_key:  <E as FixAtt<$fix_mark>>::load(stowage)),*
-                    $(, $float_key:  <E as FloatAtt<$float_mark>>::load(stowage))*
+                    $($float_key:  <E as FloatAtt<$float_mark>>::load(stowage))*
+                    $(,$oa_key: reverse_id::<E>(stowage))*
                 }
             }
         }
@@ -237,7 +247,8 @@ make_ent_interfaces!(
     top_aff_countries - Top3AffCountryMarker | TopRec<Countries>,
     top_paper_topic - Top3PaperTopicMarker | TopRec<Topics>,
     top_citing_sfc - Top3CitingSfMarker | TopRec<Subfields>,
-    top_paper_sfc - Top3PaperSfMarker | TopRec<Subfields>;
+    top_paper_sfc - Top3PaperSfMarker | TopRec<Subfields>;;
+    oa_id; MainEntity, NamespacedEntity
     // inst_rels - InstRelMarker | [InstRelation; N_RELS];
     // ref_sfc : RefSubfieldsConcentrationMarker,
     // cit_sfc : CitSubfieldsConcentrationMarker
@@ -248,7 +259,7 @@ make_ent_interfaces!(
     NodeInterfaces,
     NodeInterfaceable,
     names => NameMarker;
-    ccounts -> CiteCountMarker;;
+    ccounts -> CiteCountMarker;;;;
 );
 
 pub trait StringAtt<Mark>: MarkedAttribute<Mark> {

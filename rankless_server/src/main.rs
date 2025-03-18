@@ -8,7 +8,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use dmove::{para::set_and_notify, Entity, UnsignedNumber, ET};
+use dmove::{para::set_and_notify, Entity, NamespacedEntity, UnsignedNumber, ET};
 use hashbrown::HashMap;
 use kd_tree::{KdPoint, KdTree};
 use rand::seq::SliceRandom;
@@ -29,7 +29,7 @@ use tower_http::{
 
 use muwo_search::SearchEngine;
 use rankless_rs::{
-    common::NET,
+    common::{MainEntity, NET},
     gen::a1_entity_mapping::{Authors, Countries, Institutions, Sources, Subfields, Topics},
     steps::{
         a1_entity_mapping::{Qs, RawYear, YearInterface, Years},
@@ -112,6 +112,7 @@ struct NameState {
     means: Box<Coords>,
     vars: Box<Coords>,
     pub semantic_id_map: HashMap<String, SemVal>,
+    pub oa_id_map: HashMap<usize, usize>,
     query_tree: KdTree<KDItem>,
 }
 
@@ -381,7 +382,8 @@ impl NameState {
     {
         let responses = Self::get_resps(entif, gets);
         let engine = SearchEngine::new(responses.iter().map(|e| e.full_name.clone()));
-        let mut sem_map = HashMap::new();
+        let mut semantic_id_map = HashMap::new();
+        let mut oa_id_map = HashMap::new();
         let mut kdt_base = Vec::new();
         let (mut means, mut vars) = ([0.0, 0.0], [0.0, 0.0]);
         let float_n = f64::from(responses.len() as u32);
@@ -391,11 +393,14 @@ impl NameState {
                 means[j] += kd_rec[j] / float_n;
             }
             kdt_base.push(kd_rec);
-            sem_map.insert(
+            let dm_id = res.dm_id;
+            let oa_id = entif.oa_id[dm_id as usize];
+            oa_id_map.insert(oa_id.to_usize(), i);
+            semantic_id_map.insert(
                 res.semantic_id.clone(),
                 SemVal {
                     result_id: i,
-                    dm_id: responses[i].dm_id,
+                    dm_id,
                 },
             );
         }
@@ -420,7 +425,8 @@ impl NameState {
             exts: ResultExtension::from_resps(&responses, entif),
             prep_exts: PreAttResultExtension::from_resps(&responses, entif),
             responses,
-            semantic_id_map: sem_map.into(),
+            semantic_id_map,
+            oa_id_map,
             query_tree,
             means: means.into(),
             vars: vars.into(),
@@ -524,6 +530,7 @@ macro_rules! multi_route {
                 //TODO - this can be done outside a macro if the hashmap is done
                 .route(&format!("/slice/{}/:from/:to", <$T as Entity>::NAME), get(slice_get))
                 .route(&format!("/views/{}/:semantic_id", <$T as Entity>::NAME), get(view_get))
+                .route(&format!("/sem-id-via-oa/{}/:oa_id", <$T as Entity>::NAME), get(sem_id_get))
                 .with_state({
                     let nstate = ns_map.remove(<$T>::NAME).expect("NState thread panicked");
                     let entities = nstate.responses.iter().filter(|e| <$T as PrepFilter>::is_top(e)).map(|e| e.clone()).collect();
@@ -549,7 +556,7 @@ fn add_thread<E>(
     cv_pair: &Arc<(Mutex<Option<f64>>, Condvar)>,
     ei_ns_map: &mut HashMap<&'static str, JoinHandle<NameState>>,
 ) where
-    E: RootInterfaceable + PrepFilter,
+    E: RootInterfaceable + PrepFilter + MainEntity + NamespacedEntity,
 {
     let gets_clone = Arc::clone(gets);
     let au_clone = Arc::clone(atts);
@@ -701,6 +708,21 @@ async fn view_get(
     Json(out)
 }
 
+async fn sem_id_get(
+    Path(oa_id): Path<usize>,
+    states: State<(Arc<NameState>, Arc<AttributeLabelUnion>)>,
+) -> Json<[Option<String>; 1]> {
+    let nstate = states.0 .0;
+    let out = match nstate.oa_id_map.get(&oa_id) {
+        Some(e) => {
+            let s = nstate.responses[*e].semantic_id.clone();
+            Some(s)
+        }
+        None => None,
+    };
+    Json([out])
+}
+
 async fn name_get(
     q: Query<BasicQ>,
     states: State<(Arc<NameState>, Arc<AttributeLabelUnion>)>,
@@ -741,12 +763,6 @@ fn get_query_arr(res: &SearchResult, state: &NameState) -> [f64; 2] {
         rec[i] /= state.vars[i].sqrt();
     }
     rec
-}
-
-fn top_slice<T: Clone>(v: &Box<[T]>) -> Vec<T> {
-    let ve = max(max(200, v.len() / 10), 10000);
-    let end = min(ve, v.len());
-    return v[..end].to_vec();
 }
 
 fn static_router<O: Serialize>(o: &O) -> Router {
