@@ -136,11 +136,7 @@ make_interface_struct!(CDBackends,
 
 trait IRelAdder: Entity {
     fn get_by_work(wu: usize, bends: &CDBackends, _id: ET<Self>) -> Vec<IT> {
-        let mut o = Vec::new();
-        for iid in bends.winsts.get(&wu).unwrap() {
-            o.push(*iid);
-        }
-        o
+        bends.winsts.get(&wu).unwrap().to_vec()
     }
 }
 
