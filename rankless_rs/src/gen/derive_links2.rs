@@ -50,7 +50,7 @@ impl Link for SubfieldWorks { type Source = crate::gen::a1_entity_mapping::Subfi
 
 impl MarkedAttribute<crate::common::MainWorkMarker> for crate::gen::a1_entity_mapping::Subfields { type AttributeEntity = SubfieldWorks; }
 
-impl Entity for InstitutionWorks { type T = Box<[u32]>; const N: usize = 20967; const NAME: & str = "institution-works"; }
+impl Entity for InstitutionWorks { type T = Box<[u32]>; const N: usize = 29650; const NAME: & str = "institution-works"; }
 
 impl MappableEntity for InstitutionWorks { type KeyType = usize; }
 

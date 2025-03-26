@@ -40,7 +40,7 @@ impl MappableEntity for Topics { type KeyType = u64; }
 
 impl NamespacedEntity for Topics { const NS: & str = "a1_entity_mapping"; }
 
-impl Entity for Institutions { type T = u16; const N: usize = 20966; const NAME: & str = "institutions"; }
+impl Entity for Institutions { type T = u16; const N: usize = 29649; const NAME: & str = "institutions"; }
 
 impl MappableEntity for Institutions { type KeyType = u64; }
 
