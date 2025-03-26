@@ -108,8 +108,6 @@ pub struct Author {
     // display_name_alternatives: Option<String>,
     works_count: Option<u32>,
     cited_by_count: Option<u32>,
-    #[serde(default, deserialize_with = "deserialize_hash_field")]
-    last_known_institution: Option<String>,
     updated_date: Option<String>,
 }
 
