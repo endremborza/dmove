@@ -22,7 +22,7 @@ impl NamespacedEntity for SourcesWorkCount { const NS: & str = "derive_links3"; 
 
 impl MarkedAttribute<crate::common::WorkCountMarker> for crate::gen::a1_entity_mapping::Sources { type AttributeEntity = SourcesWorkCount; }
 
-impl Entity for InstitutionsWorkCount { type T = u32; const N: usize = 20967; const NAME: & str = "institutions-work-count"; }
+impl Entity for InstitutionsWorkCount { type T = u32; const N: usize = 29650; const NAME: & str = "institutions-work-count"; }
 
 impl MappableEntity for InstitutionsWorkCount { type KeyType = usize; }
 

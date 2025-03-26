@@ -138,7 +138,7 @@ impl NamespacedEntity for SubfieldsNames { const NS: & str = "a2_init_atts"; }
 
 impl MarkedAttribute<crate::common::NameMarker> for crate::gen::a1_entity_mapping::Subfields { type AttributeEntity = SubfieldsNames; }
 
-impl Entity for InstitutionsNames { type T = String; const N: usize = 20967; const NAME: & str = "institutions-names"; }
+impl Entity for InstitutionsNames { type T = String; const N: usize = 29650; const NAME: & str = "institutions-names"; }
 
 impl MappableEntity for InstitutionsNames { type KeyType = usize; }
 
@@ -178,7 +178,7 @@ impl NamespacedEntity for TopicsNames { const NS: & str = "a2_init_atts"; }
 
 impl MarkedAttribute<crate::common::NameMarker> for crate::gen::a1_entity_mapping::Topics { type AttributeEntity = TopicsNames; }
 
-impl Entity for InstitutionsNameExts { type T = String; const N: usize = 20967; const NAME: & str = "institutions-name-exts"; }
+impl Entity for InstitutionsNameExts { type T = String; const N: usize = 29650; const NAME: & str = "institutions-name-exts"; }
 
 impl MappableEntity for InstitutionsNameExts { type KeyType = usize; }
 
@@ -234,7 +234,7 @@ impl MappableEntity for SourceYearQs { type KeyType = (u16, u8); }
 
 impl NamespacedEntity for SourceYearQs { const NS: & str = "a2_init_atts"; }
 
-impl Entity for InstCountries { type T = u8; const N: usize = 20967; const NAME: & str = "inst-countries"; }
+impl Entity for InstCountries { type T = u8; const N: usize = 29650; const NAME: & str = "inst-countries"; }
 
 impl MappableEntity for InstCountries { type KeyType = usize; }
 
